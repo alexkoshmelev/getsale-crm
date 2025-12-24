@@ -1,0 +1,335 @@
+services:
+  # ==================== Infrastructure ====================
+  
+  postgres:
+    image: postgres:15-alpine
+    container_name: getsale-postgres
+    environment:
+      POSTGRES_USER: getsale
+      POSTGRES_PASSWORD: getsale_dev
+      POSTGRES_DB: getsale_crm
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U getsale"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - getsale-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: getsale-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - getsale-network
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: getsale-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: getsale
+      RABBITMQ_DEFAULT_PASS: getsale_dev
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - getsale-network
+
+  mongodb:
+    image: mongo:7
+    container_name: getsale-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: getsale
+      MONGO_INITDB_ROOT_PASSWORD: getsale_dev
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - getsale-network
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: getsale-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - getsale-network
+
+  # ==================== Monitoring ====================
+  
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: getsale-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - getsale-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: getsale-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    networks:
+      - getsale-network
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: getsale-jaeger
+    ports:
+      - "16686:16686" # UI
+      - "14268:14268" # HTTP collector
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+    networks:
+      - getsale-network
+
+  # ==================== Services ====================
+  
+  api-gateway:
+    build:
+      context: .
+      dockerfile: ./services/api-gateway/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/api-gateway
+    container_name: getsale-api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - NODE_ENV=development
+      - PORT=8000
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - CRM_SERVICE_URL=http://crm-service:3002
+      - MESSAGING_SERVICE_URL=http://messaging-service:3003
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/api-gateway/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: ./services/auth-service/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/auth-service
+    container_name: getsale-auth-service
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - DATABASE_URL=postgresql://getsale:getsale_dev@postgres:5432/getsale_crm
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - JWT_SECRET=dev_jwt_secret_change_in_production
+      - JWT_REFRESH_SECRET=dev_refresh_secret_change_in_production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/auth-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  crm-service:
+    build:
+      context: .
+      dockerfile: ./services/crm-service/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/crm-service
+    container_name: getsale-crm-service
+    environment:
+      - NODE_ENV=development
+      - PORT=3002
+      - DATABASE_URL=postgresql://getsale:getsale_dev@postgres:5432/getsale_crm
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/crm-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  messaging-service:
+    build:
+      context: .
+      dockerfile: ./services/messaging-service/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/messaging-service
+    container_name: getsale-messaging-service
+    environment:
+      - NODE_ENV=development
+      - PORT=3003
+      - DATABASE_URL=postgresql://getsale:getsale_dev@postgres:5432/getsale_crm
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - WEBSOCKET_SERVICE_URL=http://websocket-service:3004
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/messaging-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  websocket-service:
+    build:
+      context: .
+      dockerfile: ./services/websocket-service/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/websocket-service
+    container_name: getsale-websocket-service
+    ports:
+      - "3004:3004"
+    environment:
+      - NODE_ENV=development
+      - PORT=3004
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/websocket-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  ai-service:
+    build:
+      context: .
+      dockerfile: ./services/ai-service/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/ai-service
+    container_name: getsale-ai-service
+    environment:
+      - NODE_ENV=development
+      - PORT=3005
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/ai-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  mongodb_data:
+  elasticsearch_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  getsale-network:
+    driver: bridge
+

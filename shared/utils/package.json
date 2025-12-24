@@ -1,0 +1,20 @@
+{
+  "name": "@getsale/utils",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.3",
+    "ioredis": "^5.3.2",
+    "@getsale/events": "*"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.4",
+    "typescript": "^5.3.0"
+  }
+}
+
