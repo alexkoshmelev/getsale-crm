@@ -32,8 +32,12 @@ const rabbitmq = new RabbitMQClient(
 );
 
 (async () => {
-  await rabbitmq.connect();
-  await subscribeToEvents();
+  try {
+    await rabbitmq.connect();
+    await subscribeToEvents();
+  } catch (error) {
+    console.error('Failed to connect to RabbitMQ, service will continue without event subscription:', error);
+  }
 })();
 
 // Subscribe to events and broadcast via WebSocket

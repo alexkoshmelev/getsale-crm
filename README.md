@@ -7,19 +7,18 @@
 ### Микросервисы
 
 1. **api-gateway** - Единая точка входа, маршрутизация, rate limiting
-2. **auth-service** - Identity & Access Management (JWT, MFA, RBAC)
-3. **organization-service** - Управление организациями и компаниями
-4. **bidi-service** - Управление BiDi (внутренние/внешние/AI агенты)
+2. **auth-service** - Identity & Access Management (JWT, MFA, RBAC, OAuth)
+3. **user-service** - Управление профилями, подписки, биллинг (Stripe), команды
+4. **bd-accounts-service** - Управление BD аккаунтами (Telegram GramJS), подключение, покупка
 5. **crm-service** - CRM Core (Contacts, Companies, Deals)
-6. **pipeline-service** - Управление pipeline и стадиями
-7. **messaging-service** - Unified messaging (Telegram, Email, Inbox)
-8. **campaign-service** - Cold Outreach Engine (Campaigns, Sequences)
-9. **trigger-service** - Trigger & Automation Engine
-10. **ai-service** - AI Agents System (Draft generation, suggestions)
-11. **analytics-service** - Analytics и отчеты
-12. **billing-service** - Billing & Monetization
-13. **notification-service** - Уведомления
-14. **websocket-service** - Real-time WebSocket соединения
+6. **pipeline-service** - Управление воронкой продаж, стадиями, история переходов
+7. **messaging-service** - Unified messaging (Telegram GramJS, Email, LinkedIn, Twitter)
+8. **automation-service** - Автоматизация переходов, триггеры, правила
+9. **analytics-service** - Метрики конверсии, аналитика воронки, отчеты
+10. **team-service** - Управление командами, распределение клиентов, права доступа
+11. **websocket-service** - Real-time WebSocket соединения
+12. **ai-service** - AI Agents System (Draft generation, suggestions)
+13. **campaign-service** - Cold Outreach Engine (TODO)
 
 ### Инфраструктура
 
@@ -39,16 +38,29 @@
 # Установить зависимости
 npm install
 
-# Запустить все сервисы
+# Запустить все сервисы (включая фронтенд)
 make dev
 # или
 docker-compose up -d
 
 # Просмотр логов
 make dev-logs
+
+# Фронтенд будет доступен на http://localhost:3000
+# API Gateway на http://localhost:8000
 ```
 
 Подробнее: [QUICKSTART.md](QUICKSTART.md)
+
+### Тестирование
+
+```bash
+# Проверить health checks всех сервисов
+bash scripts/test-services.sh
+
+# Протестировать базовые API endpoints
+bash scripts/test-api.sh
+```
 
 ### Продакшн (Kubernetes)
 
@@ -61,6 +73,31 @@ make k8s-apply
 ```
 
 Подробнее: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+
+## 📚 Документация
+
+- [Архитектура системы](docs/ARCHITECTURE.md) - Общая архитектура
+- [BD CRM Архитектура](docs/BD_CRM_ARCHITECTURE.md) - Детальная архитектура согласно промпту
+- [План тестирования](docs/TESTING_PLAN.md) - Чеклист для тестирования
+- [Пошаговое тестирование](docs/STEP_BY_STEP_TESTING.md) - Детальное руководство по тестированию
+- [План разработки](docs/DEVELOPMENT_ROADMAP.md) - Roadmap разработки
+- [Следующие шаги](docs/NEXT_STEPS.md) - Приоритетные задачи
+- [Развертывание](docs/DEPLOYMENT.md) - Руководство по развертыванию
+- [Быстрый старт](QUICKSTART.md) - Быстрый старт для разработчиков
+- [Frontend README](frontend/README.md) - Документация фронтенда
+
+## 🧪 Тестирование
+
+```bash
+# Проверить health checks
+bash scripts/test-services.sh
+
+# Протестировать API
+bash scripts/test-api.sh
+
+# Протестировать события
+bash scripts/test-events.sh
+```
 
 ## 📁 Структура проекта
 

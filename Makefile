@@ -1,4 +1,4 @@
-.PHONY: help dev dev-logs dev-down dev-clean build test lint typecheck
+.PHONY: help dev dev-logs dev-down dev-clean build test lint typecheck test-services test-api test-events frontend-dev
 
 help: ## Показать справку
 	@echo "Доступные команды:"
@@ -31,6 +31,18 @@ typecheck: ## Проверить типы TypeScript
 install: ## Установить зависимости
 	npm install
 
+test-services: ## Проверить health checks всех сервисов
+	@bash scripts/test-services.sh
+
+test-api: ## Протестировать базовые API endpoints
+	@bash scripts/test-api.sh
+
+test-events: ## Протестировать event-driven коммуникацию
+	@bash scripts/test-events.sh
+
+frontend-dev: ## Запустить фронтенд локально (без Docker)
+	cd frontend && npm install && npm run dev
+
 k8s-apply: ## Применить все Kubernetes манифесты
 	kubectl apply -f k8s/
 
@@ -39,4 +51,3 @@ k8s-delete: ## Удалить все Kubernetes ресурсы
 
 k8s-logs: ## Показать логи всех подов
 	kubectl logs -f -l app -n getsale-crm
-

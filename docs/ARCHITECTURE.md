@@ -9,23 +9,25 @@
 ### Микросервисы
 
 1. **API Gateway** - Единая точка входа, маршрутизация, аутентификация, rate limiting
-2. **Auth Service** - Управление пользователями, организациями, JWT, MFA
-3. **CRM Service** - Управление контактами, компаниями, сделками
-4. **Messaging Service** - Unified messaging (Telegram, Email)
-5. **WebSocket Service** - Real-time обновления через WebSocket
-6. **AI Service** - Генерация AI drafts, предложения
-7. **Campaign Service** - Cold outreach campaigns (TODO)
-8. **Pipeline Service** - Управление pipeline и стадиями (TODO)
-9. **Trigger Service** - Automation engine (TODO)
-10. **Analytics Service** - Аналитика и отчеты (TODO)
-11. **Billing Service** - Биллинг и подписки (TODO)
+2. **Auth Service** - Управление пользователями, организациями, JWT, MFA, OAuth
+3. **User Service** - Управление профилями, подписки, биллинг (Stripe), команды
+4. **BD Accounts Service** - Управление BD аккаунтами (Telegram GramJS), подключение, покупка/аренда
+5. **CRM Service** - Управление контактами, компаниями, сделками
+6. **Pipeline Service** - Управление воронкой продаж, стадиями, история переходов
+7. **Messaging Service** - Unified messaging (Telegram GramJS, Email, LinkedIn, Twitter)
+8. **Automation Service** - Автоматизация переходов по стадиям, триггеры, правила
+9. **Analytics Service** - Метрики конверсии, аналитика воронки, отчеты по командам
+10. **Team Service** - Управление командами, распределение клиентов, права доступа
+11. **WebSocket Service** - Real-time обновления через WebSocket
+12. **AI Service** - Генерация AI drafts, предложения
+13. **Campaign Service** - Cold outreach campaigns (TODO)
 
 ### Инфраструктура
 
-- **PostgreSQL** - Основная БД для всех сервисов
-- **Redis** - Кеш, сессии, pub/sub для WebSocket
+- **PostgreSQL** - Основная БД для всех сервисов (пользователи, клиенты, сделки, команды)
+- **MongoDB** - Документное хранилище для сообщений и логов
+- **Redis** - Кеш, сессии, pub/sub для WebSocket, rate limiting
 - **RabbitMQ** - Message queue для event-driven коммуникации
-- **MongoDB** - Документное хранилище (опционально)
 - **Elasticsearch** - Поиск и логирование
 - **Prometheus** - Метрики
 - **Grafana** - Визуализация метрик
@@ -37,14 +39,34 @@
 
 ### Основные события:
 
-- `user.created` - Создан новый пользователь
-- `message.received` - Получено сообщение
-- `message.sent` - Отправлено сообщение
-- `deal.stage.changed` - Изменена стадия сделки
-- `ai.draft.generated` - Сгенерирован AI draft
-- `ai.draft.approved` - Одобрен AI draft
-- `contact.created` - Создан контакт
-- `campaign.started` - Запущена кампания
+**User & Auth:**
+- `user.created`, `user.updated`, `user.logged_in`
+- `subscription.created`, `subscription.updated`, `subscription.cancelled`
+
+**BD Accounts:**
+- `bd_account.connected`, `bd_account.disconnected`, `bd_account.purchased`
+- `bidi.assigned`, `bidi.unassigned`
+
+**CRM & Pipeline:**
+- `contact.created`, `contact.updated`
+- `deal.created`, `deal.updated`, `deal.stage.changed`, `deal.closed`
+- `stage.created`, `stage.updated`
+
+**Messaging:**
+- `message.received`, `message.sent`, `message.read`
+
+**Automation:**
+- `automation.rule.created`, `automation.rule.triggered`
+- `trigger.executed`
+
+**Team:**
+- `team.created`, `team.member.added`, `team.member.removed`
+
+**AI:**
+- `ai.draft.generated`, `ai.draft.approved`, `ai.draft.rejected`, `ai.draft.sent`
+
+**Analytics:**
+- `metric.recorded`
 
 ### Паттерны:
 

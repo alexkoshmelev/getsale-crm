@@ -48,10 +48,11 @@ services:
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping && rabbitmq-diagnostics -q check_port_connectivity"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     networks:
       - getsale-network
 
@@ -155,6 +156,13 @@ services:
       - AUTH_SERVICE_URL=http://auth-service:3001
       - CRM_SERVICE_URL=http://crm-service:3002
       - MESSAGING_SERVICE_URL=http://messaging-service:3003
+      - AI_SERVICE_URL=http://ai-service:3005
+      - USER_SERVICE_URL=http://user-service:3006
+      - BD_ACCOUNTS_SERVICE_URL=http://bd-accounts-service:3007
+      - PIPELINE_SERVICE_URL=http://pipeline-service:3008
+      - AUTOMATION_SERVICE_URL=http://automation-service:3009
+      - ANALYTICS_SERVICE_URL=http://analytics-service:3010
+      - TEAM_SERVICE_URL=http://team-service:3011
     depends_on:
       redis:
         condition: service_healthy
@@ -320,6 +328,210 @@ services:
     networks:
       - getsale-network
 
+  user-service:
+    build:
+      context: .
+      dockerfile: ./services/user-service/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/user-service
+    container_name: getsale-user-service
+    environment:
+      - NODE_ENV=development
+      - PORT=3006
+      - DATABASE_URL=postgresql://getsale:getsale_dev@postgres:5432/getsale_crm
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/user-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  bd-accounts-service:
+    build:
+      context: .
+      dockerfile: ./services/bd-accounts-service/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/bd-accounts-service
+    container_name: getsale-bd-accounts-service
+    environment:
+      - NODE_ENV=development
+      - PORT=3007
+      - DATABASE_URL=postgresql://getsale:getsale_dev@postgres:5432/getsale_crm
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/bd-accounts-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  pipeline-service:
+    build:
+      context: .
+      dockerfile: ./services/pipeline-service/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/pipeline-service
+    container_name: getsale-pipeline-service
+    environment:
+      - NODE_ENV=development
+      - PORT=3008
+      - DATABASE_URL=postgresql://getsale:getsale_dev@postgres:5432/getsale_crm
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/pipeline-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  automation-service:
+    build:
+      context: .
+      dockerfile: ./services/automation-service/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/automation-service
+    container_name: getsale-automation-service
+    environment:
+      - NODE_ENV=development
+      - PORT=3009
+      - DATABASE_URL=postgresql://getsale:getsale_dev@postgres:5432/getsale_crm
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - PIPELINE_SERVICE_URL=http://pipeline-service:3008
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/automation-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  analytics-service:
+    build:
+      context: .
+      dockerfile: ./services/analytics-service/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/analytics-service
+    container_name: getsale-analytics-service
+    environment:
+      - NODE_ENV=development
+      - PORT=3010
+      - DATABASE_URL=postgresql://getsale:getsale_dev@postgres:5432/getsale_crm
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/analytics-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  team-service:
+    build:
+      context: .
+      dockerfile: ./services/team-service/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/team-service
+    container_name: getsale-team-service
+    environment:
+      - NODE_ENV=development
+      - PORT=3011
+      - DATABASE_URL=postgresql://getsale:getsale_dev@postgres:5432/getsale_crm
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/team-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  # ==================== Frontend ====================
+  
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: getsale-frontend
+    ports:
+      - "5173:3000"
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:3004
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - api-gateway
+    networks:
+      - getsale-network
+
 volumes:
   postgres_data:
   redis_data:
@@ -332,4 +544,3 @@ volumes:
 networks:
   getsale-network:
     driver: bridge
-

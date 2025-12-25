@@ -23,7 +23,11 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
 }
 
 (async () => {
-  await rabbitmq.connect();
+  try {
+    await rabbitmq.connect();
+  } catch (error) {
+    console.error('Failed to connect to RabbitMQ, service will continue without event publishing:', error);
+  }
   await initDatabase();
   if (telegramBot) {
     await initTelegramBot();

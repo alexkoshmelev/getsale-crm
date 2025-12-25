@@ -1,0 +1,42 @@
+FROM node:18-alpine
+
+ARG SERVICE_PATH=services/analytics-service
+
+WORKDIR /app
+
+# Copy root package files for workspaces
+COPY package*.json ./
+
+# Copy shared packages
+COPY shared/ ./shared/
+
+# Copy service package.json
+COPY ${SERVICE_PATH}/package*.json ./${SERVICE_PATH}/
+
+# Install all dependencies (workspaces will resolve local packages)
+RUN npm install
+
+# Build shared packages in correct order (types -> events -> utils)
+RUN npm run build --workspace=shared/types && \
+    npm run build --workspace=shared/events && \
+    npm run build --workspace=shared/utils
+
+# Copy service source code
+COPY ${SERVICE_PATH}/ ./${SERVICE_PATH}/
+
+# Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Set working directory to service
+WORKDIR /app/${SERVICE_PATH}
+
+# Expose port
+EXPOSE 3010
+
+# Use entrypoint to build shared packages before running
+ENTRYPOINT ["docker-entrypoint.sh"]
+
+# Run in development mode
+CMD ["npm", "run", "dev"]
+

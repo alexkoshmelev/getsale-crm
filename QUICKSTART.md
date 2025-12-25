@@ -13,7 +13,7 @@ npm install
 ### 2. Запустить инфраструктуру
 
 ```bash
-# Запустить все сервисы в Docker
+# Запустить все сервисы в Docker (включая фронтенд)
 make dev
 # или
 docker-compose up -d
@@ -27,12 +27,25 @@ docker-compose ps
 
 # Просмотр логов
 make dev-logs
+
+# Логи конкретного сервиса
+docker-compose logs -f api-gateway
 ```
 
-### 4. Создать первого пользователя
+### 4. Открыть приложение
+
+- **Frontend**: http://localhost:3000
+- **API Gateway**: http://localhost:8000
+- **RabbitMQ Management**: http://localhost:15672 (getsale/getsale_dev)
+- **Grafana**: http://localhost:3000 (admin/admin) - конфликт с фронтендом, измените порт
+- **Prometheus**: http://localhost:9090
+- **Jaeger**: http://localhost:16686
+
+### 5. Создать первого пользователя
+
+Откройте http://localhost:3000 и зарегистрируйтесь через UI, или используйте API:
 
 ```bash
-# Sign up через API
 curl -X POST http://localhost:8000/api/auth/signup \
   -H "Content-Type: application/json" \
   -d '{
@@ -42,38 +55,38 @@ curl -X POST http://localhost:8000/api/auth/signup \
   }'
 ```
 
-### 5. Использовать API
+### 6. Тестирование
 
 ```bash
-# Получить access token из ответа signup
-TOKEN="your_access_token"
+# Проверить health checks
+bash scripts/test-services.sh
 
-# Создать компанию
-curl -X POST http://localhost:8000/api/crm/companies \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Acme Corp",
-    "industry": "Technology",
-    "size": "50-100"
-  }'
+# Протестировать API
+bash scripts/test-api.sh
 ```
 
 ## 📊 Доступ к сервисам
 
+- **Frontend**: http://localhost:3000
 - **API Gateway**: http://localhost:8000
 - **RabbitMQ Management**: http://localhost:15672
   - Username: `getsale`
   - Password: `getsale_dev`
-- **Grafana**: http://localhost:3000
-  - Username: `admin`
-  - Password: `admin`
+- **Grafana**: http://localhost:3000 (измените порт в docker-compose.yml)
 - **Prometheus**: http://localhost:9090
 - **Jaeger**: http://localhost:16686
 
-## 🔧 Разработка сервиса
+## 🔧 Разработка
 
-### Добавить новый endpoint
+### Фронтенд
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+### Backend сервис
 
 1. Отредактировать файл в `services/<service-name>/src/index.ts`
 2. Изменения применятся автоматически (hot reload)
@@ -81,41 +94,43 @@ curl -X POST http://localhost:8000/api/crm/companies \
 ### Добавить новый сервис
 
 1. Создать директорию `services/new-service/`
-2. Добавить в `docker-compose.yml`:
-
-```yaml
-new-service:
-  build:
-    context: ./services/new-service
-    dockerfile: Dockerfile.dev
-  environment:
-    - PORT=3006
-  depends_on:
-    - postgres
-    - redis
-    - rabbitmq
-```
-
+2. Добавить в `docker-compose.yml`
 3. Перезапустить: `docker-compose up -d`
 
 ## 🧪 Тестирование
 
+### Health Checks
+
 ```bash
-# Запустить все тесты
-make test
+# Все сервисы
+bash scripts/test-services.sh
 
-# Проверить типы
-make typecheck
+# Вручную
+curl http://localhost:8000/health
+curl http://localhost:3001/health
+# и т.д.
+```
 
-# Линтинг
-make lint
+### API Endpoints
+
+```bash
+# Базовое тестирование
+bash scripts/test-api.sh
+
+# Вручную
+TOKEN="your_token"
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/crm/companies
 ```
 
 ## 🐛 Отладка
 
-### Просмотр логов конкретного сервиса
+### Просмотр логов
 
 ```bash
+# Все сервисы
+docker-compose logs -f
+
+# Конкретный сервис
 docker-compose logs -f api-gateway
 docker-compose logs -f auth-service
 ```
@@ -132,7 +147,7 @@ docker-compose exec postgres psql -U getsale -d getsale_crm
 docker-compose exec redis redis-cli
 ```
 
-### Подключиться к RabbitMQ
+### Проверить RabbitMQ
 
 ```bash
 # Через веб-интерфейс: http://localhost:15672
@@ -142,11 +157,12 @@ docker-compose exec rabbitmq rabbitmqctl list_queues
 
 ## 📝 Следующие шаги
 
-1. Настроить переменные окружения (`.env`)
-2. Настроить Telegram бота (TELEGRAM_BOT_TOKEN)
-3. Настроить OpenAI API (OPENAI_API_KEY)
-4. Изучить архитектуру: `docs/ARCHITECTURE.md`
-5. Развернуть в продакшн: `docs/DEPLOYMENT.md`
+1. ✅ Все сервисы запущены
+2. ⏳ Протестировать API endpoints
+3. ⏳ Создать данные через UI
+4. ⏳ Проверить event-driven коммуникацию
+5. ⏳ Протестировать WebSocket
+6. ⏳ Доработать недостающий функционал
 
 ## ❓ Проблемы?
 
@@ -181,3 +197,14 @@ docker-compose build --no-cache
 docker-compose exec api-gateway npm install
 ```
 
+### Фронтенд не запускается
+
+```bash
+# Проверить порт 3000
+lsof -i :3000
+
+# Запустить локально
+cd frontend
+npm install
+npm run dev
+```

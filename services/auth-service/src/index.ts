@@ -26,7 +26,11 @@ const rabbitmq = new RabbitMQClient(
 
 // Initialize
 (async () => {
-  await rabbitmq.connect();
+  try {
+    await rabbitmq.connect();
+  } catch (error) {
+    console.error('Failed to connect to RabbitMQ, service will continue without event publishing:', error);
+  }
   await initDatabase();
 })();
 

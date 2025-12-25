@@ -1,9 +1,11 @@
 import amqp from 'amqplib';
-import type { Connection, Channel } from 'amqplib';
 import { Event, EventType } from '@getsale/events';
 
+type Connection = Awaited<ReturnType<typeof amqp.connect>>;
+type Channel = Awaited<ReturnType<Connection['createChannel']>>;
+
 export class RabbitMQClient {
-  private connection: Awaited<ReturnType<typeof amqp.connect>> | null = null;
+  private connection: Connection | null = null;
   private channel: Channel | null = null;
   private url: string;
 
@@ -11,28 +13,43 @@ export class RabbitMQClient {
     this.url = url;
   }
 
-  async connect(): Promise<void> {
-    try {
-      const conn = await amqp.connect(this.url);
-      this.connection = conn;
-      this.channel = await conn.createChannel();
-      
-      this.connection.on('error', (err) => {
-        console.error('RabbitMQ connection error:', err);
-      });
+  async connect(retries: number = 10, initialDelay: number = 1000): Promise<void> {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const conn = await amqp.connect(this.url, {
+          heartbeat: 60,
+          connection_timeout: 10000,
+        });
+        this.connection = conn;
+        this.channel = await conn.createChannel();
+        
+        this.connection.on('error', (err) => {
+          console.error('RabbitMQ connection error:', err);
+        });
 
-      this.connection.on('close', () => {
-        console.log('RabbitMQ connection closed');
-      });
-    } catch (error) {
-      console.error('Failed to connect to RabbitMQ:', error);
-      throw error;
+        this.connection.on('close', () => {
+          console.log('RabbitMQ connection closed');
+        });
+
+        console.log('Successfully connected to RabbitMQ');
+        return;
+      } catch (error: any) {
+        if (attempt === retries) {
+          console.error(`Failed to connect to RabbitMQ after ${retries} attempts:`, error);
+          throw error;
+        }
+        // Exponential backoff: delay increases with each attempt
+        const delay = initialDelay * Math.pow(2, attempt - 1);
+        console.log(`RabbitMQ connection attempt ${attempt}/${retries} failed, retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
     }
   }
 
   async publishEvent(event: Event, exchange: string = 'events'): Promise<void> {
     if (!this.channel) {
-      throw new Error('RabbitMQ channel not initialized');
+      console.warn('RabbitMQ channel not initialized, event not published:', event.type);
+      return;
     }
 
     await this.channel.assertExchange(exchange, 'topic', { durable: true });
