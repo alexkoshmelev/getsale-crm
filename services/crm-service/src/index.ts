@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3002;
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://getsale:getsale_dev@localhost:5432/getsale_crm',
+  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
 });
 
 const rabbitmq = new RabbitMQClient(
@@ -21,62 +21,7 @@ const rabbitmq = new RabbitMQClient(
   } catch (error) {
     console.error('Failed to connect to RabbitMQ, service will continue without event publishing:', error);
   }
-  await initDatabase();
 })();
-
-async function initDatabase() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS companies (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      organization_id UUID NOT NULL,
-      name VARCHAR(255) NOT NULL,
-      industry VARCHAR(100),
-      size VARCHAR(50),
-      description TEXT,
-      goals JSONB,
-      policies JSONB,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS contacts (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      organization_id UUID NOT NULL,
-      company_id UUID REFERENCES companies(id),
-      first_name VARCHAR(255) NOT NULL,
-      last_name VARCHAR(255),
-      email VARCHAR(255),
-      phone VARCHAR(50),
-      telegram_id VARCHAR(100),
-      consent_flags JSONB DEFAULT '{"email": false, "sms": false, "telegram": false, "marketing": false}',
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS deals (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      organization_id UUID NOT NULL,
-      company_id UUID NOT NULL REFERENCES companies(id),
-      contact_id UUID REFERENCES contacts(id),
-      pipeline_id UUID NOT NULL,
-      stage_id UUID NOT NULL,
-      owner_id UUID NOT NULL,
-      title VARCHAR(255) NOT NULL,
-      value NUMERIC,
-      currency VARCHAR(10),
-      history JSONB DEFAULT '[]',
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_companies_org ON companies(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_contacts_org ON contacts(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
-    CREATE INDEX IF NOT EXISTS idx_deals_org ON deals(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_deals_company ON deals(company_id);
-    CREATE INDEX IF NOT EXISTS idx_deals_owner ON deals(owner_id);
-  `);
-}
 
 // Middleware to extract user from headers
 function getUser(req: express.Request) {

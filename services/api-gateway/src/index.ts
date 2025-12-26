@@ -21,8 +21,28 @@ const AUTOMATION_SERVICE = process.env.AUTOMATION_SERVICE_URL || 'http://localho
 const ANALYTICS_SERVICE = process.env.ANALYTICS_SERVICE_URL || 'http://localhost:3010';
 const TEAM_SERVICE = process.env.TEAM_SERVICE_URL || 'http://localhost:3011';
 
-// Middleware
-app.use(express.json());
+// CORS middleware for API Gateway
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// Don't parse JSON for proxied requests - let http-proxy-middleware handle it
+// Only parse JSON for non-proxied routes (like /health)
+app.use((req, res, next) => {
+  // Skip JSON parsing for API routes that will be proxied
+  if (req.path.startsWith('/api/')) {
+    return next();
+  }
+  express.json()(req, res, next);
+});
 
 // Health check
 app.get('/health', (req, res) => {
@@ -32,11 +52,22 @@ app.get('/health', (req, res) => {
 // Auth middleware
 async function authenticate(req: express.Request, res: express.Response, next: express.NextFunction) {
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token) {
+    const authHeader = req.headers.authorization;
+    console.log(`[API Gateway] Auth check for ${req.method} ${req.url}`);
+    console.log(`[API Gateway] Authorization header: ${authHeader ? 'present' : 'missing'}`);
+    
+    if (!authHeader) {
+      console.log(`[API Gateway] ❌ No authorization header`);
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
+    const token = authHeader.replace('Bearer ', '');
+    if (!token) {
+      console.log(`[API Gateway] ❌ No token in authorization header`);
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    console.log(`[API Gateway] Verifying token with auth service...`);
     // Verify token with auth service
     const response = await fetch(`${AUTH_SERVICE}/api/auth/verify`, {
       method: 'POST',
@@ -45,13 +76,26 @@ async function authenticate(req: express.Request, res: express.Response, next: e
     });
 
     if (!response.ok) {
+      console.log(`[API Gateway] ❌ Token verification failed: ${response.status} ${response.statusText}`);
       return res.status(401).json({ error: 'Invalid token' });
     }
 
-    const user = await response.json();
+    const userData = await response.json();
+    console.log(`[API Gateway] ✅ Token verified, user data:`, JSON.stringify(userData));
+    
+    // Map user data to expected format
+    const user = {
+      id: userData.id,
+      email: userData.email,
+      organizationId: userData.organization_id || userData.organizationId,
+      role: userData.role,
+    };
+    
+    console.log(`[API Gateway] Mapped user:`, JSON.stringify(user));
     (req as any).user = user;
     next();
-  } catch (error) {
+  } catch (error: any) {
+    console.error(`[API Gateway] ❌ Authentication error:`, error.message);
     res.status(500).json({ error: 'Authentication failed' });
   }
 }
@@ -86,6 +130,38 @@ const authProxy = createProxyMiddleware({
   target: AUTH_SERVICE,
   changeOrigin: true,
   pathRewrite: { '^/api/auth': '/api/auth' },
+  logLevel: 'debug',
+  timeout: 30000, // 30 seconds timeout
+  proxyTimeout: 30000,
+  onProxyReq: (proxyReq, req) => {
+    console.log(`[API Gateway] Proxying ${req.method} ${req.url} to ${AUTH_SERVICE}${req.url}`);
+    console.log(`[API Gateway] Request headers:`, JSON.stringify(req.headers, null, 2));
+    
+    // Body will be streamed automatically by http-proxy-middleware
+    // Don't try to access req.body here as it may not be parsed yet
+    
+    // Set timeout for the request
+    proxyReq.setTimeout(30000, () => {
+      console.error(`[API Gateway] Request timeout for ${req.url}`);
+    });
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    console.log(`[API Gateway] ✅ Response from ${AUTH_SERVICE}${req.url}: ${proxyRes.statusCode} ${proxyRes.statusMessage}`);
+    console.log(`[API Gateway] Response headers:`, JSON.stringify(proxyRes.headers, null, 2));
+    
+    // Ensure CORS headers are set
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  },
+  onError: (err, req, res) => {
+    console.error(`[API Gateway] ❌ Proxy error for ${req.url}:`, err.message);
+    console.error(`[API Gateway] Error details:`, err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Service unavailable', details: err.message });
+    } else {
+      console.error(`[API Gateway] Response already sent, cannot send error response`);
+    }
+  },
 });
 
 const crmProxy = createProxyMiddleware({
@@ -94,10 +170,15 @@ const crmProxy = createProxyMiddleware({
   pathRewrite: { '^/api/crm': '/api/crm' },
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;
-    if (user) {
+    if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
     }
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    // Ensure CORS headers are set
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   },
 });
 
@@ -107,10 +188,14 @@ const messagingProxy = createProxyMiddleware({
   pathRewrite: { '^/api/messaging': '/api/messaging' },
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;
-    if (user) {
+    if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
     }
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   },
 });
 
@@ -120,10 +205,14 @@ const aiProxy = createProxyMiddleware({
   pathRewrite: { '^/api/ai': '/api/ai' },
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;
-    if (user) {
+    if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
     }
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   },
 });
 
@@ -141,10 +230,18 @@ const userProxy = createProxyMiddleware({
   pathRewrite: { '^/api/users': '/api/users' },
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;
-    if (user) {
+    console.log(`[API Gateway] User proxy - user:`, user);
+    if (user && user.id && user.organizationId) {
+      console.log(`[API Gateway] Setting headers - X-User-Id: ${user.id}, X-Organization-Id: ${user.organizationId}`);
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
+    } else {
+      console.error(`[API Gateway] ❌ User not found in request for ${req.url}`);
     }
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   },
 });
 
@@ -154,10 +251,14 @@ const bdAccountsProxy = createProxyMiddleware({
   pathRewrite: { '^/api/bd-accounts': '/api/bd-accounts' },
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;
-    if (user) {
+    if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
     }
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   },
 });
 
@@ -167,10 +268,14 @@ const pipelineProxy = createProxyMiddleware({
   pathRewrite: { '^/api/pipeline': '/api/pipeline' },
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;
-    if (user) {
+    if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
     }
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   },
 });
 
@@ -180,10 +285,14 @@ const automationProxy = createProxyMiddleware({
   pathRewrite: { '^/api/automation': '/api/automation' },
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;
-    if (user) {
+    if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
     }
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   },
 });
 
@@ -193,10 +302,14 @@ const analyticsProxy = createProxyMiddleware({
   pathRewrite: { '^/api/analytics': '/api/analytics' },
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;
-    if (user) {
+    if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
     }
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   },
 });
 
@@ -206,10 +319,14 @@ const teamProxy = createProxyMiddleware({
   pathRewrite: { '^/api/team': '/api/team' },
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;
-    if (user) {
+    if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
     }
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   },
 });
 

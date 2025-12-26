@@ -111,19 +111,35 @@ export const useAuthStore = create<AuthState>()(
     {
       name: 'auth-storage',
       storage: createJSONStorage(() => (typeof window !== 'undefined' ? localStorage : undefined as any)),
+      // Restore isAuthenticated when state is rehydrated from storage
+      onRehydrateStorage: () => (state) => {
+        if (state && state.accessToken && state.user) {
+          state.isAuthenticated = true;
+          if (typeof window !== 'undefined') {
+            axios.defaults.headers.common['Authorization'] = `Bearer ${state.accessToken}`;
+          }
+        }
+      },
     }
   )
 );
 
 // Initialize axios interceptor (only on client side)
 if (typeof window !== 'undefined') {
-  // Set initial token if exists
+  // Set initial token if exists and restore authentication state
   const authStorage = localStorage.getItem('auth-storage');
   if (authStorage) {
     try {
       const auth = JSON.parse(authStorage);
-      if (auth.state?.accessToken) {
+      if (auth.state?.accessToken && auth.state?.user) {
         axios.defaults.headers.common['Authorization'] = `Bearer ${auth.state.accessToken}`;
+        // Restore authentication state
+        useAuthStore.setState({
+          isAuthenticated: true,
+          accessToken: auth.state.accessToken,
+          refreshToken: auth.state.refreshToken,
+          user: auth.state.user,
+        });
       }
     } catch (error) {
       console.error('Error parsing auth storage:', error);

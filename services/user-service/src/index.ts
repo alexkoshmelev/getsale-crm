@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3006;
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://getsale:getsale_dev@localhost:5432/getsale_crm',
+  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
 });
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
@@ -25,83 +25,22 @@ const rabbitmq = new RabbitMQClient(
   } catch (error) {
     console.error('Failed to connect to RabbitMQ, service will continue without event publishing:', error);
   }
-  await initDatabase();
 })();
 
-async function initDatabase() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS user_profiles (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id UUID NOT NULL UNIQUE,
-      organization_id UUID NOT NULL,
-      first_name VARCHAR(255),
-      last_name VARCHAR(255),
-      avatar_url VARCHAR(500),
-      timezone VARCHAR(50),
-      preferences JSONB DEFAULT '{}',
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS subscriptions (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id UUID NOT NULL,
-      organization_id UUID NOT NULL,
-      stripe_customer_id VARCHAR(255),
-      stripe_subscription_id VARCHAR(255),
-      plan VARCHAR(50) NOT NULL DEFAULT 'free',
-      status VARCHAR(50) NOT NULL DEFAULT 'active',
-      current_period_start TIMESTAMP,
-      current_period_end TIMESTAMP,
-      cancel_at_period_end BOOLEAN DEFAULT false,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS teams (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      organization_id UUID NOT NULL,
-      name VARCHAR(255) NOT NULL,
-      created_by UUID NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS team_members (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      user_id UUID NOT NULL,
-      role VARCHAR(50) NOT NULL DEFAULT 'member',
-      invited_by UUID,
-      joined_at TIMESTAMP DEFAULT NOW(),
-      UNIQUE(team_id, user_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS team_invitations (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      email VARCHAR(255) NOT NULL,
-      role VARCHAR(50) NOT NULL DEFAULT 'member',
-      invited_by UUID NOT NULL,
-      token VARCHAR(255) UNIQUE NOT NULL,
-      expires_at TIMESTAMP NOT NULL,
-      accepted_at TIMESTAMP,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_user_profiles_user ON user_profiles(user_id);
-    CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);
-    CREATE INDEX IF NOT EXISTS idx_subscriptions_org ON subscriptions(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_teams_org ON teams(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_team_members_team ON team_members(team_id);
-    CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id);
-  `);
-}
-
 function getUser(req: express.Request) {
+  const userId = req.headers['x-user-id'] as string;
+  const organizationId = req.headers['x-organization-id'] as string;
+  
+  console.log(`[User Service] Headers - X-User-Id: ${userId}, X-Organization-Id: ${organizationId}`);
+  console.log(`[User Service] All headers:`, JSON.stringify(req.headers, null, 2));
+  
+  if (!userId || !organizationId) {
+    throw new Error('Missing user identification headers');
+  }
+  
   return {
-    id: req.headers['x-user-id'] as string,
-    organizationId: req.headers['x-organization-id'] as string,
+    id: userId,
+    organizationId: organizationId,
   };
 }
 
@@ -115,13 +54,21 @@ app.get('/health', (req, res) => {
 app.get('/api/users/profile', async (req, res) => {
   try {
     const user = getUser(req);
-    const result = await pool.query(
+    let result = await pool.query(
       'SELECT * FROM user_profiles WHERE user_id = $1',
       [user.id]
     );
 
+    // If profile doesn't exist, create a default one
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Profile not found' });
+      console.log(`Creating default profile for user ${user.id}`);
+      const insertResult = await pool.query(
+        `INSERT INTO user_profiles (user_id, organization_id, first_name, last_name, preferences)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [user.id, user.organizationId, null, null, JSON.stringify({})]
+      );
+      result = insertResult;
     }
 
     res.json(result.rows[0]);

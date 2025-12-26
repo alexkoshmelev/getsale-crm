@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3009;
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://getsale:getsale_dev@localhost:5432/getsale_crm',
+  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
 });
 
 const rabbitmq = new RabbitMQClient(
@@ -22,40 +22,8 @@ const rabbitmq = new RabbitMQClient(
   } catch (error) {
     console.error('Failed to connect to RabbitMQ, service will continue without event subscription:', error);
   }
-  await initDatabase();
   startCronJobs();
 })();
-
-async function initDatabase() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS automation_rules (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      organization_id UUID NOT NULL,
-      name VARCHAR(255) NOT NULL,
-      trigger_type VARCHAR(50) NOT NULL,
-      trigger_config JSONB NOT NULL,
-      conditions JSONB DEFAULT '[]',
-      actions JSONB NOT NULL,
-      enabled BOOLEAN DEFAULT true,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS automation_executions (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      rule_id UUID NOT NULL REFERENCES automation_rules(id) ON DELETE CASCADE,
-      client_id UUID,
-      deal_id UUID,
-      status VARCHAR(50) NOT NULL,
-      result JSONB,
-      executed_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_automation_rules_org ON automation_rules(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_automation_rules_enabled ON automation_rules(enabled) WHERE enabled = true;
-    CREATE INDEX IF NOT EXISTS idx_automation_executions_rule ON automation_executions(rule_id);
-  `);
-}
 
 async function subscribeToEvents() {
   await rabbitmq.subscribeToEvents(
@@ -73,14 +41,20 @@ async function processEvent(event: any) {
     // Get enabled rules for this event type
     const rules = await pool.query(
       `SELECT * FROM automation_rules 
-       WHERE enabled = true 
+       WHERE is_active = true 
        AND trigger_type = $1 
        AND organization_id = $2`,
       [event.type, event.organizationId]
     );
 
     for (const rule of rules.rows) {
-      const conditions = rule.conditions || [];
+      // Parse JSONB fields if they come as strings
+      const triggerConditions = typeof rule.trigger_conditions === 'string' 
+        ? JSON.parse(rule.trigger_conditions) 
+        : rule.trigger_conditions;
+      const conditions = typeof rule.conditions === 'string'
+        ? JSON.parse(rule.conditions)
+        : (rule.conditions || []);
       let shouldExecute = true;
 
       // Check conditions
@@ -212,12 +186,15 @@ function startCronJobs() {
     try {
       const rules = await pool.query(
         `SELECT * FROM automation_rules 
-         WHERE enabled = true 
+         WHERE is_active = true 
          AND trigger_type = 'time_elapsed'`
       );
 
       for (const rule of rules.rows) {
-        const { elapsed_hours, stage } = rule.trigger_config;
+        const triggerConditions = typeof rule.trigger_conditions === 'string' 
+          ? JSON.parse(rule.trigger_conditions) 
+          : rule.trigger_conditions;
+        const { elapsed_hours, stage } = triggerConditions;
         const cutoffTime = new Date(Date.now() - elapsed_hours * 60 * 60 * 1000);
 
         // Find clients in the stage for longer than elapsed_hours
@@ -273,19 +250,18 @@ app.get('/api/automation/rules', async (req, res) => {
 app.post('/api/automation/rules', async (req, res) => {
   try {
     const user = getUser(req);
-    const { name, triggerType, triggerConfig, conditions, actions, enabled } = req.body;
+    const { name, triggerType, triggerConfig, conditions, actions, is_active } = req.body;
 
     const result = await pool.query(
-      `INSERT INTO automation_rules (organization_id, name, trigger_type, trigger_config, conditions, actions, enabled)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      `INSERT INTO automation_rules (organization_id, name, trigger_type, trigger_conditions, actions, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
       [
         user.organizationId,
         name,
         triggerType,
-        JSON.stringify(triggerConfig),
-        JSON.stringify(conditions || []),
+        JSON.stringify(triggerConfig || {}),
         JSON.stringify(actions),
-        enabled !== false,
+        is_active !== false,
       ]
     );
 

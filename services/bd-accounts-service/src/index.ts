@@ -9,7 +9,7 @@ const app = express();
 const PORT = process.env.PORT || 3007;
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://getsale:getsale_dev@localhost:5432/getsale_crm',
+  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
 });
 
 const rabbitmq = new RabbitMQClient(
@@ -22,43 +22,7 @@ const rabbitmq = new RabbitMQClient(
   } catch (error) {
     console.error('Failed to connect to RabbitMQ, service will continue without event publishing:', error);
   }
-  await initDatabase();
 })();
-
-async function initDatabase() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS bd_accounts (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      organization_id UUID NOT NULL,
-      user_id UUID NOT NULL,
-      platform VARCHAR(50) NOT NULL,
-      account_type VARCHAR(50) NOT NULL DEFAULT 'owned',
-      phone_number VARCHAR(50),
-      api_id INTEGER,
-      api_hash VARCHAR(255),
-      session_string TEXT,
-      status VARCHAR(50) NOT NULL DEFAULT 'disconnected',
-      limits JSONB DEFAULT '{"messages_per_day": 0, "messages_per_hour": 0}',
-      metadata JSONB DEFAULT '{}',
-      purchased_at TIMESTAMP,
-      expires_at TIMESTAMP,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS bd_account_status (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      bd_account_id UUID NOT NULL REFERENCES bd_accounts(id) ON DELETE CASCADE,
-      status VARCHAR(50) NOT NULL,
-      message TEXT,
-      checked_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_bd_accounts_org ON bd_accounts(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_bd_accounts_user ON bd_accounts(user_id);
-    CREATE INDEX IF NOT EXISTS idx_bd_accounts_status ON bd_accounts(status);
-  `);
-}
 
 function getUser(req: express.Request) {
   return {

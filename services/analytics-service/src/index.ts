@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3010;
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://getsale:getsale_dev@localhost:5432/getsale_crm',
+  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
 });
 
 const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6379');
@@ -23,38 +23,7 @@ const rabbitmq = new RabbitMQClient(
   } catch (error) {
     console.error('Failed to connect to RabbitMQ, service will continue without event subscription:', error);
   }
-  await initDatabase();
 })();
-
-async function initDatabase() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS analytics_metrics (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      organization_id UUID NOT NULL,
-      metric_type VARCHAR(100) NOT NULL,
-      metric_name VARCHAR(255) NOT NULL,
-      value NUMERIC NOT NULL,
-      dimensions JSONB DEFAULT '{}',
-      recorded_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS conversion_rates (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      organization_id UUID NOT NULL,
-      from_stage VARCHAR(100),
-      to_stage VARCHAR(100),
-      rate NUMERIC NOT NULL,
-      period_start TIMESTAMP NOT NULL,
-      period_end TIMESTAMP NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_analytics_metrics_org ON analytics_metrics(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_analytics_metrics_type ON analytics_metrics(metric_type);
-    CREATE INDEX IF NOT EXISTS idx_analytics_metrics_date ON analytics_metrics(recorded_at);
-    CREATE INDEX IF NOT EXISTS idx_conversion_rates_org ON conversion_rates(organization_id);
-  `);
-}
 
 async function subscribeToEvents() {
   await rabbitmq.subscribeToEvents(
@@ -128,38 +97,52 @@ app.get('/api/analytics/conversion-rates', async (req, res) => {
     const user = getUser(req);
     const { fromStage, toStage, startDate, endDate } = req.query;
 
+    // Use CTE to calculate time differences first, then aggregate
     let query = `
-      SELECT 
-        from_stage,
-        to_stage,
-        COUNT(*) as transitions,
-        AVG(EXTRACT(EPOCH FROM (moved_at - LAG(moved_at) OVER (PARTITION BY client_id ORDER BY moved_at)))) / 3600 as avg_hours
-      FROM stage_history
-      WHERE organization_id = $1
+      WITH stage_transitions AS (
+        SELECT 
+          sh.*,
+          fs.name as from_stage,
+          ts.name as to_stage,
+          LAG(sh.moved_at) OVER (PARTITION BY sh.client_id ORDER BY sh.moved_at) as prev_moved_at
+        FROM stage_history sh
+        LEFT JOIN stages fs ON sh.from_stage_id = fs.id
+        LEFT JOIN stages ts ON sh.to_stage_id = ts.id
+        WHERE ts.organization_id = $1
     `;
     const params: any[] = [user.organizationId];
 
     if (fromStage) {
-      query += ` AND from_stage = $${params.length + 1}`;
+      query += ` AND fs.name = $${params.length + 1}`;
       params.push(fromStage);
     }
 
     if (toStage) {
-      query += ` AND to_stage = $${params.length + 1}`;
+      query += ` AND ts.name = $${params.length + 1}`;
       params.push(toStage);
     }
 
     if (startDate) {
-      query += ` AND moved_at >= $${params.length + 1}`;
+      query += ` AND sh.moved_at >= $${params.length + 1}`;
       params.push(startDate);
     }
 
     if (endDate) {
-      query += ` AND moved_at <= $${params.length + 1}`;
+      query += ` AND sh.moved_at <= $${params.length + 1}`;
       params.push(endDate);
     }
 
-    query += ' GROUP BY from_stage, to_stage';
+    query += `
+      )
+      SELECT 
+        from_stage,
+        to_stage,
+        COUNT(*) as transitions,
+        AVG(EXTRACT(EPOCH FROM (moved_at - prev_moved_at))) / 3600 as avg_hours
+      FROM stage_transitions
+      WHERE prev_moved_at IS NOT NULL
+      GROUP BY from_stage, to_stage
+    `;
 
     const result = await pool.query(query, params);
     res.json(result.rows);

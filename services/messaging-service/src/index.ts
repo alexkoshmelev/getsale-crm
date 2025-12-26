@@ -9,7 +9,7 @@ const app = express();
 const PORT = process.env.PORT || 3003;
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://getsale:getsale_dev@localhost:5432/getsale_crm',
+  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
 });
 
 const rabbitmq = new RabbitMQClient(
@@ -28,36 +28,10 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
   } catch (error) {
     console.error('Failed to connect to RabbitMQ, service will continue without event publishing:', error);
   }
-  await initDatabase();
   if (telegramBot) {
     await initTelegramBot();
   }
 })();
-
-async function initDatabase() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS messages (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      organization_id UUID NOT NULL,
-      channel VARCHAR(50) NOT NULL,
-      channel_id VARCHAR(255) NOT NULL,
-      contact_id UUID,
-      direction VARCHAR(20) NOT NULL,
-      content TEXT NOT NULL,
-      status VARCHAR(20) NOT NULL DEFAULT 'sent',
-      unread BOOLEAN DEFAULT true,
-      owner_id UUID,
-      metadata JSONB,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_messages_org ON messages(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_contact ON messages(contact_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel, channel_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(organization_id, unread) WHERE unread = true;
-  `);
-}
 
 async function initTelegramBot() {
   if (!telegramBot) return;

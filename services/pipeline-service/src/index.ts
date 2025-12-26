@@ -7,7 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 3008;
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://getsale:getsale_dev@localhost:5432/getsale_crm',
+  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
 });
 
 const rabbitmq = new RabbitMQClient(
@@ -20,55 +20,7 @@ const rabbitmq = new RabbitMQClient(
   } catch (error) {
     console.error('Failed to connect to RabbitMQ, service will continue without event publishing:', error);
   }
-  await initDatabase();
 })();
-
-async function initDatabase() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS pipelines (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      organization_id UUID NOT NULL,
-      name VARCHAR(255) NOT NULL,
-      description TEXT,
-      is_default BOOLEAN DEFAULT false,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS stages (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      pipeline_id UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
-      organization_id UUID NOT NULL,
-      name VARCHAR(100) NOT NULL,
-      order_index INTEGER NOT NULL,
-      color VARCHAR(20),
-      automation_rules JSONB DEFAULT '[]',
-      entry_rules JSONB DEFAULT '[]',
-      exit_rules JSONB DEFAULT '[]',
-      allowed_actions JSONB DEFAULT '[]',
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS stage_history (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      client_id UUID NOT NULL,
-      deal_id UUID,
-      from_stage_id UUID REFERENCES stages(id),
-      to_stage_id UUID NOT NULL REFERENCES stages(id),
-      moved_by UUID,
-      moved_at TIMESTAMP DEFAULT NOW(),
-      auto_moved BOOLEAN DEFAULT false,
-      reason TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_pipelines_org ON pipelines(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_stages_pipeline ON stages(pipeline_id);
-    CREATE INDEX IF NOT EXISTS idx_stages_org ON stages(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_stage_history_client ON stage_history(client_id);
-    CREATE INDEX IF NOT EXISTS idx_stage_history_deal ON stage_history(deal_id);
-  `);
-}
 
 function getUser(req: express.Request) {
   return {

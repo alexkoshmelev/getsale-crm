@@ -1,7 +1,9 @@
 import express from 'express';
+import cors from 'cors';
 import { Pool } from 'pg';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { randomUUID } from 'crypto';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, UserCreatedEvent } from '@getsale/events';
 import { UserRole } from '@getsale/types';
@@ -16,8 +18,17 @@ const REFRESH_EXPIRES_IN = '7d';
 
 // Database
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://getsale:getsale_dev@localhost:5432/getsale_crm',
+  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
 });
+
+// Test database connection on startup
+pool.query('SELECT NOW()')
+  .then(() => {
+    console.log('✅ Database connection successful');
+  })
+  .catch((error) => {
+    console.error('❌ Database connection failed:', error.message);
+  });
 
 // RabbitMQ
 const rabbitmq = new RabbitMQClient(
@@ -31,47 +42,22 @@ const rabbitmq = new RabbitMQClient(
   } catch (error) {
     console.error('Failed to connect to RabbitMQ, service will continue without event publishing:', error);
   }
-  await initDatabase();
 })();
 
-async function initDatabase() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      email VARCHAR(255) UNIQUE NOT NULL,
-      password_hash VARCHAR(255) NOT NULL,
-      organization_id UUID NOT NULL,
-      role VARCHAR(50) NOT NULL DEFAULT 'bidi',
-      bidi_id UUID,
-      mfa_secret VARCHAR(255),
-      mfa_enabled BOOLEAN DEFAULT false,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
+// CORS configuration
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || '*',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 
-    CREATE TABLE IF NOT EXISTS organizations (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      name VARCHAR(255) NOT NULL,
-      slug VARCHAR(255) UNIQUE NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS refresh_tokens (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      token VARCHAR(255) UNIQUE NOT NULL,
-      expires_at TIMESTAMP NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-    CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id);
-    CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token ON refresh_tokens(token);
-  `);
-}
-
-app.use(express.json());
+// Body parser with increased limits and timeout handling
+app.use(express.json({ 
+  limit: '10mb',
+  strict: false 
+}));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Health check
 app.get('/health', (req, res) => {
@@ -102,9 +88,50 @@ app.post('/api/auth/signup', async (req, res) => {
     );
     const user = userResult.rows[0];
 
+    // Create default pipeline
+    const pipelineResult = await pool.query(
+      'INSERT INTO pipelines (organization_id, name, description, is_default) VALUES ($1, $2, $3, $4) RETURNING *',
+      [organization.id, 'Default Pipeline', 'Default sales pipeline', true]
+    );
+    const pipeline = pipelineResult.rows[0];
+
+    // Create default stages
+    const stages = [
+      { name: 'Lead', order: 1, color: '#3B82F6' },
+      { name: 'Qualified', order: 2, color: '#10B981' },
+      { name: 'Proposal', order: 3, color: '#F59E0B' },
+      { name: 'Negotiation', order: 4, color: '#EF4444' },
+      { name: 'Closed Won', order: 5, color: '#8B5CF6' },
+      { name: 'Closed Lost', order: 6, color: '#6B7280' },
+    ];
+
+    for (const stage of stages) {
+      await pool.query(
+        'INSERT INTO stages (pipeline_id, organization_id, name, order_index, color) VALUES ($1, $2, $3, $4, $5)',
+        [pipeline.id, organization.id, stage.name, stage.order, stage.color]
+      );
+    }
+
+    console.log(`✅ Created default pipeline with ${stages.length} stages for organization ${organization.id}`);
+
+    // Create default team with organization name
+    const teamResult = await pool.query(
+      'INSERT INTO teams (organization_id, name, created_by) VALUES ($1, $2, $3) RETURNING *',
+      [organization.id, organization.name, user.id]
+    );
+    const team = teamResult.rows[0];
+
+    // Add user to the team as owner
+    await pool.query(
+      'INSERT INTO team_members (team_id, user_id, role, invited_by) VALUES ($1, $2, $3, $4)',
+      [team.id, user.id, 'admin', user.id]
+    );
+
+    console.log(`✅ Created default team "${team.name}" and added user to team`);
+
     // Publish event
     const event: UserCreatedEvent = {
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       type: EventType.USER_CREATED,
       timestamp: new Date(),
       organizationId: organization.id,
@@ -156,17 +183,66 @@ app.post('/api/auth/signup', async (req, res) => {
 
 // Sign in
 app.post('/api/auth/signin', async (req, res) => {
+  console.log(`📥 POST /api/auth/signin received`);
+  
+  // Handle request abort
+  req.on('aborted', () => {
+    console.log(`⚠️ Request aborted by client`);
+    return;
+  });
+  
+  req.on('error', (err) => {
+    console.error(`❌ Request error:`, err);
+    if (!res.headersSent) {
+      res.status(400).json({ error: 'Request error' });
+    }
+    return;
+  });
+  
+  // Add error handler for response
+  res.on('finish', () => {
+    console.log(`📤 Response finished with status: ${res.statusCode}`);
+  });
+  
+  res.on('error', (err) => {
+    console.error(`❌ Response error:`, err);
+  });
+  
+  res.on('close', () => {
+    if (!res.headersSent) {
+      console.log(`⚠️ Response closed before headers sent`);
+    }
+  });
+  
+  console.log(`📥 Request body:`, JSON.stringify({ email: req.body?.email, hasPassword: !!req.body?.password }));
+  console.log(`📥 Request headers:`, JSON.stringify(req.headers, null, 2));
+  
   try {
     const { email, password, mfaCode } = req.body;
 
+    console.log(`🔐 Login attempt for email: ${email}`);
+
+    if (!email || !password) {
+      console.log('❌ Missing email or password');
+      return res.status(400).json({ error: 'Email and password required' });
+    }
+
     const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    console.log(`📊 Found ${result.rows.length} user(s) with email ${email}`);
+    
     if (result.rows.length === 0) {
+      console.log(`❌ User not found: ${email}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const user = result.rows[0];
+    console.log(`✅ User found: ${user.email}, checking password...`);
+    
     const valid = await bcrypt.compare(password, user.password_hash);
+    console.log(`🔑 Password valid: ${valid}`);
+    
     if (!valid) {
+      console.log(`❌ Invalid password for user: ${email}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -187,12 +263,33 @@ app.post('/api/auth/signin', async (req, res) => {
       { expiresIn: REFRESH_EXPIRES_IN }
     );
 
-    await pool.query(
-      'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
-      [user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)]
-    );
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    console.log(`💾 Saving refresh token for user ${user.id}, expires at ${expiresAt.toISOString()}`);
+    
+    try {
+      const insertResult = await pool.query(
+        'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3) RETURNING *',
+        [user.id, refreshToken, expiresAt]
+      );
+      console.log(`✅ Refresh token saved successfully: id=${insertResult.rows[0].id}`);
+    } catch (error: any) {
+      console.error(`❌ Error saving refresh token:`, error.message || error);
+      // If it's a unique constraint violation, try to update existing token
+      if (error.code === '23505') {
+        console.log(`⚠️  Refresh token already exists, updating...`);
+        await pool.query(
+          'UPDATE refresh_tokens SET expires_at = $1 WHERE token = $2',
+          [expiresAt, refreshToken]
+        );
+        console.log(`✅ Refresh token updated`);
+      } else {
+        throw error;
+      }
+    }
 
-    res.json({
+    console.log(`✅ Login successful for user: ${user.email}`);
+
+    const responseData = {
       accessToken,
       refreshToken,
       user: {
@@ -201,9 +298,14 @@ app.post('/api/auth/signin', async (req, res) => {
         organizationId: user.organization_id,
         role: user.role,
       },
-    });
-  } catch (error) {
-    console.error('Signin error:', error);
+    };
+    
+    console.log(`📤 Sending response with accessToken length: ${accessToken.length}`);
+    res.json(responseData);
+    console.log(`✅ Response sent successfully`);
+  } catch (error: any) {
+    console.error('❌ Signin error:', error.message || error);
+    console.error('Stack:', error.stack);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -230,21 +332,55 @@ app.post('/api/auth/verify', async (req, res) => {
 
 // Refresh token
 app.post('/api/auth/refresh', async (req, res) => {
+  console.log(`📥 POST /api/auth/refresh received`);
+  
   try {
     const { refreshToken } = req.body;
-    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET) as any;
+    
+    if (!refreshToken) {
+      console.log('❌ No refresh token provided');
+      return res.status(400).json({ error: 'Refresh token required' });
+    }
 
-    const tokenResult = await pool.query(
-      'SELECT * FROM refresh_tokens WHERE token = $1 AND expires_at > NOW()',
+    console.log(`🔐 Verifying refresh token...`);
+    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET) as any;
+    console.log(`✅ Refresh token decoded, userId: ${decoded.userId}`);
+
+    // First check if token exists (even if expired, for debugging)
+    const tokenCheck = await pool.query(
+      'SELECT * FROM refresh_tokens WHERE token = $1',
       [refreshToken]
     );
 
-    if (tokenResult.rows.length === 0) {
+    if (tokenCheck.rows.length === 0) {
+      console.log('❌ Refresh token not found in database');
+      console.log(`🔍 Searching for tokens for user: ${decoded.userId}`);
+      const userTokens = await pool.query(
+        'SELECT token, expires_at, NOW() as current_time FROM refresh_tokens WHERE user_id = $1',
+        [decoded.userId]
+      );
+      console.log(`📋 Found ${userTokens.rows.length} token(s) for user`);
+      if (userTokens.rows.length > 0) {
+        userTokens.rows.forEach((t: any, i: number) => {
+          console.log(`   Token ${i + 1}: expires_at=${t.expires_at}, current=${t.current_time}, expired=${t.expires_at < t.current_time}`);
+        });
+      }
       return res.status(401).json({ error: 'Invalid refresh token' });
     }
 
+    // Check if token is expired
+    const token = tokenCheck.rows[0];
+    if (new Date(token.expires_at) <= new Date()) {
+      console.log(`❌ Refresh token expired: expires_at=${token.expires_at}, now=${new Date().toISOString()}`);
+      return res.status(401).json({ error: 'Refresh token expired' });
+    }
+
+    const tokenResult = { rows: [token] };
+
+    console.log(`✅ Refresh token found in database`);
     const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [decoded.userId]);
     if (userResult.rows.length === 0) {
+      console.log(`❌ User not found: ${decoded.userId}`);
       return res.status(401).json({ error: 'User not found' });
     }
 
@@ -255,9 +391,14 @@ app.post('/api/auth/refresh', async (req, res) => {
       { expiresIn: JWT_EXPIRES_IN }
     );
 
+    console.log(`✅ New access token generated for user: ${user.email}`);
     res.json({ accessToken });
-  } catch (error) {
-    res.status(401).json({ error: 'Invalid refresh token' });
+  } catch (error: any) {
+    console.error('❌ Refresh token error:', error.message || error);
+    if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

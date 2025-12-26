@@ -18,11 +18,62 @@ const io = new Server(httpServer, {
 });
 
 // Redis adapter for horizontal scaling
+// Parse REDIS_URL if available, otherwise use individual settings
+const redisUrl = process.env.REDIS_URL;
+let redisConfig: any = {};
+
+if (redisUrl) {
+  // Parse redis://:password@host:port format
+  try {
+    const url = new URL(redisUrl);
+    redisConfig = {
+      host: url.hostname,
+      port: parseInt(url.port || '6379'),
+      password: url.password || undefined,
+    };
+  } catch (error) {
+    console.error('Invalid REDIS_URL format, using defaults:', error);
+    redisConfig = {
+      host: process.env.REDIS_HOST || 'localhost',
+      port: parseInt(process.env.REDIS_PORT || '6379'),
+      password: process.env.REDIS_PASSWORD,
+    };
+  }
+} else {
+  redisConfig = {
+    host: process.env.REDIS_HOST || 'localhost',
+    port: parseInt(process.env.REDIS_PORT || '6379'),
+    password: process.env.REDIS_PASSWORD,
+  };
+}
+
 const pubClient = createClient({
-  host: process.env.REDIS_HOST || 'localhost',
-  port: parseInt(process.env.REDIS_PORT || '6379'),
+  ...redisConfig,
+  retryStrategy: (times) => {
+    const delay = Math.min(times * 50, 2000);
+    return delay;
+  },
+  maxRetriesPerRequest: 3,
 });
+
 const subClient = pubClient.duplicate();
+
+// Add error handlers to prevent warnings
+pubClient.on('error', (error) => {
+  console.error('Redis pubClient error:', error);
+});
+
+pubClient.on('connect', () => {
+  console.log('Redis pubClient connected');
+});
+
+subClient.on('error', (error) => {
+  console.error('Redis subClient error:', error);
+});
+
+subClient.on('connect', () => {
+  console.log('Redis subClient connected');
+});
 
 io.adapter(createAdapter(pubClient, subClient));
 
