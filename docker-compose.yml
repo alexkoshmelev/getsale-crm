@@ -6,7 +6,7 @@ services:
     container_name: getsale-postgres
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_dev}
       POSTGRES_DB: postgres
     ports:
       - "5432:5432"
@@ -27,9 +27,11 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_dev}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_dev}
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"${REDIS_PASSWORD:-redis_dev}\" ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -70,7 +72,7 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=8000
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
       - AUTH_SERVICE_URL=http://auth-service:3001
       - CRM_SERVICE_URL=http://crm-service:3002
@@ -94,6 +96,12 @@ services:
       - /app/shared/types/node_modules
       - /app/shared/utils/node_modules
       - /app/shared/events/node_modules
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - getsale-network
 
@@ -107,8 +115,8 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3001
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
       - JWT_SECRET=dev_jwt_secret_change_in_production
       - JWT_REFRESH_SECRET=dev_refresh_secret_change_in_production
@@ -139,8 +147,8 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3002
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
     depends_on:
       postgres:
@@ -169,8 +177,8 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3003
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
       - WEBSOCKET_SERVICE_URL=http://websocket-service:3004
     depends_on:
@@ -202,7 +210,7 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3004
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
     depends_on:
       redis:
@@ -229,7 +237,7 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3005
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     depends_on:
@@ -257,8 +265,8 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3006
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
     depends_on:
@@ -288,8 +296,8 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3007
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
     depends_on:
       postgres:
@@ -318,8 +326,8 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3008
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
     depends_on:
       postgres:
@@ -348,8 +356,8 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3009
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
       - PIPELINE_SERVICE_URL=http://pipeline-service:3008
     depends_on:
@@ -379,8 +387,8 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3010
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
     depends_on:
       postgres:
@@ -409,8 +417,8 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3011
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
     depends_on:
       postgres:
@@ -437,7 +445,7 @@ services:
       dockerfile: Dockerfile
     container_name: getsale-migrations
     environment:
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
     depends_on:
       postgres:
         condition: service_healthy
@@ -461,8 +469,16 @@ services:
       - /app/node_modules
       - /app/.next
     depends_on:
-      - api-gateway
-      - migrations
+      api-gateway:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 3000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
       - getsale-network
 

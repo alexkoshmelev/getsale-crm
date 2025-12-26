@@ -57,7 +57,7 @@ export async function up(knex: Knex): Promise<void> {
   // Subscriptions
   await knex.schema.createTable('subscriptions', (table) => {
     table.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
-    table.uuid('user_id').notNullable().references('id').inTable('users');
+    table.uuid('user_id').notNullable().unique().references('id').inTable('users');
     table.uuid('organization_id').notNullable().references('id').inTable('organizations');
     table.string('stripe_customer_id', 255);
     table.string('stripe_subscription_id', 255);
@@ -69,7 +69,6 @@ export async function up(knex: Knex): Promise<void> {
     table.timestamp('created_at').notNullable().defaultTo(knex.fn.now());
     table.timestamp('updated_at').notNullable().defaultTo(knex.fn.now());
     
-    table.index('user_id');
     table.index('organization_id');
   });
 
@@ -145,7 +144,7 @@ export async function up(knex: Knex): Promise<void> {
     table.uuid('organization_id').notNullable().references('id').inTable('organizations');
     table.uuid('company_id').notNullable().references('id').inTable('companies');
     table.uuid('contact_id').references('id').inTable('contacts');
-    table.uuid('pipeline_id').notNullable();
+    table.uuid('pipeline_id').notNullable().references('id').inTable('pipelines');
     table.uuid('stage_id').notNullable().references('id').inTable('stages');
     table.uuid('owner_id').notNullable().references('id').inTable('users');
     table.string('title', 255).notNullable();

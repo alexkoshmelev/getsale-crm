@@ -12,25 +12,46 @@ if [ ! -d "/app/shared/types/dist" ] || [ ! -d "/app/shared/events/dist" ] || [ 
   # Change to /app for workspace commands
   cd /app
   
-  # Build types first (with error handling - non-fatal)
-  # Temporarily disable set -e for build commands to allow graceful failure
-  set +e
+  # Build types first (required for other packages)
+  echo "Building @getsale/types..."
   if ! npm run build --workspace=shared/types; then
-    echo "Warning: Failed to build @getsale/types, continuing anyway..."
+    echo "⚠️  Warning: Failed to build @getsale/types"
+    # Check if dist directory exists (might be cached from previous build)
+    if [ ! -d "/app/shared/types/dist" ]; then
+      echo "❌ Error: @getsale/types dist directory missing and build failed"
+      exit 1
+    else
+      echo "ℹ️  Using existing @getsale/types build"
+    fi
   fi
   
-  # Build events (depends on types) - with error handling
+  # Build events (depends on types)
+  echo "Building @getsale/events..."
   if ! npm run build --workspace=shared/events; then
-    echo "Warning: Failed to build @getsale/events, continuing anyway..."
+    echo "⚠️  Warning: Failed to build @getsale/events"
+    # Check if dist directory exists (might be cached from previous build)
+    if [ ! -d "/app/shared/events/dist" ]; then
+      echo "❌ Error: @getsale/events dist directory missing and build failed"
+      exit 1
+    else
+      echo "ℹ️  Using existing @getsale/events build"
+    fi
   fi
   
-  # Build utils (depends on events) - with error handling
+  # Build utils (depends on events)
+  echo "Building @getsale/utils..."
   if ! npm run build --workspace=shared/utils; then
-    echo "Warning: Failed to build @getsale/utils, continuing anyway..."
+    echo "⚠️  Warning: Failed to build @getsale/utils"
+    # Check if dist directory exists (might be cached from previous build)
+    if [ ! -d "/app/shared/utils/dist" ]; then
+      echo "❌ Error: @getsale/utils dist directory missing and build failed"
+      exit 1
+    else
+      echo "ℹ️  Using existing @getsale/utils build"
+    fi
   fi
-  set -e
   
-  echo "Shared packages build completed"
+  echo "✅ Shared packages build completed"
   
   # Return to original directory
   cd "$ORIGINAL_DIR"

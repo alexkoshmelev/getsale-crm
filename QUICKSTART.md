@@ -34,16 +34,15 @@ docker-compose logs -f api-gateway
 
 ### 4. Открыть приложение
 
-- **Frontend**: http://localhost:3000
+- **Frontend**: http://localhost:5173
 - **API Gateway**: http://localhost:8000
 - **RabbitMQ Management**: http://localhost:15672 (getsale/getsale_dev)
-- **Grafana**: http://localhost:3000 (admin/admin) - конфликт с фронтендом, измените порт
 - **Prometheus**: http://localhost:9090
 - **Jaeger**: http://localhost:16686
 
 ### 5. Создать первого пользователя
 
-Откройте http://localhost:3000 и зарегистрируйтесь через UI, или используйте API:
+Откройте http://localhost:5173 и зарегистрируйтесь через UI, или используйте API:
 
 ```bash
 curl -X POST http://localhost:8000/api/auth/signup \
@@ -67,12 +66,11 @@ bash scripts/test-api.sh
 
 ## 📊 Доступ к сервисам
 
-- **Frontend**: http://localhost:3000
+- **Frontend**: http://localhost:5173
 - **API Gateway**: http://localhost:8000
 - **RabbitMQ Management**: http://localhost:15672
   - Username: `getsale`
   - Password: `getsale_dev`
-- **Grafana**: http://localhost:3000 (измените порт в docker-compose.yml)
 - **Prometheus**: http://localhost:9090
 - **Jaeger**: http://localhost:16686
 
@@ -200,8 +198,8 @@ docker-compose exec api-gateway npm install
 ### Фронтенд не запускается
 
 ```bash
-# Проверить порт 3000
-lsof -i :3000
+# Проверить порт 5173
+lsof -i :5173
 
 # Запустить локально
 cd frontend
