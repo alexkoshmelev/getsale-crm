@@ -1,8 +1,7 @@
 import express from 'express';
 import { Pool } from 'pg';
-import { Telegraf } from 'telegraf';
 import { RabbitMQClient } from '@getsale/utils';
-import { EventType, MessageReceivedEvent } from '@getsale/events';
+import { EventType, MessageSentEvent } from '@getsale/events';
 import { MessageChannel, MessageDirection, MessageStatus } from '@getsale/types';
 
 const app = express();
@@ -16,11 +15,7 @@ const rabbitmq = new RabbitMQClient(
   process.env.RABBITMQ_URL || 'amqp://getsale:getsale_dev@localhost:5672'
 );
 
-// Telegram bot (if configured)
-let telegramBot: Telegraf | null = null;
-if (process.env.TELEGRAM_BOT_TOKEN) {
-  telegramBot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-}
+const BD_ACCOUNTS_SERVICE_URL = process.env.BD_ACCOUNTS_SERVICE_URL || 'http://bd-accounts-service:3007';
 
 (async () => {
   try {
@@ -28,74 +23,7 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
   } catch (error) {
     console.error('Failed to connect to RabbitMQ, service will continue without event publishing:', error);
   }
-  if (telegramBot) {
-    await initTelegramBot();
-  }
 })();
-
-async function initTelegramBot() {
-  if (!telegramBot) return;
-
-  telegramBot.on('message', async (ctx) => {
-    try {
-      const message = ctx.message;
-      const chatId = String(ctx.chat.id);
-      const userId = String(ctx.from?.id);
-
-      // Find contact by telegram_id
-      const contactResult = await pool.query(
-        'SELECT id, organization_id FROM contacts WHERE telegram_id = $1',
-        [userId]
-      );
-
-      if (contactResult.rows.length === 0) {
-        // Unknown contact - could create or ignore
-        return;
-      }
-
-      const contact = contactResult.rows[0];
-      const text = 'text' in message ? message.text : '';
-
-      // Save message
-      const msgResult = await pool.query(
-        `INSERT INTO messages (organization_id, channel, channel_id, contact_id, direction, content, status, unread)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-        [
-          contact.organization_id,
-          MessageChannel.TELEGRAM,
-          chatId,
-          contact.id,
-          MessageDirection.INBOUND,
-          text,
-          MessageStatus.DELIVERED,
-          true,
-        ]
-      );
-
-      const savedMessage = msgResult.rows[0];
-
-      // Publish event
-      const event: MessageReceivedEvent = {
-        id: crypto.randomUUID(),
-        type: EventType.MESSAGE_RECEIVED,
-        timestamp: new Date(),
-        organizationId: contact.organization_id,
-        data: {
-          messageId: savedMessage.id,
-          channel: MessageChannel.TELEGRAM,
-          contactId: contact.id,
-          content: text,
-        },
-      };
-      await rabbitmq.publishEvent(event);
-    } catch (error) {
-      console.error('Error processing Telegram message:', error);
-    }
-  });
-
-  await telegramBot.launch();
-  console.log('Telegram bot started');
-}
 
 function getUser(req: express.Request) {
   return {
@@ -133,7 +61,7 @@ app.get('/api/messaging/inbox', async (req, res) => {
 app.get('/api/messaging/messages', async (req, res) => {
   try {
     const user = getUser(req);
-    const { contactId, channel, channelId } = req.query;
+    const { contactId, channel, channelId, page = 1, limit = 50 } = req.query;
 
     let query = 'SELECT * FROM messages WHERE organization_id = $1';
     const params: any[] = [user.organizationId];
@@ -148,12 +76,197 @@ app.get('/api/messaging/messages', async (req, res) => {
       params.push(channel, channelId);
     }
 
-    query += ' ORDER BY created_at ASC';
+    // Pagination
+    const offset = (parseInt(String(page)) - 1) * parseInt(String(limit));
+    query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(parseInt(String(limit)), offset);
+
+    const result = await pool.query(query, params);
+    
+    // Get total count
+    let countQuery = 'SELECT COUNT(*) FROM messages WHERE organization_id = $1';
+    const countParams: any[] = [user.organizationId];
+    if (contactId) {
+      countQuery += ` AND contact_id = $2`;
+      countParams.push(contactId);
+    }
+    if (channel && channelId) {
+      countQuery += ` AND channel = $${countParams.length + 1} AND channel_id = $${countParams.length + 2}`;
+      countParams.push(channel, channelId);
+    }
+    const countResult = await pool.query(countQuery, countParams);
+    const total = parseInt(countResult.rows[0].count);
+
+    res.json({
+      messages: result.rows,
+      pagination: {
+        page: parseInt(String(page)),
+        limit: parseInt(String(limit)),
+        total,
+        totalPages: Math.ceil(total / parseInt(String(limit))),
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get message by ID
+app.get('/api/messaging/messages/:id', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+
+    const result = await pool.query(
+      'SELECT * FROM messages WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error fetching message:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get all chats
+app.get('/api/messaging/chats', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { channel } = req.query;
+
+    let query = `
+      SELECT 
+        m.channel,
+        m.channel_id,
+        m.contact_id,
+        c.first_name,
+        c.last_name,
+        c.email,
+        c.telegram_id,
+        COUNT(*) FILTER (WHERE m.unread = true) as unread_count,
+        MAX(m.created_at) as last_message_at,
+        (SELECT content FROM messages WHERE channel = m.channel AND channel_id = m.channel_id ORDER BY created_at DESC LIMIT 1) as last_message
+      FROM messages m
+      LEFT JOIN contacts c ON m.contact_id = c.id
+      WHERE m.organization_id = $1
+    `;
+    const params: any[] = [user.organizationId];
+
+    if (channel) {
+      query += ` AND m.channel = $${params.length + 1}`;
+      params.push(channel);
+    }
+
+    query += `
+      GROUP BY m.channel, m.channel_id, m.contact_id, c.first_name, c.last_name, c.email, c.telegram_id
+      ORDER BY last_message_at DESC
+    `;
 
     const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (error) {
-    console.error('Error fetching messages:', error);
+    console.error('Error fetching chats:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Mark all messages as read for a chat
+app.post('/api/messaging/chats/:chatId/mark-all-read', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { chatId } = req.params;
+    const { channel } = req.query;
+
+    if (!channel) {
+      return res.status(400).json({ error: 'channel query parameter is required' });
+    }
+
+    await pool.query(
+      `UPDATE messages 
+       SET unread = false, updated_at = NOW() 
+       WHERE organization_id = $1 AND channel = $2 AND channel_id = $3`,
+      [user.organizationId, channel, chatId]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error marking messages as read:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Alternative endpoint for marking messages as read (for compatibility)
+app.post('/api/messaging/mark-read', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { channel, channelId } = req.body;
+
+    if (!channel || !channelId) {
+      return res.status(400).json({ error: 'channel and channelId are required' });
+    }
+
+    await pool.query(
+      `UPDATE messages 
+       SET unread = false, updated_at = NOW() 
+       WHERE organization_id = $1 AND channel = $2 AND channel_id = $3`,
+      [user.organizationId, channel, channelId]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error marking messages as read:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get messaging statistics
+app.get('/api/messaging/stats', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { startDate, endDate } = req.query;
+
+    let query = `
+      SELECT 
+        channel,
+        direction,
+        status,
+        COUNT(*) as count
+      FROM messages
+      WHERE organization_id = $1
+    `;
+    const params: any[] = [user.organizationId];
+
+    if (startDate) {
+      query += ` AND created_at >= $${params.length + 1}`;
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ` AND created_at <= $${params.length + 1}`;
+      params.push(endDate);
+    }
+
+    query += ` GROUP BY channel, direction, status`;
+
+    const result = await pool.query(query, params);
+
+    // Get unread count
+    const unreadResult = await pool.query(
+      'SELECT COUNT(*) as count FROM messages WHERE organization_id = $1 AND unread = true',
+      [user.organizationId]
+    );
+
+    res.json({
+      stats: result.rows,
+      unreadCount: parseInt(unreadResult.rows[0].count),
+    });
+  } catch (error) {
+    console.error('Error fetching stats:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -162,47 +275,119 @@ app.get('/api/messaging/messages', async (req, res) => {
 app.post('/api/messaging/send', async (req, res) => {
   try {
     const user = getUser(req);
-    const { contactId, channel, channelId, content } = req.body;
+    const { contactId, channel, channelId, content, bdAccountId } = req.body;
+
+    if (!contactId || !channel || !channelId || !content) {
+      return res.status(400).json({ error: 'Missing required fields: contactId, channel, channelId, content' });
+    }
+
+    // Get contact info to determine organization
+    const contactResult = await pool.query(
+      'SELECT id, organization_id, telegram_id FROM contacts WHERE id = $1 AND organization_id = $2',
+      [contactId, user.organizationId]
+    );
+
+    if (contactResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Contact not found' });
+    }
+
+    const contact = contactResult.rows[0];
 
     // Save message
     const result = await pool.query(
-      `INSERT INTO messages (organization_id, channel, channel_id, contact_id, direction, content, status, owner_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      `INSERT INTO messages (organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
       [
         user.organizationId,
+        bdAccountId || null,
         channel,
         channelId,
         contactId,
         MessageDirection.OUTBOUND,
         content,
-        MessageStatus.SENT,
-        user.id,
+        MessageStatus.PENDING,
+        false,
+        JSON.stringify({ sentBy: user.id }),
       ]
     );
 
     const message = result.rows[0];
 
     // Send via appropriate channel
-    if (channel === MessageChannel.TELEGRAM && telegramBot) {
-      await telegramBot.telegram.sendMessage(channelId, content);
-      await pool.query('UPDATE messages SET status = $1 WHERE id = $2', [MessageStatus.DELIVERED, message.id]);
+    let sent = false;
+    if (channel === MessageChannel.TELEGRAM) {
+      if (!bdAccountId) {
+        return res.status(400).json({ error: 'bdAccountId is required for Telegram messages' });
+      }
+
+      try {
+        // Call BD Accounts Service to send message via Telegram
+        const response = await fetch(`${BD_ACCOUNTS_SERVICE_URL}/api/bd-accounts/${bdAccountId}/send`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-User-Id': user.id,
+            'X-Organization-Id': user.organizationId,
+          },
+          body: JSON.stringify({
+            chatId: channelId,
+            text: content,
+          }),
+        });
+
+        if (response.ok) {
+          await pool.query('UPDATE messages SET status = $1 WHERE id = $2', [
+            MessageStatus.DELIVERED,
+            message.id,
+          ]);
+          sent = true;
+        } else {
+          const error = await response.json();
+          throw new Error(error.message || 'Failed to send message');
+        }
+      } catch (error: any) {
+        console.error('Error sending Telegram message:', error);
+        await pool.query('UPDATE messages SET status = $1, metadata = $2 WHERE id = $3', [
+          MessageStatus.FAILED,
+          JSON.stringify({ error: error.message }),
+          message.id,
+        ]);
+        throw error;
+      }
     }
     // TODO: Email sending
+    // TODO: LinkedIn sending
+    // TODO: Twitter sending
+
+    if (!sent) {
+      return res.status(400).json({ error: 'Unsupported channel or sending failed' });
+    }
 
     // Publish event
-    await rabbitmq.publishEvent({
+    const event: MessageSentEvent = {
       id: crypto.randomUUID(),
       type: EventType.MESSAGE_SENT,
       timestamp: new Date(),
       organizationId: user.organizationId,
       userId: user.id,
-      data: { messageId: message.id, channel, contactId },
-    });
+      data: {
+        messageId: message.id,
+        channel,
+        contactId,
+        bdAccountId,
+      },
+    };
+    await rabbitmq.publishEvent(event);
 
-    res.json(message);
-  } catch (error) {
+    // Get updated message
+    const updatedResult = await pool.query('SELECT * FROM messages WHERE id = $1', [message.id]);
+    res.json(updatedResult.rows[0]);
+  } catch (error: any) {
     console.error('Error sending message:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ 
+      error: 'Internal server error',
+      message: error.message || 'Failed to send message'
+    });
   }
 });
 

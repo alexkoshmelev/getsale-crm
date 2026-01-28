@@ -101,7 +101,18 @@ export interface MessageReceivedEvent extends BaseEvent {
     messageId: string;
     channel: string;
     contactId?: string;
+    bdAccountId?: string;
     content: string;
+  };
+}
+
+export interface MessageSentEvent extends BaseEvent {
+  type: EventType.MESSAGE_SENT;
+  data: {
+    messageId: string;
+    channel: string;
+    contactId?: string;
+    bdAccountId?: string;
   };
 }
 
@@ -287,6 +298,7 @@ export interface MetricRecordedEvent extends BaseEvent {
 export type Event = 
   | UserCreatedEvent
   | MessageReceivedEvent
+  | MessageSentEvent
   | DealStageChangedEvent
   | AIDraftGeneratedEvent
   | BDAccountConnectedEvent

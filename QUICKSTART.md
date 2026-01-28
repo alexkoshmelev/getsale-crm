@@ -136,7 +136,7 @@ docker-compose logs -f auth-service
 ### Подключиться к БД
 
 ```bash
-docker-compose exec postgres psql -U getsale -d getsale_crm
+docker-compose exec postgres psql -U postgres -d postgres
 ```
 
 ### Подключиться к Redis

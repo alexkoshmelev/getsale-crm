@@ -237,7 +237,7 @@ docker-compose up -d <service-name>
 docker-compose ps postgres
 
 # Проверить подключение
-docker-compose exec postgres psql -U getsale -d getsale_crm -c "SELECT 1;"
+docker-compose exec postgres psql -U postgres -d postgres -c "SELECT 1;"
 ```
 
 ### Проблема: Frontend не работает

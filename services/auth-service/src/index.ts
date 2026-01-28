@@ -314,73 +314,102 @@ app.post('/api/auth/signin', async (req, res) => {
 app.post('/api/auth/verify', async (req, res) => {
   try {
     const { token } = req.body;
+    
+    if (!token) {
+      console.log('❌ No token provided for verification');
+      return res.status(400).json({ error: 'Token required' });
+    }
+
+    console.log(`🔐 Verifying token...`);
     const decoded = jwt.verify(token, JWT_SECRET) as any;
+    console.log(`✅ Token decoded, userId: ${decoded.userId}`);
 
     const result = await pool.query('SELECT id, email, organization_id, role FROM users WHERE id = $1', [
       decoded.userId,
     ]);
 
     if (result.rows.length === 0) {
+      console.log(`❌ User not found: ${decoded.userId}`);
       return res.status(401).json({ error: 'User not found' });
     }
 
+    console.log(`✅ Token verified for user: ${result.rows[0].email}`);
     res.json(result.rows[0]);
-  } catch (error) {
+  } catch (error: any) {
+    console.error('❌ Token verification error:', error.message || error);
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({ error: 'Invalid token format' });
+    }
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Token expired' });
+    }
     res.status(401).json({ error: 'Invalid token' });
   }
 });
 
+// Rate limiting for refresh endpoint to prevent spam
+const refreshAttempts = new Map<string, { count: number; resetAt: number }>();
+const REFRESH_RATE_LIMIT = 5; // Max 5 attempts
+const REFRESH_RATE_WINDOW = 60000; // Per minute
+
 // Refresh token
 app.post('/api/auth/refresh', async (req, res) => {
-  console.log(`📥 POST /api/auth/refresh received`);
+  const clientId = req.ip || 'unknown';
+  const now = Date.now();
+  
+  // Check rate limit
+  const attempt = refreshAttempts.get(clientId);
+  if (attempt && attempt.resetAt > now) {
+    if (attempt.count >= REFRESH_RATE_LIMIT) {
+      return res.status(429).json({ error: 'Too many refresh attempts. Please try again later.' });
+    }
+    attempt.count++;
+  } else {
+    refreshAttempts.set(clientId, { count: 1, resetAt: now + REFRESH_RATE_WINDOW });
+  }
   
   try {
     const { refreshToken } = req.body;
     
     if (!refreshToken) {
-      console.log('❌ No refresh token provided');
       return res.status(400).json({ error: 'Refresh token required' });
     }
 
-    console.log(`🔐 Verifying refresh token...`);
-    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET) as any;
-    console.log(`✅ Refresh token decoded, userId: ${decoded.userId}`);
+    // Verify token first (this will throw if expired or invalid)
+    let decoded: any;
+    try {
+      decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET) as any;
+    } catch (jwtError: any) {
+      // Token is expired or invalid - return 401 without excessive logging
+      // Only log first few attempts to avoid log spam
+      const attempt = refreshAttempts.get(clientId);
+      if (attempt && attempt.count <= 2) {
+        console.log(`⚠️  Invalid/expired refresh token attempt from ${clientId}`);
+      }
+      return res.status(401).json({ error: 'Invalid or expired refresh token' });
+    }
 
-    // First check if token exists (even if expired, for debugging)
+    // Check if token exists in database
     const tokenCheck = await pool.query(
       'SELECT * FROM refresh_tokens WHERE token = $1',
       [refreshToken]
     );
 
     if (tokenCheck.rows.length === 0) {
-      console.log('❌ Refresh token not found in database');
-      console.log(`🔍 Searching for tokens for user: ${decoded.userId}`);
-      const userTokens = await pool.query(
-        'SELECT token, expires_at, NOW() as current_time FROM refresh_tokens WHERE user_id = $1',
-        [decoded.userId]
-      );
-      console.log(`📋 Found ${userTokens.rows.length} token(s) for user`);
-      if (userTokens.rows.length > 0) {
-        userTokens.rows.forEach((t: any, i: number) => {
-          console.log(`   Token ${i + 1}: expires_at=${t.expires_at}, current=${t.current_time}, expired=${t.expires_at < t.current_time}`);
-        });
-      }
+      // Token not in database - return 401 without logging
       return res.status(401).json({ error: 'Invalid refresh token' });
     }
 
     // Check if token is expired
     const token = tokenCheck.rows[0];
     if (new Date(token.expires_at) <= new Date()) {
-      console.log(`❌ Refresh token expired: expires_at=${token.expires_at}, now=${new Date().toISOString()}`);
+      // Token expired - return 401 without logging to avoid spam
       return res.status(401).json({ error: 'Refresh token expired' });
     }
 
-    const tokenResult = { rows: [token] };
-
-    console.log(`✅ Refresh token found in database`);
+    // Token is valid - proceed with refresh
     const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [decoded.userId]);
     if (userResult.rows.length === 0) {
-      console.log(`❌ User not found: ${decoded.userId}`);
       return res.status(401).json({ error: 'User not found' });
     }
 
@@ -391,14 +420,18 @@ app.post('/api/auth/refresh', async (req, res) => {
       { expiresIn: JWT_EXPIRES_IN }
     );
 
-    console.log(`✅ New access token generated for user: ${user.email}`);
+    // Reset rate limit on successful refresh
+    refreshAttempts.delete(clientId);
+    
+    // Only log successful refreshes
+    console.log(`✅ Refresh token successful for user: ${user.email}`);
     res.json({ accessToken });
   } catch (error: any) {
-    console.error('❌ Refresh token error:', error.message || error);
-    if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
-      return res.status(401).json({ error: 'Invalid refresh token' });
+    // Only log unexpected errors, not token validation errors
+    if (error.name !== 'JsonWebTokenError' && error.name !== 'TokenExpiredError') {
+      console.error('❌ Unexpected refresh token error:', error.message || error);
     }
-    res.status(500).json({ error: 'Internal server error' });
+    return res.status(401).json({ error: 'Invalid refresh token' });
   }
 });
 

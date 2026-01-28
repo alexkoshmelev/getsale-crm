@@ -27,40 +27,12 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
-// Handle 401 errors
+// Note: Token refresh is handled by the main axios interceptor in auth-store.ts
+// This interceptor just passes through - the main interceptor will handle 401 errors
 apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
-    if (error.response?.status === 401) {
-      // Try to refresh token
-      if (typeof window !== 'undefined') {
-        const authStorage = localStorage.getItem('auth-storage');
-        if (authStorage) {
-          try {
-            const auth = JSON.parse(authStorage);
-            if (auth.state?.refreshToken) {
-              const response = await axios.post(`${API_URL}/api/auth/refresh`, {
-                refreshToken: auth.state.refreshToken,
-              });
-              const newToken = response.data.accessToken;
-              // Update storage
-              const updatedAuth = {
-                ...auth,
-                state: { ...auth.state, accessToken: newToken },
-              };
-              localStorage.setItem('auth-storage', JSON.stringify(updatedAuth));
-              // Retry original request
-              error.config.headers.Authorization = `Bearer ${newToken}`;
-              return axios.request(error.config);
-            }
-          } catch (refreshError) {
-            // Refresh failed, redirect to login
-            localStorage.removeItem('auth-storage');
-            window.location.href = '/auth/login';
-          }
-        }
-      }
-    }
+    // Let the main axios interceptor handle 401 errors to avoid duplicate refresh attempts
     return Promise.reject(error);
   }
 );

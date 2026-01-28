@@ -69,14 +69,22 @@ async function authenticate(req: express.Request, res: express.Response, next: e
 
     console.log(`[API Gateway] Verifying token with auth service...`);
     // Verify token with auth service
-    const response = await fetch(`${AUTH_SERVICE}/api/auth/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token }),
-    });
+    let response;
+    try {
+      response = await fetch(`${AUTH_SERVICE}/api/auth/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      });
+    } catch (fetchError: any) {
+      console.error(`[API Gateway] ❌ Failed to connect to auth service:`, fetchError.message);
+      return res.status(503).json({ error: 'Auth service unavailable' });
+    }
 
     if (!response.ok) {
+      const errorText = await response.text();
       console.log(`[API Gateway] ❌ Token verification failed: ${response.status} ${response.statusText}`);
+      console.log(`[API Gateway] Error details: ${errorText}`);
       return res.status(401).json({ error: 'Invalid token' });
     }
 
@@ -249,16 +257,29 @@ const bdAccountsProxy = createProxyMiddleware({
   target: BD_ACCOUNTS_SERVICE,
   changeOrigin: true,
   pathRewrite: { '^/api/bd-accounts': '/api/bd-accounts' },
+  timeout: 30000, // 30 seconds timeout
+  proxyTimeout: 30000,
+  logLevel: 'debug',
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;
+    console.log(`[API Gateway] Proxying ${req.method} ${req.url} to ${BD_ACCOUNTS_SERVICE}${req.url}`);
     if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
+    } else {
+      console.error(`[API Gateway] ❌ User not found in request for ${req.url}`);
     }
   },
   onProxyRes: (proxyRes, req, res) => {
+    console.log(`[API Gateway] ✅ Response from ${BD_ACCOUNTS_SERVICE}${req.url}: ${proxyRes.statusCode} ${proxyRes.statusMessage}`);
     res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
+  },
+  onError: (err, req, res) => {
+    console.error(`[API Gateway] ❌ Proxy error for ${req.url}:`, err.message);
+    if (!res.headersSent) {
+      res.status(504).json({ error: 'Service unavailable', details: err.message });
+    }
   },
 });
 

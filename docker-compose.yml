@@ -181,6 +181,7 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
       - WEBSOCKET_SERVICE_URL=http://websocket-service:3004
+      - BD_ACCOUNTS_SERVICE_URL=http://bd-accounts-service:3007
     depends_on:
       postgres:
         condition: service_healthy
@@ -212,6 +213,9 @@ services:
       - PORT=3004
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:5173}
+      - MAX_CONNECTIONS_PER_ORG=100
     depends_on:
       redis:
         condition: service_healthy
@@ -306,6 +310,12 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 3007 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     volumes:
       - .:/app
       - /app/node_modules
@@ -464,12 +474,16 @@ services:
       - NODE_ENV=development
       - NEXT_PUBLIC_API_URL=http://localhost:8000
       - NEXT_PUBLIC_WS_URL=ws://localhost:3004
+      - API_URL=http://api-gateway:8000
+      - WS_URL=ws://websocket-service:3004
     volumes:
       - ./frontend:/app
       - /app/node_modules
       - /app/.next
     depends_on:
       api-gateway:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
       migrations:
         condition: service_completed_successfully

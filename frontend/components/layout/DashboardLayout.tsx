@@ -13,6 +13,7 @@ import {
   LogOut,
   Building2,
   Workflow,
+  Smartphone,
 } from 'lucide-react';
 
 interface DashboardLayoutProps {
@@ -33,6 +34,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
     { href: '/dashboard/crm', label: 'CRM', icon: Building2 },
     { href: '/dashboard/pipeline', label: 'Воронка', icon: Workflow },
     { href: '/dashboard/messaging', label: 'Сообщения', icon: MessageSquare },
+    { href: '/dashboard/bd-accounts', label: 'BD Аккаунты', icon: Smartphone },
     { href: '/dashboard/analytics', label: 'Аналитика', icon: BarChart3 },
     { href: '/dashboard/team', label: 'Команда', icon: Users },
     { href: '/dashboard/settings', label: 'Настройки', icon: Settings },

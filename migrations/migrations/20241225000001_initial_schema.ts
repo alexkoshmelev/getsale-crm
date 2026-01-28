@@ -229,7 +229,9 @@ export async function up(knex: Knex): Promise<void> {
     table.timestamp('last_activity');
     table.timestamp('created_at').notNullable().defaultTo(knex.fn.now());
     table.timestamp('updated_at').notNullable().defaultTo(knex.fn.now());
-    
+
+    // TODO: add name or comment for editing on front
+
     table.index('organization_id');
     table.index('telegram_id');
   });
