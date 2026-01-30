@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { useAuthStore } from '@/lib/stores/auth-store';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -27,12 +28,53 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
-// Note: Token refresh is handled by the main axios interceptor in auth-store.ts
-// This interceptor just passes through - the main interceptor will handle 401 errors
+// 401: refresh token and retry once (apiClient is separate — auth-store interceptor only applies to default axios)
+let apiClientRefreshing = false;
+const apiClientQueue: Array<{ request: any; resolve: (v: any) => void; reject: (e: any) => void }> = [];
+
 apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
-    // Let the main axios interceptor handle 401 errors to avoid duplicate refresh attempts
+    const originalRequest = error.config;
+    if (
+      !originalRequest ||
+      error.response?.status !== 401 ||
+      originalRequest._retry === true ||
+      originalRequest?.url?.includes('/api/auth/signin') ||
+      originalRequest?.url?.includes('/api/auth/signup') ||
+      originalRequest?.url?.includes('/api/auth/refresh')
+    ) {
+      return Promise.reject(error);
+    }
+
+    if (apiClientRefreshing) {
+      return new Promise((resolve, reject) => {
+        apiClientQueue.push({ request: originalRequest, resolve, reject });
+      });
+    }
+
+    originalRequest._retry = true;
+    apiClientRefreshing = true;
+
+    try {
+      await useAuthStore.getState().refreshAccessToken();
+      const newToken = useAuthStore.getState().accessToken;
+      if (newToken) {
+        originalRequest.headers = { ...originalRequest.headers, Authorization: `Bearer ${newToken}` };
+        const res = await apiClient.request(originalRequest);
+        apiClientQueue.forEach(({ request, resolve, reject }) => {
+          request.headers = { ...request.headers, Authorization: `Bearer ${newToken}` };
+          apiClient.request(request).then(resolve, reject);
+        });
+        apiClientQueue.length = 0;
+        return res;
+      }
+    } catch (refreshError) {
+      apiClientQueue.forEach(({ reject: r }) => r(refreshError));
+      apiClientQueue.length = 0;
+    } finally {
+      apiClientRefreshing = false;
+    }
     return Promise.reject(error);
   }
 );

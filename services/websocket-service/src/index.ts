@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { createClient } from 'ioredis';
+import fetch from 'node-fetch';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType } from '@getsale/events';
 
@@ -102,6 +103,10 @@ async function subscribeToEvents() {
       EventType.AI_DRAFT_APPROVED,
       EventType.BD_ACCOUNT_CONNECTED,
       EventType.BD_ACCOUNT_DISCONNECTED,
+      EventType.BD_ACCOUNT_SYNC_STARTED,
+      EventType.BD_ACCOUNT_SYNC_PROGRESS,
+      EventType.BD_ACCOUNT_SYNC_COMPLETED,
+      EventType.BD_ACCOUNT_SYNC_FAILED,
       EventType.CONTACT_CREATED,
     ],
     async (event) => {
@@ -116,6 +121,7 @@ async function subscribeToEvents() {
         // Also broadcast to specific rooms based on event type
         if (event.type === EventType.MESSAGE_RECEIVED || event.type === EventType.MESSAGE_SENT) {
           const data = event.data as any;
+          console.log(`[WebSocket] ${event.type} received, bdAccountId=${data?.bdAccountId}, channelId=${data?.channelId}`);
           if (data.contactId) {
             io.to(`chat:${data.contactId}`).emit('event', {
               type: event.type,
@@ -124,6 +130,31 @@ async function subscribeToEvents() {
             });
           }
           if (data.bdAccountId) {
+            io.to(`bd-account:${data.bdAccountId}`).emit('event', {
+              type: event.type,
+              data: event.data,
+              timestamp: event.timestamp,
+            });
+            if (data.channelId) {
+              const room = `bd-account:${data.bdAccountId}:chat:${data.channelId}`;
+              io.to(room).emit('new-message', {
+                message: data,
+                timestamp: event.timestamp,
+              });
+              console.log(`[WebSocket] new-message emitted to room ${room}`);
+            }
+          }
+        }
+
+        // Sync progress: broadcast to bd-account room for progress bar
+        if (
+          event.type === EventType.BD_ACCOUNT_SYNC_STARTED ||
+          event.type === EventType.BD_ACCOUNT_SYNC_PROGRESS ||
+          event.type === EventType.BD_ACCOUNT_SYNC_COMPLETED ||
+          event.type === EventType.BD_ACCOUNT_SYNC_FAILED
+        ) {
+          const data = event.data as any;
+          if (data?.bdAccountId) {
             io.to(`bd-account:${data.bdAccountId}`).emit('event', {
               type: event.type,
               data: event.data,

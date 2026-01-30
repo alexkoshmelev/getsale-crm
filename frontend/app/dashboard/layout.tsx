@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import DashboardLayout from '@/components/layout/DashboardLayout';
+import { WebSocketProvider } from '@/lib/contexts/websocket-context';
 
 export default function DashboardLayoutWrapper({
   children,
@@ -62,6 +63,10 @@ export default function DashboardLayoutWrapper({
     );
   }
 
-  return <DashboardLayout>{children}</DashboardLayout>;
+  return (
+    <WebSocketProvider>
+      <DashboardLayout>{children}</DashboardLayout>
+    </WebSocketProvider>
+  );
 }
 

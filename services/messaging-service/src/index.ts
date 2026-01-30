@@ -1,4 +1,5 @@
 import express from 'express';
+import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, MessageSentEvent } from '@getsale/events';
@@ -57,11 +58,11 @@ app.get('/api/messaging/inbox', async (req, res) => {
   }
 });
 
-// Get messages for a contact/channel
+// Get messages for a contact/channel (optionally scoped to a BD account)
 app.get('/api/messaging/messages', async (req, res) => {
   try {
     const user = getUser(req);
-    const { contactId, channel, channelId, page = 1, limit = 50 } = req.query;
+    const { contactId, channel, channelId, bdAccountId, page = 1, limit = 50 } = req.query;
 
     let query = 'SELECT * FROM messages WHERE organization_id = $1';
     const params: any[] = [user.organizationId];
@@ -76,13 +77,19 @@ app.get('/api/messaging/messages', async (req, res) => {
       params.push(channel, channelId);
     }
 
-    // Pagination
+    if (bdAccountId && String(bdAccountId).trim()) {
+      query += ` AND bd_account_id = $${params.length + 1}`;
+      params.push(bdAccountId);
+    }
+
+    // Pagination: last N by time (DESC), then return in chronological order (oldest first — last message at bottom like Telegram)
     const offset = (parseInt(String(page)) - 1) * parseInt(String(limit));
-    query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    query += ` ORDER BY COALESCE(telegram_date, created_at) DESC NULLS LAST LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     params.push(parseInt(String(limit)), offset);
 
     const result = await pool.query(query, params);
-    
+    const rows = (result.rows as any[]).slice().reverse();
+
     // Get total count
     let countQuery = 'SELECT COUNT(*) FROM messages WHERE organization_id = $1';
     const countParams: any[] = [user.organizationId];
@@ -94,11 +101,15 @@ app.get('/api/messaging/messages', async (req, res) => {
       countQuery += ` AND channel = $${countParams.length + 1} AND channel_id = $${countParams.length + 2}`;
       countParams.push(channel, channelId);
     }
+    if (bdAccountId && String(bdAccountId).trim()) {
+      countQuery += ` AND bd_account_id = $${countParams.length + 1}`;
+      countParams.push(bdAccountId);
+    }
     const countResult = await pool.query(countQuery, countParams);
     const total = parseInt(countResult.rows[0].count);
 
     res.json({
-      messages: result.rows,
+      messages: rows,
       pagination: {
         page: parseInt(String(page)),
         limit: parseInt(String(limit)),
@@ -134,26 +145,40 @@ app.get('/api/messaging/messages/:id', async (req, res) => {
   }
 });
 
-// Get all chats
+// Get all chats (from DB only; optionally filtered by bd_account_id so only allowed sync chats appear)
 app.get('/api/messaging/chats', async (req, res) => {
   try {
     const user = getUser(req);
-    const { channel } = req.query;
+    const { channel, bdAccountId } = req.query;
 
     let query = `
       SELECT 
         m.channel,
         m.channel_id,
+        m.bd_account_id,
         m.contact_id,
         c.first_name,
         c.last_name,
         c.email,
         c.telegram_id,
+        c.display_name,
+        c.username,
+        COALESCE(
+          c.display_name,
+          CASE WHEN NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), '') IS NOT NULL
+               AND TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) NOT LIKE 'Telegram %'
+               THEN TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) ELSE NULL END,
+          c.username,
+          NULLIF(TRIM(COALESCE(s.title, '')), ''),
+          c.telegram_id::text,
+          m.channel_id
+        ) AS name,
         COUNT(*) FILTER (WHERE m.unread = true) as unread_count,
-        MAX(m.created_at) as last_message_at,
-        (SELECT content FROM messages WHERE channel = m.channel AND channel_id = m.channel_id ORDER BY created_at DESC LIMIT 1) as last_message
+        (SELECT COALESCE(m2.telegram_date, m2.created_at) FROM messages m2 WHERE m2.organization_id = m.organization_id AND m2.channel = m.channel AND m2.channel_id = m.channel_id AND (m2.bd_account_id IS NOT DISTINCT FROM m.bd_account_id) ORDER BY COALESCE(m2.telegram_date, m2.created_at) DESC LIMIT 1) as last_message_at,
+        (SELECT content FROM messages m2 WHERE m2.organization_id = m.organization_id AND m2.channel = m.channel AND m2.channel_id = m.channel_id AND (m2.bd_account_id IS NOT DISTINCT FROM m.bd_account_id) ORDER BY COALESCE(m2.telegram_date, m2.created_at) DESC LIMIT 1) as last_message
       FROM messages m
       LEFT JOIN contacts c ON m.contact_id = c.id
+      LEFT JOIN bd_account_sync_chats s ON s.bd_account_id = m.bd_account_id AND s.telegram_chat_id = m.channel_id
       WHERE m.organization_id = $1
     `;
     const params: any[] = [user.organizationId];
@@ -163,9 +188,18 @@ app.get('/api/messaging/chats', async (req, res) => {
       params.push(channel);
     }
 
+    // If bdAccountId provided, only return chats that are in bd_account_sync_chats for this account
+    if (bdAccountId) {
+      query += ` AND m.bd_account_id = $${params.length + 1} AND EXISTS (
+        SELECT 1 FROM bd_account_sync_chats s
+        WHERE s.bd_account_id = m.bd_account_id AND s.telegram_chat_id = m.channel_id
+      )`;
+      params.push(bdAccountId);
+    }
+
     query += `
-      GROUP BY m.channel, m.channel_id, m.contact_id, c.first_name, c.last_name, c.email, c.telegram_id
-      ORDER BY last_message_at DESC
+      GROUP BY m.organization_id, m.channel, m.channel_id, m.bd_account_id, m.contact_id, c.first_name, c.last_name, c.email, c.telegram_id, c.display_name, c.username, s.title
+      ORDER BY last_message_at DESC NULLS LAST
     `;
 
     const result = await pool.query(query, params);
@@ -365,7 +399,7 @@ app.post('/api/messaging/send', async (req, res) => {
 
     // Publish event
     const event: MessageSentEvent = {
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       type: EventType.MESSAGE_SENT,
       timestamp: new Date(),
       organizationId: user.organizationId,

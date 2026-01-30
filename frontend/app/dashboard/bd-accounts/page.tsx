@@ -1,7 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { apiClient } from '@/lib/api/client';
+import { useWebSocketContext } from '@/lib/contexts/websocket-context';
 import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -15,6 +17,11 @@ interface BDAccount {
   connected_at?: string;
   last_activity?: string;
   created_at: string;
+  sync_status?: string;
+  sync_progress_done?: number;
+  sync_progress_total?: number;
+  sync_error?: string;
+  is_owner?: boolean; // только свои аккаунты показываем на этой странице
 }
 
 interface Dialog {
@@ -29,13 +36,27 @@ interface Dialog {
 }
 
 export default function BDAccountsPage() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const { subscribe, unsubscribe, on, off, isConnected } = useWebSocketContext();
   const [accounts, setAccounts] = useState<BDAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [showConnectModal, setShowConnectModal] = useState(false);
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
   const [dialogs, setDialogs] = useState<Dialog[]>([]);
   const [loadingDialogs, setLoadingDialogs] = useState(false);
-  const [connectStep, setConnectStep] = useState<'credentials' | 'code' | 'password'>('credentials');
+  const [connectStep, setConnectStep] = useState<'credentials' | 'qr' | 'code' | 'password' | 'select-chats'>('credentials');
+  const [loginMethod, setLoginMethod] = useState<'phone' | 'qr'>('phone');
+  const [qrSessionId, setQrSessionId] = useState<string | null>(null);
+  const [qrState, setQrState] = useState<{ status: string; loginTokenUrl?: string; accountId?: string; error?: string; passwordHint?: string } | null>(null);
+  const [qr2faPassword, setQr2faPassword] = useState('');
+  const [submittingQrPassword, setSubmittingQrPassword] = useState(false);
+  const [qrPendingReason, setQrPendingReason] = useState<'password' | null>(null);
+  const [qrJustConnected, setQrJustConnected] = useState(false);
+  const [startingQr, setStartingQr] = useState(false);
+  const [selectedChatIds, setSelectedChatIds] = useState<Set<string>>(new Set());
+  const [syncProgress, setSyncProgress] = useState<{ done: number; total: number; currentTitle?: string } | null>(null);
+  const [startingSync, setStartingSync] = useState(false);
   const [connectForm, setConnectForm] = useState({
     phoneNumber: '',
     apiId: '',
@@ -53,10 +74,103 @@ export default function BDAccountsPage() {
     fetchAccounts();
   }, []);
 
+  // Открыть модалку «Выбор чатов» по ссылке с Мессенджера (?accountId=...&openSelectChats=1)
+  useEffect(() => {
+    const accountId = searchParams.get('accountId');
+    const openSelectChats = searchParams.get('openSelectChats');
+    if (!accountId || openSelectChats !== '1') return;
+    setShowConnectModal(true);
+    setConnectStep('select-chats');
+    setConnectingAccountId(accountId);
+    setSyncProgress(null);
+    setError(null);
+    setLoadingDialogs(true);
+    router.replace('/dashboard/bd-accounts'); // убрать query из URL
+    Promise.all([
+      apiClient.get(`/api/bd-accounts/${accountId}/dialogs`).then((res) => Array.isArray(res.data) ? res.data : []),
+      apiClient.get(`/api/bd-accounts/${accountId}/sync-chats`).then((res) => (Array.isArray(res.data) ? res.data : []) as { telegram_chat_id: string }[]),
+    ])
+      .then(([dialogsList, syncChatsList]) => {
+        setDialogs(dialogsList);
+        const alreadySelected = new Set(syncChatsList.map((c) => String(c.telegram_chat_id)));
+        setSelectedChatIds(alreadySelected);
+      })
+      .catch((e) => {
+        console.error('Failed to load dialogs or sync-chats:', e);
+        setDialogs([]);
+        setSelectedChatIds(new Set());
+        setError(e?.response?.data?.error || 'Ошибка загрузки');
+      })
+      .finally(() => setLoadingDialogs(false));
+  }, [searchParams, router]);
+
+  // Subscribe to bd-account room for sync progress when in select-chats step
+  useEffect(() => {
+    if (connectStep !== 'select-chats' || !connectingAccountId || !isConnected) return;
+    const room = `bd-account:${connectingAccountId}`;
+    subscribe(room);
+    const handler = (payload: { type: string; data?: any }) => {
+      if (payload.type === 'bd_account.sync.started' && payload.data?.bdAccountId === connectingAccountId) {
+        setSyncProgress({ done: 0, total: payload.data?.totalChats ?? 0 });
+      }
+      if (payload.type === 'bd_account.sync.progress' && payload.data?.bdAccountId === connectingAccountId) {
+        setSyncProgress({
+          done: payload.data?.done ?? 0,
+          total: payload.data?.total ?? 0,
+          currentTitle: payload.data?.currentChatTitle,
+        });
+      }
+      if (payload.type === 'bd_account.sync.completed' && payload.data?.bdAccountId === connectingAccountId) {
+        setSyncProgress(null);
+        setStartingSync(false);
+        fetchAccounts();
+        handleCloseModal();
+      }
+      if (payload.type === 'bd_account.sync.failed' && payload.data?.bdAccountId === connectingAccountId) {
+        setSyncProgress(null);
+        setStartingSync(false);
+        setError(payload.data?.error ?? 'Синхронизация не удалась');
+      }
+    };
+    on('event', handler);
+    return () => {
+      off('event', handler);
+      unsubscribe(room);
+    };
+  }, [connectStep, connectingAccountId, isConnected, subscribe, unsubscribe, on, off]);
+
+  // Опрос прогресса синхронизации (fallback, если WebSocket не доставляет события)
+  useEffect(() => {
+    if (syncProgress === null || !connectingAccountId) return;
+    const t = setInterval(async () => {
+      try {
+        const res = await apiClient.get(`/api/bd-accounts/${connectingAccountId}/sync-status`);
+        const d = res.data;
+        const status = d.sync_status ?? 'idle';
+        const done = Number(d.sync_progress_done ?? 0);
+        const total = Number(d.sync_progress_total ?? 0);
+        setSyncProgress((prev) => (prev ? { ...prev, done, total } : { done, total }));
+        if (status === 'completed') {
+          setSyncProgress(null);
+          setStartingSync(false);
+          fetchAccounts();
+          handleCloseModal();
+        } else if (status === 'idle' && d.sync_error) {
+          setSyncProgress(null);
+          setStartingSync(false);
+          setError(d.sync_error);
+        }
+      } catch (_) {}
+    }, 2000);
+    return () => clearInterval(t);
+  }, [connectingAccountId, syncProgress]);
+
   const fetchAccounts = async () => {
     try {
       const response = await apiClient.get('/api/bd-accounts');
-      setAccounts(response.data);
+      // На странице BD Аккаунтов показываем только свои (управление своими Telegram-аккаунтами)
+      const myAccounts = Array.isArray(response.data) ? response.data.filter((a: BDAccount) => a.is_owner === true) : [];
+      setAccounts(myAccounts);
     } catch (error: any) {
       console.error('Error fetching accounts:', error);
       setError(error.response?.data?.error || 'Ошибка загрузки аккаунтов');
@@ -144,7 +258,21 @@ export default function BDAccountsPage() {
       });
 
       setAccounts((prev) => [response.data, ...prev]);
-      handleCloseModal();
+      setConnectStep('select-chats');
+      setSelectedChatIds(new Set());
+      setSyncProgress(null);
+      if (connectingAccountId) {
+        setLoadingDialogs(true);
+        try {
+          const dialogsRes = await apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs`);
+          setDialogs(Array.isArray(dialogsRes.data) ? dialogsRes.data : []);
+        } catch (e) {
+          console.error('Failed to load dialogs:', e);
+          setDialogs([]);
+        } finally {
+          setLoadingDialogs(false);
+        }
+      }
     } catch (error: any) {
       console.error('Error verifying code:', error);
       const errorMessage = error.response?.data?.message || error.response?.data?.error || 'Ошибка верификации';
@@ -164,6 +292,7 @@ export default function BDAccountsPage() {
   const handleCloseModal = () => {
     setShowConnectModal(false);
     setConnectStep('credentials');
+    setLoginMethod('phone');
     setConnectForm({
       phoneNumber: '',
       apiId: '',
@@ -173,7 +302,118 @@ export default function BDAccountsPage() {
     });
     setConnectingAccountId(null);
     setPhoneCodeHash(null);
+    setQrSessionId(null);
+    setQrState(null);
+    setQr2faPassword('');
+    setQrPendingReason(null);
+    setQrJustConnected(false);
     setError(null);
+    setSelectedChatIds(new Set());
+    setSyncProgress(null);
+    setStartingSync(false);
+  };
+
+  const handleSubmitQr2faPassword = async () => {
+    if (!qrSessionId || !qr2faPassword.trim()) return;
+    setSubmittingQrPassword(true);
+    setError(null);
+    setQrPendingReason('password');
+    try {
+      await apiClient.post('/api/bd-accounts/qr-login-password', { sessionId: qrSessionId, password: qr2faPassword.trim() });
+      setQr2faPassword('');
+      setQrState((prev) => (prev ? { ...prev, status: 'pending' } : null));
+    } catch (err: any) {
+      setError(err?.response?.data?.error || 'Не удалось отправить пароль');
+    } finally {
+      setSubmittingQrPassword(false);
+    }
+  };
+
+  const handleStartQrLogin = async () => {
+    if (!connectForm.apiId || !connectForm.apiHash) {
+      setError('Введите API ID и API Hash (получите на my.telegram.org/apps)');
+      return;
+    }
+    setStartingQr(true);
+    setError(null);
+    try {
+      const res = await apiClient.post('/api/bd-accounts/start-qr-login', {
+        apiId: parseInt(connectForm.apiId),
+        apiHash: connectForm.apiHash,
+      });
+      setQrSessionId(res.data.sessionId);
+      setConnectStep('qr');
+      setQrState({ status: 'pending' });
+    } catch (err: any) {
+      setError(err?.response?.data?.message || err?.response?.data?.error || 'Ошибка запуска QR-входа');
+    } finally {
+      setStartingQr(false);
+    }
+  };
+
+  useEffect(() => {
+    if (connectStep !== 'qr' || !qrSessionId) return;
+    const t = setInterval(async () => {
+      try {
+        const res = await apiClient.get('/api/bd-accounts/qr-login-status', { params: { sessionId: qrSessionId } });
+        const data = res.data;
+        setQrState({ status: data.status, loginTokenUrl: data.loginTokenUrl, accountId: data.accountId, error: data.error, passwordHint: data.passwordHint });
+        if (data.status === 'success' && data.accountId) {
+          setQrPendingReason(null);
+          setConnectingAccountId(data.accountId);
+          setQrJustConnected(true);
+          setQrState({ ...data, status: 'success' });
+          setQrSessionId(null);
+          fetchAccounts();
+          setTimeout(() => {
+            setQrJustConnected(false);
+            setQrState(null);
+            setConnectStep('select-chats');
+            setLoadingDialogs(true);
+            apiClient.get(`/api/bd-accounts/${data.accountId}/dialogs`).then((dialogsRes) => {
+              setDialogs(Array.isArray(dialogsRes.data) ? dialogsRes.data : []);
+            }).catch(() => setDialogs([])).finally(() => setLoadingDialogs(false));
+          }, 1800);
+        }
+        if (data.status === 'error') setQrPendingReason(null);
+      } catch (_) {
+        setQrState((prev) => (prev ? { ...prev, status: 'error', error: 'Сессия истекла' } : null));
+      }
+    }, 1500);
+    return () => clearInterval(t);
+  }, [connectStep, qrSessionId]);
+
+  const toggleChatSelection = (id: string) => {
+    setSelectedChatIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleSaveAndSync = async () => {
+    if (!connectingAccountId || selectedChatIds.size === 0) {
+      setError('Выберите хотя бы один чат');
+      return;
+    }
+    setStartingSync(true);
+    setError(null);
+    try {
+      const chatsToSave = dialogs.filter((d) => selectedChatIds.has(String(d.id))).map((d) => ({
+        id: d.id,
+        name: d.name,
+        isUser: d.isUser,
+        isGroup: d.isGroup,
+        isChannel: d.isChannel,
+      }));
+      await apiClient.post(`/api/bd-accounts/${connectingAccountId}/sync-chats`, { chats: chatsToSave });
+      await apiClient.post(`/api/bd-accounts/${connectingAccountId}/sync-start`);
+      setSyncProgress({ done: 0, total: chatsToSave.length });
+    } catch (err: any) {
+      setError(err.response?.data?.message ?? err.response?.data?.error ?? 'Ошибка запуска синхронизации');
+      setStartingSync(false);
+    }
   };
 
   const handleDisconnect = async (accountId: string) => {
@@ -305,8 +545,10 @@ export default function BDAccountsPage() {
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold text-gray-900 dark:text-white">
                 {connectStep === 'credentials' && 'Подключить Telegram аккаунт'}
+                {connectStep === 'qr' && 'Вход по QR-коду'}
                 {connectStep === 'code' && 'Введите код из SMS'}
                 {connectStep === 'password' && 'Введите пароль 2FA'}
+                {connectStep === 'select-chats' && 'Выберите чаты для синхронизации'}
               </h2>
               <Button variant="outline" size="sm" onClick={handleCloseModal}>
                 ✕
@@ -320,22 +562,49 @@ export default function BDAccountsPage() {
             )}
 
             <div className="space-y-4">
-              {/* Step 1: Credentials */}
+              {/* Step 1: Credentials — выбор способа: по номеру или по QR */}
               {connectStep === 'credentials' && (
                 <>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                      Номер телефона
-                    </label>
-                    <Input
-                      type="tel"
-                      value={connectForm.phoneNumber}
-                      onChange={(e) =>
-                        setConnectForm({ ...connectForm, phoneNumber: e.target.value })
-                      }
-                      placeholder="+1234567890"
-                    />
+                  <div className="flex rounded-lg border border-gray-200 dark:border-gray-700 p-1 bg-gray-50 dark:bg-gray-800">
+                    <button
+                      type="button"
+                      onClick={() => setLoginMethod('phone')}
+                      className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
+                        loginMethod === 'phone'
+                          ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow'
+                          : 'text-gray-600 dark:text-gray-400 hover:text-gray-900'
+                      }`}
+                    >
+                      По номеру телефона
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLoginMethod('qr')}
+                      className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
+                        loginMethod === 'qr'
+                          ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow'
+                          : 'text-gray-600 dark:text-gray-400 hover:text-gray-900'
+                      }`}
+                    >
+                      По QR-коду
+                    </button>
                   </div>
+
+                  {loginMethod === 'phone' && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                        Номер телефона
+                      </label>
+                      <Input
+                        type="tel"
+                        value={connectForm.phoneNumber}
+                        onChange={(e) =>
+                          setConnectForm({ ...connectForm, phoneNumber: e.target.value })
+                        }
+                        placeholder="+1234567890"
+                      />
+                    </div>
+                  )}
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -371,6 +640,83 @@ export default function BDAccountsPage() {
                       placeholder="abcdef1234567890"
                     />
                   </div>
+                </>
+              )}
+
+              {/* Step QR: показать QR и ждать сканирования */}
+              {connectStep === 'qr' && qrState && (
+                <>
+                  {qrState.status === 'pending' && !qrJustConnected && (
+                    <div className="flex flex-col items-center justify-center py-8">
+                      <Loader2 className="w-12 h-12 animate-spin text-blue-600 mb-4" />
+                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                        {qrPendingReason === 'password' ? 'Проверка пароля и подключение аккаунта…' : 'Генерация QR-кода…'}
+                      </p>
+                    </div>
+                  )}
+                  {qrJustConnected && (
+                    <div className="flex flex-col items-center justify-center py-10">
+                      <div className="w-16 h-16 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center mb-4">
+                        <CheckCircle2 className="w-10 h-10 text-green-600 dark:text-green-400" />
+                      </div>
+                      <p className="text-lg font-semibold text-green-800 dark:text-green-200">Аккаунт подключён</p>
+                      <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">Переход к выбору чатов…</p>
+                    </div>
+                  )}
+                  {qrState.status === 'qr' && qrState.loginTokenUrl && (
+                    <div className="flex flex-col items-center py-4">
+                      <div className="bg-white p-4 rounded-xl shadow-inner">
+                        <img
+                          src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(qrState.loginTokenUrl)}`}
+                          alt="QR для входа в Telegram"
+                          className="w-64 h-64"
+                        />
+                      </div>
+                      <p className="text-sm text-gray-600 dark:text-gray-400 mt-4 text-center max-w-xs">
+                        Откройте Telegram на телефоне → Настройки → Устройства → Подключить устройство и отсканируйте QR-код
+                      </p>
+                      <p className="text-xs text-gray-500 mt-2">Код обновляется автоматически каждые ~30 сек.</p>
+                    </div>
+                  )}
+                  {qrState.status === 'need_password' && (
+                    <div className="py-4 space-y-3">
+                      <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
+                        <p className="text-sm text-amber-800 dark:text-amber-200 font-medium">Требуется пароль 2FA</p>
+                        <p className="text-xs text-amber-700 dark:text-amber-300 mt-0.5">
+                          У этого аккаунта включена двухфакторная аутентификация. Введите пароль облачного пароля Telegram.
+                        </p>
+                        {qrState.passwordHint && (
+                          <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">Подсказка: {qrState.passwordHint}</p>
+                        )}
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                          Пароль 2FA
+                        </label>
+                        <Input
+                          type="password"
+                          value={qr2faPassword}
+                          onChange={(e) => setQr2faPassword(e.target.value)}
+                          placeholder="••••••••"
+                          autoFocus
+                          onKeyDown={(e) => e.key === 'Enter' && handleSubmitQr2faPassword()}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {qrState.status === 'expired' && (
+                    <div className="flex flex-col items-center justify-center py-8">
+                      <Loader2 className="w-12 h-12 animate-spin text-blue-600 mb-4" />
+                      <p className="text-sm text-gray-600 dark:text-gray-400">Обновление QR-кода…</p>
+                      <p className="text-xs text-gray-500 mt-1">Новый код появится через пару секунд.</p>
+                    </div>
+                  )}
+                  {qrState.status === 'error' && qrState.error && (
+                    <div className="py-4 space-y-3">
+                      <p className="text-sm text-red-600 dark:text-red-400">{qrState.error}</p>
+                      <p className="text-xs text-gray-500">Нажмите «Попробовать снова», чтобы показать новый QR-код.</p>
+                    </div>
+                  )}
                 </>
               )}
 
@@ -421,6 +767,64 @@ export default function BDAccountsPage() {
                   </div>
                 </>
               )}
+
+              {/* Step 4: Select chats for sync */}
+              {connectStep === 'select-chats' && (
+                <>
+                  {connectingAccountId && (
+                    <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-3 mb-4">
+                      <p className="text-sm text-green-800 dark:text-green-200 font-medium">Аккаунт подключён</p>
+                      <p className="text-xs text-green-700 dark:text-green-300 mt-0.5">
+                        Выберите чаты для синхронизации или пропустите и настройте позже в разделе «Мессенджер».
+                      </p>
+                    </div>
+                  )}
+                  <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+                    Выберите папки или чаты для синхронизации. Только выбранные чаты будут отображаться в Мессенджере.
+                  </p>
+                  {syncProgress !== null ? (
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-sm">
+                        <span>Синхронизация… {syncProgress.currentTitle && `(${syncProgress.currentTitle})`}</span>
+                        <span>{syncProgress.done} / {syncProgress.total}</span>
+                      </div>
+                      <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-blue-600 transition-all duration-300"
+                          style={{ width: syncProgress.total ? `${(100 * syncProgress.done) / syncProgress.total}%` : '0%' }}
+                        />
+                      </div>
+                    </div>
+                  ) : loadingDialogs ? (
+                    <div className="flex items-center justify-center py-8">
+                      <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+                    </div>
+                  ) : (
+                    <div className="max-h-64 overflow-y-auto space-y-2 border border-gray-200 dark:border-gray-700 rounded-lg p-2">
+                      {dialogs.map((dialog) => (
+                        <label
+                          key={dialog.id}
+                          className="flex items-center gap-3 p-2 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedChatIds.has(String(dialog.id))}
+                            onChange={() => toggleChatSelection(String(dialog.id))}
+                            className="rounded border-gray-300"
+                          />
+                          <span className="font-medium text-sm truncate">{dialog.name}</span>
+                          {dialog.isUser && <span className="text-xs text-blue-600">User</span>}
+                          {dialog.isGroup && <span className="text-xs text-green-600">Group</span>}
+                          {dialog.isChannel && <span className="text-xs text-purple-600">Channel</span>}
+                        </label>
+                      ))}
+                      {dialogs.length === 0 && (
+                        <p className="text-sm text-gray-500 py-4 text-center">Нет диалогов</p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
 
             <div className="flex gap-2 mt-6">
@@ -433,16 +837,62 @@ export default function BDAccountsPage() {
                   >
                     Отмена
                   </Button>
-                  <Button onClick={handleSendCode} disabled={sendingCode} className="flex-1">
-                    {sendingCode ? (
-                      <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Отправка...
-                      </>
-                    ) : (
-                      'Отправить код'
-                    )}
+                  {loginMethod === 'phone' ? (
+                    <Button onClick={handleSendCode} disabled={sendingCode} className="flex-1">
+                      {sendingCode ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Отправка...
+                        </>
+                      ) : (
+                        'Отправить код'
+                      )}
+                    </Button>
+                  ) : (
+                    <Button onClick={handleStartQrLogin} disabled={startingQr} className="flex-1">
+                      {startingQr ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Загрузка...
+                        </>
+                      ) : (
+                        'Показать QR-код'
+                      )}
+                    </Button>
+                  )}
+                </>
+              )}
+
+              {connectStep === 'qr' && (
+                <>
+                  <Button
+                    variant="outline"
+                    onClick={() => { setConnectStep('credentials'); setQrSessionId(null); setQrState(null); setQr2faPassword(''); }}
+                    className="flex-1"
+                  >
+                    Назад
                   </Button>
+                  {qrState?.status === 'need_password' ? (
+                    <Button
+                      onClick={handleSubmitQr2faPassword}
+                      disabled={submittingQrPassword || !qr2faPassword.trim()}
+                      className="flex-1"
+                    >
+                      {submittingQrPassword ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Подтвердить'}
+                    </Button>
+                  ) : qrState?.status === 'error' ? (
+                    <Button
+                      onClick={() => { setQrSessionId(null); setQrState({ status: 'pending' }); setError(null); handleStartQrLogin(); }}
+                      disabled={startingQr}
+                      className="flex-1"
+                    >
+                      {startingQr ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Попробовать снова'}
+                    </Button>
+                  ) : (
+                    <Button variant="outline" onClick={handleCloseModal} className="flex-1">
+                      Отмена
+                    </Button>
+                  )}
                 </>
               )}
 
@@ -485,6 +935,28 @@ export default function BDAccountsPage() {
                       </>
                     ) : (
                       'Подключить'
+                    )}
+                  </Button>
+                </>
+              )}
+
+              {connectStep === 'select-chats' && !syncProgress && (
+                <>
+                  <Button variant="outline" onClick={handleCloseModal} className="flex-1">
+                    Пропустить
+                  </Button>
+                  <Button
+                    onClick={handleSaveAndSync}
+                    disabled={startingSync || selectedChatIds.size === 0 || loadingDialogs}
+                    className="flex-1"
+                  >
+                    {startingSync ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Запуск…
+                      </>
+                    ) : (
+                      'Сохранить и синхронизировать'
                     )}
                   </Button>
                 </>

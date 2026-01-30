@@ -4,15 +4,23 @@ import { useAuthStore } from '@/lib/stores/auth-store';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3004';
 
+/** Delay before disconnecting on cleanup (avoids double connection in React Strict Mode) */
+const DISCONNECT_DELAY_MS = 200;
+
 export function useWebSocket() {
   const socketRef = useRef<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { accessToken, user } = useAuthStore();
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const disconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     if (!accessToken) {
+      if (disconnectTimeoutRef.current) {
+        clearTimeout(disconnectTimeoutRef.current);
+        disconnectTimeoutRef.current = null;
+      }
       if (socketRef.current) {
         socketRef.current.disconnect();
         socketRef.current = null;
@@ -21,69 +29,98 @@ export function useWebSocket() {
       return;
     }
 
-    const socket = io(WS_URL, {
-      auth: {
-        token: accessToken,
-      },
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      reconnectionAttempts: 5,
-    });
+    // Cancel pending disconnect (React Strict Mode remounts immediately)
+    if (disconnectTimeoutRef.current) {
+      clearTimeout(disconnectTimeoutRef.current);
+      disconnectTimeoutRef.current = null;
+    }
 
-    socket.on('connect', () => {
+    let socket = socketRef.current;
+    const reuseSocket = socket && (socket.connected || socket.connecting);
+
+    if (!reuseSocket) {
+      socket = io(WS_URL, {
+        auth: {
+          token: accessToken,
+        },
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        reconnectionAttempts: 5,
+      });
+      socketRef.current = socket;
+    } else {
+      (socket as any).auth = { token: accessToken };
+    }
+
+    const onConnect = () => {
       console.log('[WebSocket] Connected');
       setIsConnected(true);
       setError(null);
-      
-      // Clear any reconnect timeout
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;
       }
-    });
+    };
 
-    socket.on('connected', (data: any) => {
+    const onConnected = (data: any) => {
       console.log('[WebSocket] Connection confirmed:', data);
-    });
+    };
 
-    socket.on('disconnect', (reason: string) => {
+    const onDisconnect = (reason: string) => {
       console.log('[WebSocket] Disconnected:', reason);
       setIsConnected(false);
-      
-      // Attempt reconnect if not intentional
       if (reason === 'io server disconnect') {
-        // Server disconnected, try to reconnect
         reconnectTimeoutRef.current = setTimeout(() => {
-          socket.connect();
+          socket!.connect();
         }, 2000);
       }
-    });
+    };
 
-    socket.on('connect_error', (err: Error) => {
+    const onConnectError = (err: Error) => {
       console.error('[WebSocket] Connection error:', err);
       setError(err.message);
       setIsConnected(false);
-    });
+    };
 
-    // Handle ping/pong for heartbeat
-    socket.on('ping', (data: { timestamp: number }) => {
+    const onPing = () => {
       socket.emit('pong');
-    });
+    };
 
-    socket.on('error', (data: { message: string }) => {
+    const onError = (data: { message: string }) => {
       console.error('[WebSocket] Error:', data);
       setError(data.message);
-    });
+    };
 
-    socketRef.current = socket;
+    if (reuseSocket) {
+      socket.off('connect');
+      socket.off('connected');
+      socket.off('disconnect');
+      socket.off('connect_error');
+      socket.off('ping');
+      socket.off('error');
+      if (socket.connected) {
+        setIsConnected(true);
+        setError(null);
+      }
+    }
+    socket.on('connect', onConnect);
+    socket.on('connected', onConnected);
+    socket.on('disconnect', onDisconnect);
+    socket.on('connect_error', onConnectError);
+    socket.on('ping', onPing);
+    socket.on('error', onError);
 
     return () => {
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
       }
-      socket.disconnect();
+      disconnectTimeoutRef.current = setTimeout(() => {
+        disconnectTimeoutRef.current = null;
+        socket.disconnect();
+      }, DISCONNECT_DELAY_MS);
     };
   }, [accessToken]);
 

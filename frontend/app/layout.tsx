@@ -1,3 +1,8 @@
+/**
+ * Known console noise (not from this app):
+ * - "A listener indicated an asynchronous response... message channel closed"
+ *   → Comes from a Chrome extension (e.g. password manager, ad blocker). Safe to ignore.
+ */
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import './globals.css';

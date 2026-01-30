@@ -91,9 +91,9 @@ export default function TeamPage() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {members.map((member) => (
+            {members.map((member, index) => (
               <div
-                key={member.id}
+                key={member.id ?? member.user_id ?? `member-${index}`}
                 className="p-4 border border-gray-200 dark:border-gray-700 rounded-lg hover:shadow-md transition-shadow"
               >
                 <div className="flex items-center gap-3 mb-3">

@@ -1,13 +1,17 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { apiClient } from '@/lib/api/client';
+import { useAuthStore } from '@/lib/stores/auth-store';
+import { useWebSocketContext } from '@/lib/contexts/websocket-context';
+import { setCurrentMessagingChat } from '@/lib/messaging-open-chat';
 import { 
   Plus, Search, Send, MoreVertical, MessageSquare, 
   CheckCircle2, XCircle, Loader2, Settings, Trash2,
   Mic, Paperclip, FileText, Image, Video, File,
   Sparkles, Zap, History, FileCode, Bot, Workflow,
-  ChevronDown, X, Clock, UserCircle, Tag, BarChart3
+  ChevronDown, X, Clock, UserCircle, Tag, BarChart3,
+  Music, Film
 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -22,6 +26,9 @@ interface BDAccount {
   connected_at?: string;
   last_activity?: string;
   created_at: string;
+  sync_status?: string;
+  owner_id?: string | null;
+  is_owner?: boolean; // текущий пользователь — владелец (может управлять аккаунтом)
 }
 
 interface Chat {
@@ -32,6 +39,8 @@ interface Chat {
   last_name: string | null;
   email: string | null;
   telegram_id: string | null;
+  display_name: string | null;  // кастомное имя контакта/лида
+  username: string | null;       // Telegram @username
   name: string | null;
   unread_count: number;
   last_message_at: string;
@@ -47,9 +56,198 @@ interface Message {
   contact_id: string | null;
   channel: string;
   channel_id: string;
+  telegram_message_id?: string | null;  // id сообщения в Telegram (для прокси медиа)
+  telegram_media?: Record<string, unknown> | null;
+  telegram_entities?: Array<Record<string, unknown>> | null;
+  telegram_date?: string | null;  // оригинальное время отправки в Telegram
+}
+
+/** Тип медиа из telegram_media (GramJS: messageMediaPhoto, messageMediaDocument и т.д.) */
+type MessageMediaType = 'text' | 'photo' | 'voice' | 'audio' | 'video' | 'document' | 'sticker' | 'unknown';
+
+function getMessageMediaType(msg: Message): MessageMediaType {
+  const media = msg.telegram_media;
+  if (!media || typeof media !== 'object') return 'text';
+  const type = (media as any)._ ?? (media as any).className;
+  if (type === 'messageMediaPhoto' || type === 'MessageMediaPhoto') return 'photo';
+  if (type === 'messageMediaDocument' || type === 'MessageMediaDocument') {
+    const doc = (media as any).document;
+    if (doc && Array.isArray(doc.attributes)) {
+      for (const a of doc.attributes) {
+        const attr = (a as any)._ ?? (a as any).className;
+        if (attr === 'documentAttributeAudio' || attr === 'DocumentAttributeAudio') {
+          return (a as any).voice ? 'voice' : 'audio';
+        }
+        if (attr === 'documentAttributeVideo' || attr === 'DocumentAttributeVideo') return 'video';
+      }
+    }
+    return 'document';
+  }
+  if (type === 'messageMediaSticker' || type === 'MessageMediaSticker') return 'sticker';
+  if (type === 'messageMediaContact' || type === 'MessageMediaContact') return 'unknown';
+  return 'text';
+}
+
+const mediaLabels: Record<MessageMediaType, string> = {
+  text: '',
+  photo: 'Фото',
+  voice: 'Голосовое сообщение',
+  audio: 'Аудио',
+  video: 'Видео',
+  document: 'Документ',
+  sticker: 'Стикер',
+  unknown: 'Вложение',
+};
+
+function DownloadLink({ url, className }: { url: string; className?: string }) {
+  const [loading, setLoading] = useState(false);
+  const handleClick = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (loading) return;
+    setLoading(true);
+    try {
+      const authStorage = typeof window !== 'undefined' ? localStorage.getItem('auth-storage') : null;
+      const token = authStorage ? (JSON.parse(authStorage)?.state?.accessToken as string) : null;
+      const res = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      if (!res.ok) throw new Error('Failed to download');
+      const blob = await res.blob();
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = u;
+      a.download = 'document';
+      a.click();
+      URL.revokeObjectURL(u);
+    } catch (_) {
+      // fallback: open in new tab (may 401)
+      window.open(url, '_blank');
+    } finally {
+      setLoading(false);
+    }
+  };
+  return (
+    <button type="button" onClick={handleClick} className={className} disabled={loading}>
+      {loading ? '…' : 'Скачать'}
+    </button>
+  );
+}
+
+function getMediaProxyUrl(bdAccountId: string, channelId: string, telegramMessageId: string): string {
+  const base = typeof window !== 'undefined' ? (process.env.NEXT_PUBLIC_API_URL || '') : '';
+  const params = new URLSearchParams({ channelId, messageId: telegramMessageId });
+  return `${base}/api/bd-accounts/${bdAccountId}/media?${params.toString()}`;
+}
+
+/** Загружает медиа с токеном и отдаёт blob URL для img/video/audio (браузер не шлёт Authorization в src). */
+function useMediaUrl(mediaUrl: string | null) {
+  const [url, setUrl] = useState<string | null>(null);
+  const blobRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!mediaUrl) {
+      setUrl(null);
+      return;
+    }
+    let cancelled = false;
+    const authStorage = typeof window !== 'undefined' ? localStorage.getItem('auth-storage') : null;
+    const token = authStorage ? (JSON.parse(authStorage)?.state?.accessToken as string) : null;
+    fetch(mediaUrl, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error('Failed to load media'))))
+      .then((blob) => {
+        if (!cancelled) {
+          if (blobRef.current) URL.revokeObjectURL(blobRef.current);
+          blobRef.current = URL.createObjectURL(blob);
+          setUrl(blobRef.current);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setUrl(null);
+      });
+    return () => {
+      cancelled = true;
+      if (blobRef.current) {
+        URL.revokeObjectURL(blobRef.current);
+        blobRef.current = null;
+      }
+      setUrl(null);
+    };
+  }, [mediaUrl]);
+  return url;
+}
+
+function MessageContent({
+  msg,
+  isOutbound,
+  bdAccountId,
+  channelId,
+}: {
+  msg: Message;
+  isOutbound: boolean;
+  bdAccountId: string | null;
+  channelId: string;
+}) {
+  const mediaType = getMessageMediaType(msg);
+  const label = mediaLabels[mediaType];
+  const hasCaption = !!((msg.content ?? (msg as any).body ?? '')?.trim());
+  const textCls = 'text-sm leading-relaxed whitespace-pre-wrap break-words';
+  const iconCls = isOutbound ? 'text-blue-100' : 'text-gray-500';
+  const canLoadMedia =
+    bdAccountId && channelId && msg.telegram_message_id && mediaType !== 'text' && mediaType !== 'unknown';
+
+  const mediaApiUrl = canLoadMedia
+    ? getMediaProxyUrl(bdAccountId!, channelId, msg.telegram_message_id!)
+    : null;
+  const mediaUrl = useMediaUrl(mediaApiUrl);
+
+  // Текст: content из API (БД); fallback на body на случай другого имени поля
+  const contentText = (msg.content ?? (msg as any).body ?? '') || '';
+
+  const textBlock = (
+    <div className={textCls}>
+      {contentText.trim() ? contentText : mediaType === 'text' ? '\u00A0' : null}
+    </div>
+  );
+
+  if (mediaType === 'text') {
+    return textBlock;
+  }
+
+  return (
+    <div className="space-y-1">
+      {/* Медиа: фото / видео / аудио через прокси Telegram */}
+      {mediaType === 'photo' && mediaUrl && (
+        <a href={mediaUrl} target="_blank" rel="noopener noreferrer" className="block rounded-lg overflow-hidden max-w-full">
+          <img src={mediaUrl} alt="" className="max-h-64 object-contain rounded" />
+        </a>
+      )}
+      {mediaType === 'video' && mediaUrl && (
+        <video src={mediaUrl} controls className="max-h-64 rounded-lg" />
+      )}
+      {(mediaType === 'voice' || mediaType === 'audio') && mediaUrl && (
+        <audio src={mediaUrl} controls className="max-w-full" />
+      )}
+      {/* Если медиа не загружается по URL (нет telegram_message_id) — показываем иконку и подпись */}
+      {(!mediaUrl || mediaType === 'document' || mediaType === 'sticker') && (
+        <div className={`flex items-center gap-2 ${iconCls}`}>
+          {mediaType === 'photo' && <Image className="w-4 h-4 shrink-0" />}
+          {(mediaType === 'voice' || mediaType === 'audio') && !mediaUrl && <Music className="w-4 h-4 shrink-0" />}
+          {mediaType === 'video' && !mediaUrl && <Film className="w-4 h-4 shrink-0" />}
+          {(mediaType === 'document' || mediaType === 'unknown') && <File className="w-4 h-4 shrink-0" />}
+          {mediaType === 'sticker' && mediaUrl && (
+            <img src={mediaUrl} alt="" className="max-h-24 object-contain" />
+          )}
+          {mediaType === 'sticker' && !mediaUrl && <Image className="w-4 h-4 shrink-0" />}
+          <span className="text-xs font-medium">{label}</span>
+        </div>
+      )}
+      {mediaType === 'document' && mediaApiUrl && (
+        <DownloadLink url={mediaApiUrl} className="text-xs underline" />
+      )}
+      {hasCaption && textBlock}
+    </div>
+  );
 }
 
 export default function MessagingPage() {
+  const { user: currentUser } = useAuthStore();
   const [accounts, setAccounts] = useState<BDAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [chats, setChats] = useState<Chat[]>([]);
@@ -68,23 +266,204 @@ export default function MessagingPage() {
   const [isRecording, setIsRecording] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showAIAssistant, setShowAIAssistant] = useState(false);
+  const [accountSyncReady, setAccountSyncReady] = useState<boolean>(true);
+  const [accountSyncProgress, setAccountSyncProgress] = useState<{ done: number; total: number } | null>(null);
+  const [accountSyncError, setAccountSyncError] = useState<string | null>(null);
+  const [showEditNameModal, setShowEditNameModal] = useState(false);
+  const [editDisplayNameValue, setEditDisplayNameValue] = useState('');
+  const [savingDisplayName, setSavingDisplayName] = useState(false);
+  const [showChatHeaderMenu, setShowChatHeaderMenu] = useState(false);
+  const chatHeaderMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetchAccounts();
   }, []);
 
+  // Проверяем статус синхронизации выбранного аккаунта. Синхронизацию не запускаем без выбора чатов — показываем CTA.
   useEffect(() => {
-    if (selectedAccountId) {
-      fetchChats();
-    }
+    const checkSync = async () => {
+      if (!selectedAccountId) return;
+      setAccountSyncError(null);
+      setLoadingChats(true);
+      try {
+        const res = await apiClient.get(`/api/bd-accounts/${selectedAccountId}/sync-status`);
+        const status = res.data?.sync_status;
+        const total = Number(res.data?.sync_progress_total ?? 0);
+        const done = Number(res.data?.sync_progress_done ?? 0);
+
+        if (status === 'completed') {
+          setAccountSyncReady(true);
+          setAccountSyncProgress(null);
+          await fetchChats();
+        } else if (status === 'syncing') {
+          setAccountSyncReady(false);
+          // Сразу показываем прогресс из API (на случай если WS ещё не подключён или события уже прошли)
+          setAccountSyncProgress({ done, total: total || 1 });
+          try {
+            await apiClient.post(`/api/bd-accounts/${selectedAccountId}/sync-start`, {}, { timeout: 20000 });
+            // После sync-start повторно запрашиваем статус — бэкенд мог уже обновить прогресс
+            const res2 = await apiClient.get(`/api/bd-accounts/${selectedAccountId}/sync-status`);
+            if (res2.data?.sync_status === 'syncing') {
+              setAccountSyncProgress({
+                done: Number(res2.data?.sync_progress_done ?? 0),
+                total: Number(res2.data?.sync_progress_total) || 1,
+              });
+            }
+          } catch (e: any) {
+            const msg = e?.response?.data?.error || e?.response?.data?.message || e?.message || 'Ошибка синхронизации';
+            setAccountSyncError(msg === 'Network Error' || e?.code === 'ECONNABORTED'
+              ? 'Сервер не ответил. Проверьте, что запущены API Gateway и сервис BD Accounts.'
+              : msg);
+          }
+        } else {
+          setAccountSyncReady(false);
+          setAccountSyncProgress(null);
+        }
+      } catch (err: any) {
+        setAccountSyncReady(false);
+        setAccountSyncProgress(null);
+      } finally {
+        setLoadingChats(false);
+      }
+    };
+    checkSync();
   }, [selectedAccountId]);
 
+  // Опрос sync-status во время синхронизации: прогресс и завершение не зависят только от WebSocket
+  const pollSyncStatusRef = useRef<NodeJS.Timeout | null>(null);
   useEffect(() => {
-    if (selectedChat) {
-      fetchMessages();
+    if (accountSyncReady || !selectedAccountId) return;
+
+    const poll = async () => {
+      try {
+        const res = await apiClient.get(`/api/bd-accounts/${selectedAccountId}/sync-status`);
+        const status = res.data?.sync_status;
+        const total = Number(res.data?.sync_progress_total ?? 0);
+        const done = Number(res.data?.sync_progress_done ?? 0);
+
+        if (status === 'completed') {
+          setAccountSyncReady(true);
+          setAccountSyncProgress(null);
+          setAccountSyncError(null);
+          await fetchChats();
+          await fetchAccounts();
+          return;
+        }
+        if (status === 'syncing') {
+          setAccountSyncProgress({ done, total: total || 1 });
+        }
+      } catch (_) {
+        // Игнорируем ошибки опроса
+      }
+    };
+
+    const interval = setInterval(poll, 2000);
+    pollSyncStatusRef.current = interval;
+
+    return () => {
+      if (pollSyncStatusRef.current) {
+        clearInterval(pollSyncStatusRef.current);
+        pollSyncStatusRef.current = null;
+      }
+    };
+  }, [selectedAccountId, accountSyncReady]);
+
+  useEffect(() => {
+    if (selectedChat && selectedAccountId) {
+      setMessages([]);
+      fetchMessages(selectedAccountId, selectedChat);
       markAsRead();
+    } else {
+      setMessages([]);
     }
-  }, [selectedChat]);
+  }, [selectedChat, selectedAccountId]);
+
+  // Сообщаем глобально, какой чат открыт — чтобы не играть звук уведомления, когда новое сообщение в этом же чате
+  useEffect(() => {
+    if (selectedAccountId && selectedChat) {
+      setCurrentMessagingChat(selectedAccountId, selectedChat.channel_id);
+    } else {
+      setCurrentMessagingChat(null, null);
+    }
+    return () => setCurrentMessagingChat(null, null);
+  }, [selectedAccountId, selectedChat?.channel_id]);
+
+  // Load messages from DB only (no Telegram API for history)
+  // Real-time new messages via WebSocket
+  const { subscribe, unsubscribe, on, off, isConnected } = useWebSocketContext();
+  useEffect(() => {
+    if (!selectedAccountId || !isConnected) return;
+    subscribe(`bd-account:${selectedAccountId}`);
+    // слушаем события синхронизации аккаунта
+    const handler = (payload: { type?: string; data?: any }) => {
+      if (!payload?.type || payload.data?.bdAccountId !== selectedAccountId) return;
+      if (payload.type === 'bd_account.sync.started') {
+        setAccountSyncReady(false);
+        setAccountSyncProgress({ done: 0, total: payload.data?.totalChats ?? 0 });
+      }
+      if (payload.type === 'bd_account.sync.progress') {
+        setAccountSyncReady(false);
+        setAccountSyncProgress({
+          done: payload.data?.done ?? 0,
+          total: payload.data?.total ?? 0,
+        });
+      }
+      if (payload.type === 'bd_account.sync.completed') {
+        setAccountSyncReady(true);
+        setAccountSyncProgress(null);
+        setAccountSyncError(null);
+        fetchChats();
+        fetchAccounts(); // обновить бейдж «Готов» в списке аккаунтов
+      }
+      if (payload.type === 'bd_account.sync.failed') {
+        setAccountSyncReady(false);
+        setAccountSyncProgress(null);
+        setAccountSyncError(payload.data?.error ?? 'Синхронизация не удалась');
+      }
+    };
+    on('event', handler);
+    return () => {
+      off('event', handler);
+      unsubscribe(`bd-account:${selectedAccountId}`);
+    };
+  }, [selectedAccountId, isConnected, subscribe, unsubscribe, on, off]);
+
+  // Подписка на новые сообщения в открытом чате. Если сообщения не приходят — в логах bd-accounts-service ищите "[TelegramManager] New message received".
+  useEffect(() => {
+    if (!selectedChat || !selectedAccountId) return;
+    const room = `bd-account:${selectedAccountId}:chat:${selectedChat.channel_id}`;
+    subscribe(room);
+    const handler = (payload: { message?: any; timestamp?: string }) => {
+      const msg = payload?.message;
+      if (!msg || msg.bdAccountId !== selectedAccountId || msg.channelId !== selectedChat.channel_id) return;
+      setMessages((prev) => {
+        const existing = prev.find((m) => m.id === msg.messageId);
+        if (existing) return prev;
+        return [
+          ...prev,
+          {
+            id: msg.messageId ?? '',
+            content: msg.content ?? '',
+            direction: 'inbound',
+            created_at: payload?.timestamp ?? new Date().toISOString(),
+            status: 'delivered',
+            contact_id: msg.contactId ?? null,
+            channel: selectedChat.channel,
+            channel_id: selectedChat.channel_id,
+            telegram_message_id: msg.telegramMessageId ?? null,
+            telegram_media: msg.telegramMedia ?? null,
+            telegram_date: payload?.timestamp ?? null,
+          },
+        ];
+      });
+      scrollToBottom();
+    };
+    on('new-message', handler);
+    return () => {
+      off('new-message', handler);
+      unsubscribe(room);
+    };
+  }, [selectedChat?.channel_id, selectedAccountId, isConnected, subscribe, unsubscribe, on, off]);
 
   useEffect(() => {
     scrollToBottom();
@@ -98,15 +477,18 @@ export default function MessagingPage() {
         setShowCommandsMenu(false);
         setShowAttachMenu(false);
       }
+      if (chatHeaderMenuRef.current && !chatHeaderMenuRef.current.contains(target)) {
+        setShowChatHeaderMenu(false);
+      }
     };
 
-    if (showCommandsMenu || showAttachMenu) {
+    if (showCommandsMenu || showAttachMenu || showChatHeaderMenu) {
       document.addEventListener('mousedown', handleClickOutside);
       return () => {
         document.removeEventListener('mousedown', handleClickOutside);
       };
     }
-  }, [showCommandsMenu, showAttachMenu]);
+  }, [showCommandsMenu, showAttachMenu, showChatHeaderMenu]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -134,115 +516,55 @@ export default function MessagingPage() {
       // Get chats from messaging service (these are chats with messages in DB)
       let chatsFromDB: any[] = [];
       try {
-        const chatsResponse = await apiClient.get('/api/messaging/chats?channel=telegram');
+        const chatsResponse = await apiClient.get('/api/messaging/chats', {
+          params: { channel: 'telegram', bdAccountId: selectedAccountId },
+        });
         chatsFromDB = chatsResponse.data || [];
       } catch (chatsError: any) {
         console.warn('Could not fetch chats from messaging service:', chatsError);
         // Continue with dialogs only
       }
       
-      // Get dialogs from BD account (all available Telegram dialogs)
-      let dialogs: any[] = [];
-      try {
-        const dialogsResponse = await apiClient.get(`/api/bd-accounts/${selectedAccountId}/dialogs`);
-        dialogs = Array.isArray(dialogsResponse.data) ? dialogsResponse.data : [];
-        console.log(`[Messaging] Loaded ${dialogs.length} dialogs from BD account`);
-      } catch (dialogError: any) {
-        console.error('Error fetching dialogs from BD account:', dialogError);
-        console.error('Error details:', {
-          status: dialogError.response?.status,
-          message: dialogError.response?.data?.error || dialogError.message,
-        });
-        // If dialogs fail, try to use only chats from DB
-        if (chatsFromDB.length > 0) {
-          console.log(`[Messaging] Using ${chatsFromDB.length} chats from DB only`);
-          const formattedChats: Chat[] = chatsFromDB.map((chat: any) => ({
-            channel: chat.channel || 'telegram',
-            channel_id: String(chat.channel_id),
-            contact_id: chat.contact_id,
-            first_name: chat.first_name,
-            last_name: chat.last_name,
-            email: chat.email,
-            telegram_id: chat.telegram_id,
-            name: chat.name || null,
-            unread_count: parseInt(chat.unread_count) || 0,
-            last_message_at: chat.last_message_at || new Date().toISOString(),
-            last_message: chat.last_message,
-          }));
-          setChats(formattedChats);
-          return;
-        }
-        // If both fail, show empty list
-        console.warn('[Messaging] No chats available from either source');
-        setChats([]);
-        return;
-      }
-      
-      // Create a map of chats from messaging service by channel_id
-      const chatsMap = new Map<string, Chat>();
-      console.log(`[Messaging] Processing ${chatsFromDB.length} chats from DB`);
-      chatsFromDB.forEach((chat: any) => {
-        const channelId = String(chat.channel_id);
-        chatsMap.set(channelId, {
-          channel: chat.channel || 'telegram',
-          channel_id: channelId,
-          contact_id: chat.contact_id,
-          first_name: chat.first_name,
-          last_name: chat.last_name,
-          email: chat.email,
-          telegram_id: chat.telegram_id,
-          name: chat.name || null,
-          unread_count: parseInt(chat.unread_count) || 0,
-          last_message_at: chat.last_message_at || new Date().toISOString(),
-          last_message: chat.last_message,
-        });
-      });
-      
-      // Merge dialogs with chats - add dialogs that don't have messages yet
-      dialogs.forEach((dialog: any) => {
-        const channelId = String(dialog.id);
-        if (!chatsMap.has(channelId)) {
-          // This is a dialog without messages in DB yet
-          chatsMap.set(channelId, {
-            channel: 'telegram',
-            channel_id: channelId,
-            contact_id: null,
-            first_name: null,
-            last_name: null,
-            email: null,
-            telegram_id: channelId,
-            name: dialog.name || null,
-            unread_count: dialog.unreadCount || 0,
-            last_message_at: dialog.lastMessageDate 
-              ? new Date(dialog.lastMessageDate * 1000).toISOString() 
-              : new Date().toISOString(),
-            last_message: dialog.lastMessage || null,
-          });
+      // Chats from DB only (filtered by bdAccountId = allowed sync chats)
+      const mapped: Chat[] = chatsFromDB.map((chat: any) => ({
+        channel: chat.channel || 'telegram',
+        channel_id: String(chat.channel_id),
+        contact_id: chat.contact_id,
+        first_name: chat.first_name,
+        last_name: chat.last_name,
+        email: chat.email,
+        telegram_id: chat.telegram_id,
+        display_name: chat.display_name ?? null,
+        username: chat.username ?? null,
+        name: chat.name || null,
+        unread_count: parseInt(chat.unread_count) || 0,
+        last_message_at: chat.last_message_at || new Date().toISOString(),
+        last_message: chat.last_message,
+      }));
+      // Deduplicate by channel_id (API can return same chat multiple times when GROUP BY contact_id)
+      const byChannelId = new Map<string, Chat>();
+      const isIdOnly = (name: string | null, channelId: string) =>
+        !name || name.trim() === '' || name === channelId || /^\d+$/.test(String(name).trim());
+      for (const chat of mapped) {
+        const existing = byChannelId.get(chat.channel_id);
+        const chatTime = new Date(chat.last_message_at).getTime();
+        const existingTime = existing ? new Date(existing.last_message_at).getTime() : 0;
+        const preferNew =
+          !existing ||
+          chatTime > existingTime ||
+          (chatTime === existingTime && isIdOnly(existing.name ?? existing.telegram_id ?? '', existing.channel_id) && !isIdOnly(chat.name ?? chat.telegram_id ?? '', chat.channel_id));
+        if (preferNew) {
+          const merged = { ...chat };
+          if (existing) merged.unread_count = (existing.unread_count || 0) + (merged.unread_count || 0);
+          byChannelId.set(chat.channel_id, merged);
         } else {
-          // Update existing chat with dialog info if available
-          const existingChat = chatsMap.get(channelId)!;
-          // Update name from dialog if not already set
-          if (dialog.name && !existingChat.name) {
-            existingChat.name = dialog.name;
-          }
-          // Try to extract first_name/last_name from dialog name if not already set
-          if (dialog.name && !existingChat.first_name && !existingChat.last_name) {
-            const nameParts = dialog.name.split(' ');
-            existingChat.first_name = nameParts[0] || null;
-            existingChat.last_name = nameParts.slice(1).join(' ') || null;
-          }
-          if (dialog.unreadCount !== undefined) {
-            existingChat.unread_count = Math.max(existingChat.unread_count, dialog.unreadCount || 0);
-          }
+          existing.unread_count = (existing.unread_count || 0) + (chat.unread_count || 0);
         }
-      });
-      
-      // Convert map to array and sort by last_message_at
-      const formattedChats = Array.from(chatsMap.values()).sort((a, b) => {
-        return new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime();
-      });
+      }
+      const formattedChats = Array.from(byChannelId.values()).sort(
+        (a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime()
+      );
 
-      console.log(`[Messaging] Total chats after merge: ${formattedChats.length}`);
       setChats(formattedChats);
     } catch (error: any) {
       console.error('Error fetching chats:', error);
@@ -253,53 +575,19 @@ export default function MessagingPage() {
     }
   };
 
-  const fetchMessages = async () => {
-    if (!selectedChat || !selectedAccountId) return;
-
+  const fetchMessages = async (accountId: string, chat: Chat) => {
     setLoadingMessages(true);
     try {
-      // Try to get messages from database first
       const response = await apiClient.get('/api/messaging/messages', {
         params: {
-          channel: selectedChat.channel,
-          channelId: selectedChat.channel_id,
+          channel: chat.channel,
+          channelId: chat.channel_id,
+          bdAccountId: accountId,
           limit: 100,
         },
       });
-      
-      let messages = response.data.messages || [];
-      
-      // If no messages in DB, try to get from Telegram dialogs
-      if (messages.length === 0) {
-        console.log('[Messaging] No messages in DB, trying to fetch from Telegram...');
-        try {
-          // Get dialogs to find this chat
-          const dialogsResponse = await apiClient.get(`/api/bd-accounts/${selectedAccountId}/dialogs`);
-          const dialog = dialogsResponse.data.find((d: any) => String(d.id) === selectedChat.channel_id);
-          
-          if (dialog && dialog.lastMessage) {
-            // Create a placeholder message from dialog info
-            messages = [{
-              id: `temp-${Date.now()}`,
-              content: dialog.lastMessage,
-              direction: 'inbound',
-              created_at: dialog.lastMessageDate 
-                ? new Date(dialog.lastMessageDate * 1000).toISOString() 
-                : new Date().toISOString(),
-              status: 'delivered',
-              contact_id: selectedChat.contact_id,
-              channel: selectedChat.channel,
-              channel_id: selectedChat.channel_id,
-            }];
-          }
-        } catch (dialogError) {
-          console.warn('Could not fetch dialog info:', dialogError);
-        }
-      }
-      
-      // Reverse to show oldest first (like Telegram)
-      setMessages(messages.reverse());
-      console.log(`[Messaging] Loaded ${messages.length} messages for chat ${selectedChat.channel_id}`);
+      const list = response.data.messages || [];
+      setMessages(list);
     } catch (error: any) {
       console.error('Error fetching messages:', error);
       setMessages([]);
@@ -410,6 +698,7 @@ export default function MessagingPage() {
 
   const handleSendMessage = async () => {
     if (!newMessage.trim() || !selectedChat || !selectedAccountId) return;
+    if (!isSelectedAccountMine) return; // только владелец может отправлять сообщения
 
     const messageText = newMessage.trim();
     setNewMessage('');
@@ -455,6 +744,7 @@ export default function MessagingPage() {
       // Refresh chats to update last message
       await fetchChats();
     } catch (error: any) {
+      // "A listener indicated an asynchronous response..." — от расширения Chrome, не от приложения
       console.error('Error sending message:', error);
       // Remove temp message on error
       setMessages((prev) => prev.filter((msg) => msg.id !== tempMessage.id));
@@ -465,23 +755,44 @@ export default function MessagingPage() {
   };
 
   const getChatName = (chat: Chat) => {
-    // First priority: use name from dialog
-    if (chat.name) {
-      return chat.name;
-    }
-    // Second priority: use first_name + last_name
-    if (chat.first_name || chat.last_name) {
-      return `${chat.first_name || ''} ${chat.last_name || ''}`.trim();
-    }
-    // Third priority: use email
-    if (chat.email) {
-      return chat.email;
-    }
-    // Last resort: use telegram_id
-    if (chat.telegram_id) {
-      return chat.telegram_id;
-    }
+    if (chat.display_name?.trim()) return chat.display_name.trim();
+    const firstLast = `${chat.first_name || ''} ${chat.last_name || ''}`.trim();
+    if (firstLast && !/^Telegram\s+\d+$/.test(firstLast)) return firstLast;
+    if (chat.username) return chat.username.startsWith('@') ? chat.username : `@${chat.username}`;
+    if (chat.name?.trim()) return chat.name.trim();
+    if (chat.email?.trim()) return chat.email.trim();
+    if (chat.telegram_id) return chat.telegram_id;
     return 'Unknown';
+  };
+
+  const openEditNameModal = () => {
+    if (!selectedChat) return;
+    setEditDisplayNameValue(selectedChat.display_name ?? getChatName(selectedChat) ?? '');
+    setShowEditNameModal(true);
+    setShowChatHeaderMenu(false);
+  };
+
+  const saveDisplayName = async () => {
+    if (!selectedChat?.contact_id) return;
+    setSavingDisplayName(true);
+    try {
+      await apiClient.patch(`/api/crm/contacts/${selectedChat.contact_id}`, {
+        displayName: editDisplayNameValue.trim() || null,
+      });
+      const newName = editDisplayNameValue.trim() || null;
+      setChats((prev) =>
+        prev.map((c) =>
+          c.channel_id === selectedChat.channel_id ? { ...c, display_name: newName } : c
+        )
+      );
+      setSelectedChat((prev) => (prev ? { ...prev, display_name: newName } : null));
+      setShowEditNameModal(false);
+    } catch (err: any) {
+      console.error('Error updating contact name:', err);
+      alert(err?.response?.data?.error || 'Не удалось сохранить имя');
+    } finally {
+      setSavingDisplayName(false);
+    }
   };
 
   const formatTime = (dateString: string) => {
@@ -516,6 +827,8 @@ export default function MessagingPage() {
     account.phone_number?.toLowerCase().includes(accountSearch.toLowerCase()) ||
     account.telegram_id?.toLowerCase().includes(accountSearch.toLowerCase())
   );
+  const selectedAccount = selectedAccountId ? accounts.find((a) => a.id === selectedAccountId) : null;
+  const isSelectedAccountMine = selectedAccount?.is_owner === true;
 
   const filteredChats = chats.filter((chat) => {
     const name = getChatName(chat).toLowerCase();
@@ -566,24 +879,40 @@ export default function MessagingPage() {
             filteredAccounts.map((account) => (
               <div
                 key={account.id}
-                onClick={() => setSelectedAccountId(account.id)}
+                onClick={() => {
+                  setSelectedAccountId(account.id);
+                  setSelectedChat(null);
+                  setMessages([]);
+                }}
                 className={`p-3 cursor-pointer border-b border-gray-200 hover:bg-gray-100 ${
                   selectedAccountId === account.id
                     ? 'bg-blue-50 border-l-4 border-l-blue-500'
                     : ''
                 }`}
               >
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="font-medium text-sm truncate">
                       {account.phone_number || account.telegram_id || 'Unknown'}
                     </div>
-                    <div className="text-xs text-gray-500">Telegram</div>
+                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                      <span className="text-xs text-gray-500">Telegram</span>
+                      {account.is_owner ? (
+                        <span className="text-xs text-blue-600 font-medium">Ваш</span>
+                      ) : (
+                        <span className="text-xs text-gray-500">Коллега</span>
+                      )}
+                      {account.sync_status === 'completed' ? (
+                        <span className="text-xs text-green-600 font-medium">Готов</span>
+                      ) : (
+                        <span className="text-xs text-amber-600 font-medium">Ожидает синхронизации</span>
+                      )}
+                    </div>
                   </div>
                   {account.is_active ? (
-                    <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0 ml-2" />
+                    <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0" />
                   ) : (
-                    <XCircle className="w-4 h-4 text-gray-400 flex-shrink-0 ml-2" />
+                    <XCircle className="w-4 h-4 text-gray-400 flex-shrink-0" />
                   )}
                 </div>
               </div>
@@ -594,7 +923,7 @@ export default function MessagingPage() {
 
       {/* Chats List */}
       <div className="w-80 bg-white border-r border-gray-200 flex flex-col">
-        <div className="p-4 border-b border-gray-200">
+        <div className="p-4 border-b border-gray-200 space-y-2">
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
             <Input
@@ -605,12 +934,74 @@ export default function MessagingPage() {
               className="pl-9 text-sm"
             />
           </div>
+
+          {!accountSyncReady && (
+            <div className="text-xs text-gray-600 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 space-y-2">
+              {accountSyncProgress ? (
+                `Идёт начальная синхронизация аккаунта (${accountSyncProgress.done} / ${accountSyncProgress.total} чатов)…`
+              ) : isSelectedAccountMine ? (
+                <>
+                  <p className="font-medium text-gray-800">Чтобы начать работу с этим аккаунтом:</p>
+                  <p>Выберите чаты и папки для синхронизации и нажмите «Начать синхронизацию» в BD Аккаунтах.</p>
+                  {accountSyncError && <div className="text-red-600">{accountSyncError}</div>}
+                  <div className="flex gap-2 flex-wrap">
+                    <Button
+                      size="sm"
+                      onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
+                    >
+                      Выбрать чаты и начать синхронизацию
+                    </Button>
+                    {accountSyncError && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => window.location.href = '/dashboard/bd-accounts'}
+                      >
+                        Настроить в BD Аккаунтах
+                      </Button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <p className="text-gray-600">Аккаунт коллеги. Синхронизацию может настроить только владелец.</p>
+              )}
+            </div>
+          )}
+          {accountSyncReady && isSelectedAccountMine && selectedAccountId && (
+            <div className="text-xs">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
+              >
+                Изменить список чатов / догрузить историю
+              </Button>
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto">
           {loadingChats ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
+            </div>
+          ) : !accountSyncReady ? (
+            <div className="p-4 flex flex-col items-center justify-center text-center text-sm text-gray-600">
+              {accountSyncProgress ? (
+                <span>Ожидание завершения начальной синхронизации аккаунта…</span>
+              ) : isSelectedAccountMine ? (
+                <>
+                  <p className="mb-3">Аккаунт ожидает настройки синхронизации.</p>
+                  <Button
+                    size="sm"
+                    onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
+                  >
+                    Выбрать чаты и начать синхронизацию
+                  </Button>
+                </>
+              ) : (
+                <p>Аккаунт коллеги. Настройку синхронизации выполняет владелец.</p>
+              )}
             </div>
           ) : filteredChats.length === 0 ? (
             <div className="p-4 text-center text-sm text-gray-500">
@@ -661,11 +1052,56 @@ export default function MessagingPage() {
                     {selectedChat.telegram_id && `Telegram ID: ${selectedChat.telegram_id}`}
                   </div>
                 </div>
-                <button className="p-2 hover:bg-gray-100 rounded">
-                  <MoreVertical className="w-5 h-5" />
-                </button>
+                <div className="relative" ref={chatHeaderMenuRef}>
+                  <button
+                    type="button"
+                    onClick={() => setShowChatHeaderMenu((v) => !v)}
+                    className="p-2 hover:bg-gray-100 rounded"
+                  >
+                    <MoreVertical className="w-5 h-5" />
+                  </button>
+                  {showChatHeaderMenu && (
+                    <div className="absolute right-0 top-full mt-1 py-1 bg-white border border-gray-200 rounded-lg shadow-lg z-10 min-w-[180px]">
+                      <button
+                        type="button"
+                        onClick={openEditNameModal}
+                        disabled={!selectedChat.contact_id}
+                        className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                      >
+                        <UserCircle className="w-4 h-4" />
+                        {selectedChat.contact_id ? 'Изменить имя контакта' : 'Нет контакта (имя нельзя изменить)'}
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
+
+            {/* Модалка: кастомное имя контакта */}
+            {showEditNameModal && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => !savingDisplayName && setShowEditNameModal(false)}>
+                <div className="bg-white rounded-xl shadow-xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
+                  <h3 className="text-lg font-semibold mb-2">Имя контакта</h3>
+                  <p className="text-sm text-gray-500 mb-4">
+                    Это имя будет отображаться в чатах вместо имени из Telegram (first name, username).
+                  </p>
+                  <Input
+                    value={editDisplayNameValue}
+                    onChange={(e) => setEditDisplayNameValue(e.target.value)}
+                    placeholder="Введите имя"
+                    className="mb-4"
+                  />
+                  <div className="flex justify-end gap-2">
+                    <Button variant="outline" onClick={() => setShowEditNameModal(false)} disabled={savingDisplayName}>
+                      Отмена
+                    </Button>
+                    <Button onClick={saveDisplayName} disabled={savingDisplayName}>
+                      {savingDisplayName ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Сохранить'}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="flex-1 overflow-y-auto p-4 bg-gray-50">
               {loadingMessages ? (
@@ -682,16 +1118,18 @@ export default function MessagingPage() {
                 <div className="space-y-3">
                   {messages.map((msg, index) => {
                     const isOutbound = msg.direction === 'outbound';
-                    const showDateSeparator = index === 0 || 
-                      new Date(msg.created_at).toDateString() !== 
-                      new Date(messages[index - 1].created_at).toDateString();
+                    const msgTime = msg.telegram_date ?? msg.created_at;
+                    const prevMsgTime = messages[index - 1]?.telegram_date ?? messages[index - 1]?.created_at;
+                    const showDateSeparator =
+                      index === 0 ||
+                      new Date(msgTime).toDateString() !== new Date(prevMsgTime).toDateString();
                     
                     return (
                       <div key={msg.id}>
                         {showDateSeparator && (
                           <div className="flex justify-center my-4">
                             <span className="text-xs text-gray-500 bg-gray-200 px-3 py-1 rounded-full">
-                              {new Date(msg.created_at).toLocaleDateString('ru-RU', {
+                              {new Date(msgTime).toLocaleDateString('ru-RU', {
                                 day: 'numeric',
                                 month: 'long',
                                 year: 'numeric'
@@ -711,9 +1149,12 @@ export default function MessagingPage() {
                                 : 'bg-white text-gray-900 rounded-bl-md shadow-sm'
                             }`}
                           >
-                            <div className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-                              {msg.content}
-                            </div>
+                            <MessageContent
+                                msg={msg}
+                                isOutbound={isOutbound}
+                                bdAccountId={selectedAccountId}
+                                channelId={selectedChat.channel_id}
+                              />
                             <div
                               className={`text-xs mt-1 flex items-center gap-1 ${
                                 isOutbound
@@ -721,7 +1162,7 @@ export default function MessagingPage() {
                                   : 'text-gray-500 justify-start'
                               }`}
                             >
-                              <span>{formatTime(msg.created_at)}</span>
+                              <span>{formatTime(msgTime)}</span>
                               {isOutbound && (
                                 <span className="ml-1">
                                   {msg.status === 'delivered' ? '✓✓' : 
@@ -872,12 +1313,12 @@ export default function MessagingPage() {
                   <Mic className="w-5 h-5" />
                 </button>
 
-                {/* Поле ввода */}
+                {/* Поле ввода (только для своего аккаунта) */}
                 <div className="flex-1 relative">
                   <div className="w-full">
                     <Input
                       type="text"
-                      placeholder="Написать сообщение..."
+                      placeholder={isSelectedAccountMine ? 'Написать сообщение...' : 'Аккаунт коллеги — только просмотр'}
                       value={newMessage}
                       onChange={(e) => setNewMessage(e.target.value)}
                       onKeyPress={(e) => {
@@ -887,6 +1328,7 @@ export default function MessagingPage() {
                         }
                       }}
                       className="pr-10"
+                      disabled={!isSelectedAccountMine}
                     />
                   </div>
                   
@@ -904,11 +1346,12 @@ export default function MessagingPage() {
                   </button>
                 </div>
 
-                {/* Кнопка отправки */}
+                {/* Кнопка отправки (только для своего аккаунта) */}
                 <Button
                   onClick={handleSendMessage}
-                  disabled={!newMessage.trim() || sendingMessage}
+                  disabled={!isSelectedAccountMine || !newMessage.trim() || sendingMessage}
                   className="px-4"
+                  title={!isSelectedAccountMine ? 'Только владелец аккаунта может отправлять сообщения' : undefined}
                 >
                   {sendingMessage ? (
                     <Loader2 className="w-5 h-5 animate-spin" />

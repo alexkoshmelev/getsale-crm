@@ -1,12 +1,12 @@
 import express from 'express';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
-import { RabbitMQClient } from '@getsale/utils';
+import { RabbitMQClient, RedisClient } from '@getsale/utils';
 import { EventType, BDAccountConnectedEvent } from '@getsale/events';
 import { TelegramManager } from './telegram-manager';
 
 const app = express();
-const PORT = process.env.PORT || 3007;
+const PORT = parseInt(String(process.env.PORT || 3007), 10);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
@@ -16,38 +16,43 @@ const rabbitmq = new RabbitMQClient(
   process.env.RABBITMQ_URL || 'amqp://getsale:getsale_dev@localhost:5672'
 );
 
-// Initialize Telegram Manager
-const telegramManager = new TelegramManager(pool, rabbitmq);
+const redisUrl = process.env.REDIS_URL;
+const redis = redisUrl ? new RedisClient(redisUrl) : null;
+
+// Initialize Telegram Manager (Redis — для QR-сессий при нескольких репликах)
+const telegramManager = new TelegramManager(pool, rabbitmq, redis);
 
 // Handle unhandled promise rejections from Telegram library
 // This prevents crashes during datacenter migration when builder.resolve errors occur
 process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
   // Silently ignore builder.resolve errors - they're internal library issues
-  // These occur when gramJS tries to process updates before builder is ready
   if (reason?.message?.includes('builder.resolve is not a function') ||
       reason?.message?.includes('builder.resolve') ||
       reason?.stack?.includes('builder.resolve')) {
-    // Don't log - these are expected and harmless
     return;
   }
-  
+  // TIMEOUT from telegram/client/updates.js — цикл обновлений таймаутит; переподключаем клиентов, чтобы перезапустить update loop
+  if (reason?.message === 'TIMEOUT') {
+    if (reason?.stack?.includes('updates.js')) {
+      telegramManager.scheduleReconnectAllAfterTimeout();
+    }
+    return;
+  }
   // Log other unhandled rejections but don't crash
   console.error('[BD Accounts Service] Unhandled promise rejection:', reason);
 });
 
 // Handle uncaught exceptions from Telegram library
-// This prevents crashes during datacenter migration when builder.resolve errors occur synchronously
 process.on('uncaughtException', (error: Error) => {
-  // Silently ignore builder.resolve errors - they're internal library issues
   if (error.message?.includes('builder.resolve is not a function') ||
       error.message?.includes('builder.resolve') ||
       error.stack?.includes('builder.resolve')) {
-    // Don't log - these are expected and harmless
-    return; // Don't crash the process
+    return;
   }
-  
-  // For other uncaught exceptions, log but don't crash in development
-  // In production, you might want to exit gracefully after logging
+  if (error.message === 'TIMEOUT') {
+    telegramManager.scheduleReconnectAllAfterTimeout();
+    return;
+  }
   console.error('[BD Accounts Service] Uncaught exception:', error);
 });
 
@@ -86,6 +91,17 @@ function getUser(req: express.Request) {
   };
 }
 
+/** Проверяет, что текущий пользователь — владелец аккаунта (может управлять им). */
+async function requireAccountOwner(accountId: string, user: { id: string; organizationId: string }): Promise<boolean> {
+  const r = await pool.query(
+    'SELECT created_by_user_id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+    [accountId, user.organizationId]
+  );
+  if (r.rows.length === 0) return false;
+  const ownerId = r.rows[0].created_by_user_id;
+  return ownerId != null && ownerId === user.id;
+}
+
 app.use(express.json());
 
 app.get('/health', (req, res) => {
@@ -102,17 +118,96 @@ app.get('/api/bd-accounts', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     
-    console.log(`[BD Accounts] Fetching accounts for organization: ${user.organizationId}`);
     const result = await pool.query(
-      'SELECT * FROM bd_accounts WHERE organization_id = $1 ORDER BY created_at DESC',
+      `SELECT id, organization_id, telegram_id, phone_number, is_active, connected_at, last_activity,
+              created_at, sync_status, sync_progress_done, sync_progress_total, sync_error,
+              created_by_user_id AS owner_id
+       FROM bd_accounts WHERE organization_id = $1 ORDER BY created_at DESC`,
       [user.organizationId]
     );
 
-    console.log(`[BD Accounts] Found ${result.rows.length} account(s)`);
-    res.json(result.rows);
+    const rows = result.rows.map((r: any) => ({
+      ...r,
+      is_owner: r.owner_id != null && r.owner_id === user.id,
+    }));
+    res.json(rows);
   } catch (error: any) {
     console.error('Error fetching BD accounts:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Start QR-code login (Telegram: https://core.telegram.org/api/qr-login)
+app.post('/api/bd-accounts/start-qr-login', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { apiId, apiHash } = req.body;
+
+    if (!apiId || !apiHash) {
+      return res.status(400).json({ error: 'Missing required fields: apiId, apiHash' });
+    }
+
+    const sessionId = (await telegramManager.startQrLogin(
+      user.organizationId,
+      user.id,
+      parseInt(String(apiId)),
+      apiHash
+    )).sessionId;
+
+    res.json({ sessionId });
+  } catch (error: any) {
+    console.error('Error starting QR login:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message || 'Failed to start QR login',
+    });
+  }
+});
+
+// Poll QR login status (loginTokenUrl for QR code, need_password, then success/error)
+app.get('/api/bd-accounts/qr-login-status', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { sessionId } = req.query;
+
+    if (!sessionId || typeof sessionId !== 'string') {
+      return res.status(400).json({ error: 'sessionId query parameter required' });
+    }
+
+    const state = await telegramManager.getQrLoginStatus(sessionId);
+    if (!state) {
+      return res.status(404).json({ error: 'Session not found or expired' });
+    }
+
+    res.json(state);
+  } catch (error: any) {
+    console.error('Error getting QR login status:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Submit 2FA password for QR login (when status was need_password)
+app.post('/api/bd-accounts/qr-login-password', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { sessionId, password } = req.body;
+
+    if (!sessionId || typeof sessionId !== 'string') {
+      return res.status(400).json({ error: 'sessionId required' });
+    }
+    if (password == null || typeof password !== 'string') {
+      return res.status(400).json({ error: 'password required' });
+    }
+
+    const accepted = await telegramManager.submitQrLoginPassword(sessionId, password);
+    if (!accepted) {
+      return res.status(400).json({ error: 'Session not waiting for password or expired' });
+    }
+
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error('Error submitting QR login password:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -140,12 +235,17 @@ app.post('/api/bd-accounts/send-code', async (req, res) => {
 
     if (existingResult.rows.length > 0) {
       accountId = existingResult.rows[0].id;
+      // При повторном подключении обновляем владельца, если ещё не задан
+      await pool.query(
+        `UPDATE bd_accounts SET created_by_user_id = $1 WHERE id = $2 AND created_by_user_id IS NULL`,
+        [user.id, accountId]
+      );
     } else {
-      // Create new account record
+      // Create new account record (владелец — тот, кто подключает)
       const insertResult = await pool.query(
-        `INSERT INTO bd_accounts (organization_id, telegram_id, phone_number, api_id, api_hash, is_active)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-        [user.organizationId, phoneNumber, phoneNumber, String(apiId), apiHash, false]
+        `INSERT INTO bd_accounts (organization_id, telegram_id, phone_number, api_id, api_hash, is_active, created_by_user_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [user.organizationId, phoneNumber, phoneNumber, String(apiId), apiHash, false, user.id]
       );
       accountId = insertResult.rows[0].id;
     }
@@ -209,6 +309,12 @@ app.post('/api/bd-accounts/verify-code', async (req, res) => {
 
       await telegramManager.signInWithPassword(accountId, password);
     }
+
+    // Владелец аккаунта — тот, кто прошёл верификацию (для старых аккаунтов без owner)
+    await pool.query(
+      'UPDATE bd_accounts SET created_by_user_id = $1 WHERE id = $2 AND created_by_user_id IS NULL',
+      [user.id, accountId]
+    );
 
     // Get updated account info
     const result = await pool.query(
@@ -433,20 +539,248 @@ app.get('/api/bd-accounts/:id/dialogs', async (req, res) => {
   }
 });
 
-// Disconnect account
+// Get selected sync chats for an account
+app.get('/api/bd-accounts/:id/sync-chats', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+
+    const result = await pool.query(
+      'SELECT id, telegram_chat_id, title, peer_type, is_folder, created_at FROM bd_account_sync_chats WHERE bd_account_id = $1 ORDER BY created_at',
+      [id]
+    );
+    res.json(result.rows);
+  } catch (error: any) {
+    console.error('Error fetching sync chats:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Save selected chats for sync (replace existing selection) — только владелец аккаунта
+app.post('/api/bd-accounts/:id/sync-chats', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { chats } = req.body; // [{ id, name, isUser, isGroup, isChannel }]
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const isOwner = await requireAccountOwner(id, user);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Only the account owner can change sync chats' });
+    }
+
+    if (!Array.isArray(chats)) {
+      return res.status(400).json({ error: 'chats must be an array' });
+    }
+
+    await pool.query('DELETE FROM bd_account_sync_chats WHERE bd_account_id = $1', [id]);
+
+    let inserted = 0;
+    for (const c of chats) {
+      const chatId = String(c.id ?? c.telegram_chat_id ?? '').trim();
+      const title = (c.name ?? c.title ?? '').trim();
+      let peerType = 'user';
+      if (c.isChannel) peerType = 'channel';
+      else if (c.isGroup) peerType = 'chat';
+      if (!chatId) {
+        console.warn('[BD Accounts] Skipping chat with empty id:', c);
+        continue;
+      }
+      await pool.query(
+        `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder)
+         VALUES ($1, $2, $3, $4, false)`,
+        [id, chatId, title, peerType]
+      );
+      inserted++;
+    }
+    console.log(`[BD Accounts] Saved ${inserted} sync chats for account ${id} (requested ${chats.length})`);
+
+    const result = await pool.query(
+      'SELECT id, telegram_chat_id, title, peer_type FROM bd_account_sync_chats WHERE bd_account_id = $1 ORDER BY created_at',
+      [id]
+    );
+    res.json(result.rows);
+  } catch (error: any) {
+    console.error('Error saving sync chats:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Start initial history sync (runs in background; progress via WebSocket)
+app.post('/api/bd-accounts/:id/sync-start', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+
+    console.log('[BD Accounts] sync-start requested for account', id, 'org', user.organizationId);
+
+    const accountResult = await pool.query(
+      'SELECT id, organization_id, sync_status, sync_started_at FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const isOwner = await requireAccountOwner(id, user);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Only the account owner can start sync' });
+    }
+
+    const account = accountResult.rows[0];
+    const startedAt = account.sync_started_at ? new Date(account.sync_started_at).getTime() : 0;
+    const isStale = account.sync_status === 'syncing' && startedAt && Date.now() - startedAt > SYNC_STALE_MINUTES * 60 * 1000;
+
+    if (isStale) {
+      console.log('[BD Accounts] Resetting stale syncing state for account', id);
+      await pool.query(
+        "UPDATE bd_accounts SET sync_status = 'idle', sync_error = NULL WHERE id = $1",
+        [id]
+      );
+    } else if (account.sync_status === 'syncing') {
+      console.log('[BD Accounts] Sync already in progress for account', id);
+      return res.json({ success: true, message: 'Sync already in progress' });
+    }
+
+    // Check connection first so user gets clear "Account is not connected" before any Telegram API calls
+    if (!telegramManager.isConnected(id)) {
+      console.warn('[BD Accounts] Cannot start sync, account is not connected to Telegram', {
+        accountId: id,
+        organizationId: account.organization_id,
+      });
+      return res.status(400).json({ error: 'Account is not connected' });
+    }
+
+    const syncChatsCount = await pool.query(
+      'SELECT COUNT(*) AS c FROM bd_account_sync_chats WHERE bd_account_id = $1',
+      [id]
+    );
+    const numChats = Number(syncChatsCount.rows[0]?.c ?? 0);
+
+    if (numChats === 0) {
+      console.log('[BD Accounts] sync-start rejected: no chats selected for account', id);
+      return res.status(400).json({
+        error: 'no_chats_selected',
+        message: 'Сначала выберите чаты и папки для синхронизации в BD Аккаунтах',
+      });
+    }
+
+    console.log(`[BD Accounts] sync-start: account ${id}, ${numChats} chats to sync`);
+    res.json({ success: true, message: 'Sync started' });
+
+    telegramManager.syncHistory(id, account.organization_id).catch((err) => {
+      console.error('[BD Accounts] Sync failed:', err);
+    });
+  } catch (error: any) {
+    console.error('Error starting sync:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Stale sync threshold: if syncing started more than this ago, consider it stuck
+const SYNC_STALE_MINUTES = 15;
+
+// Get sync status for an account (returns 'idle' if syncing is stale so frontend can retry)
+app.get('/api/bd-accounts/:id/sync-status', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `SELECT sync_status, sync_error, sync_progress_total, sync_progress_done, sync_started_at, sync_completed_at
+       FROM bd_accounts WHERE id = $1 AND organization_id = $2`,
+      [id, user.organizationId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const row = result.rows[0];
+    let syncStatus = row.sync_status ?? 'idle';
+    const startedAt = row.sync_started_at ? new Date(row.sync_started_at).getTime() : 0;
+    if (syncStatus === 'syncing' && startedAt && Date.now() - startedAt > SYNC_STALE_MINUTES * 60 * 1000) {
+      await pool.query(
+        "UPDATE bd_accounts SET sync_status = 'idle', sync_error = 'Синхронизация прервана по таймауту' WHERE id = $1",
+        [id]
+      );
+      syncStatus = 'idle';
+    }
+    const chatsCount = await pool.query(
+      'SELECT COUNT(*) AS c FROM bd_account_sync_chats WHERE bd_account_id = $1',
+      [id]
+    );
+    const has_sync_chats = Number(chatsCount.rows[0]?.c ?? 0) > 0;
+    res.json({ ...row, sync_status: syncStatus, has_sync_chats: !!has_sync_chats });
+  } catch (error: any) {
+    console.error('Error fetching sync status:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Proxy media from Telegram (photo, video, voice, document) — не храним файлы, отдаём по запросу
+app.get('/api/bd-accounts/:id/media', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { channelId, messageId } = req.query;
+
+    if (!channelId || !messageId) {
+      return res.status(400).json({ error: 'channelId and messageId query params required' });
+    }
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+
+    const result = await telegramManager.downloadMessageMedia(id, String(channelId), String(messageId));
+    if (!result) {
+      return res.status(404).json({ error: 'Message or media not found' });
+    }
+
+    res.setHeader('Content-Type', result.mimeType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.send(result.buffer);
+  } catch (error: any) {
+    if (error?.message?.includes('not connected')) {
+      return res.status(400).json({ error: 'Account is not connected' });
+    }
+    console.error('Error proxying media:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Disconnect account — только владелец
 app.post('/api/bd-accounts/:id/disconnect', async (req, res) => {
   try {
     const user = getUser(req);
     const { id } = req.params;
 
-    // Verify account belongs to organization
     const accountResult = await pool.query(
       'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
       [id, user.organizationId]
     );
-
     if (accountResult.rows.length === 0) {
       return res.status(404).json({ error: 'BD account not found' });
+    }
+    const isOwner = await requireAccountOwner(id, user);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Only the account owner can disconnect' });
     }
 
     await telegramManager.disconnectAccount(id);

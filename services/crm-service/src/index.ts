@@ -131,6 +131,60 @@ app.post('/api/crm/contacts', async (req, res) => {
   }
 });
 
+app.patch('/api/crm/contacts/:id', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { displayName, firstName, lastName, email, phone } = req.body;
+
+    const updates: string[] = [];
+    const values: any[] = [];
+    let idx = 1;
+
+    if (displayName !== undefined) {
+      updates.push(`display_name = $${idx++}`);
+      values.push(displayName === '' || displayName === null ? null : displayName);
+    }
+    if (firstName !== undefined) {
+      updates.push(`first_name = $${idx++}`);
+      values.push(firstName === '' || firstName === null ? null : firstName);
+    }
+    if (lastName !== undefined) {
+      updates.push(`last_name = $${idx++}`);
+      values.push(lastName === '' || lastName === null ? null : lastName);
+    }
+    if (email !== undefined) {
+      updates.push(`email = $${idx++}`);
+      values.push(email === '' || email === null ? null : email);
+    }
+    if (phone !== undefined) {
+      updates.push(`phone = $${idx++}`);
+      values.push(phone === '' || phone === null ? null : phone);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    values.push(id, user.organizationId);
+    const result = await pool.query(
+      `UPDATE contacts SET ${updates.join(', ')}, updated_at = NOW()
+       WHERE id = $${idx} AND organization_id = $${idx + 1}
+       RETURNING *`,
+      values
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Contact not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error updating contact:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Deals
 app.get('/api/crm/deals', async (req, res) => {
   try {

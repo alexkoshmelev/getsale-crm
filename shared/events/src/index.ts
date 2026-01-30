@@ -49,6 +49,10 @@ export enum EventType {
   BD_ACCOUNT_CONNECTED = 'bd_account.connected',
   BD_ACCOUNT_DISCONNECTED = 'bd_account.disconnected',
   BD_ACCOUNT_PURCHASED = 'bd_account.purchased',
+  BD_ACCOUNT_SYNC_STARTED = 'bd_account.sync.started',
+  BD_ACCOUNT_SYNC_PROGRESS = 'bd_account.sync.progress',
+  BD_ACCOUNT_SYNC_COMPLETED = 'bd_account.sync.completed',
+  BD_ACCOUNT_SYNC_FAILED = 'bd_account.sync.failed',
   
   // Subscription
   SUBSCRIPTION_CREATED = 'subscription.created',
@@ -100,6 +104,7 @@ export interface MessageReceivedEvent extends BaseEvent {
   data: {
     messageId: string;
     channel: string;
+    channelId?: string; // telegram chat id for room targeting
     contactId?: string;
     bdAccountId?: string;
     content: string;
@@ -142,6 +147,42 @@ export interface BDAccountConnectedEvent extends BaseEvent {
     bdAccountId: string;
     platform: string;
     userId: string;
+  };
+}
+
+export interface BDAccountSyncStartedEvent extends BaseEvent {
+  type: EventType.BD_ACCOUNT_SYNC_STARTED;
+  data: {
+    bdAccountId: string;
+    totalChats: number;
+  };
+}
+
+export interface BDAccountSyncProgressEvent extends BaseEvent {
+  type: EventType.BD_ACCOUNT_SYNC_PROGRESS;
+  data: {
+    bdAccountId: string;
+    done: number;
+    total: number;
+    currentChatId?: string;
+    currentChatTitle?: string;
+  };
+}
+
+export interface BDAccountSyncCompletedEvent extends BaseEvent {
+  type: EventType.BD_ACCOUNT_SYNC_COMPLETED;
+  data: {
+    bdAccountId: string;
+    totalChats: number;
+    totalMessages: number;
+  };
+}
+
+export interface BDAccountSyncFailedEvent extends BaseEvent {
+  type: EventType.BD_ACCOUNT_SYNC_FAILED;
+  data: {
+    bdAccountId: string;
+    error: string;
   };
 }
 
@@ -304,6 +345,10 @@ export type Event =
   | BDAccountConnectedEvent
   | BDAccountDisconnectedEvent
   | BDAccountPurchasedEvent
+  | BDAccountSyncStartedEvent
+  | BDAccountSyncProgressEvent
+  | BDAccountSyncCompletedEvent
+  | BDAccountSyncFailedEvent
   | SubscriptionCreatedEvent
   | SubscriptionUpdatedEvent
   | SubscriptionCancelledEvent

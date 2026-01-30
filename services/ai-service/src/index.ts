@@ -7,9 +7,22 @@ import { AIDraftStatus } from '@getsale/types';
 const app = express();
 const PORT = process.env.PORT || 3005;
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || '';
+const isPlaceholder = /your[_\-]?openai|placeholder|your_ope/i.test(OPENAI_API_KEY);
+const isOpenAIKeyConfigured =
+  OPENAI_API_KEY.length > 0 &&
+  !isPlaceholder &&
+  OPENAI_API_KEY.startsWith('sk-');
+
+const openai = isOpenAIKeyConfigured
+  ? new OpenAI({ apiKey: OPENAI_API_KEY })
+  : (null as unknown as OpenAI);
+
+if (!isOpenAIKeyConfigured) {
+  console.warn(
+    '[AI Service] OPENAI_API_KEY is not set or is a placeholder. AI draft generation will return 503. Set a valid key from https://platform.openai.com/account/api-keys'
+  );
+}
 
 const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6379');
 const rabbitmq = new RabbitMQClient(
@@ -31,8 +44,16 @@ async function subscribeToEvents() {
     [EventType.MESSAGE_RECEIVED, EventType.DEAL_STAGE_CHANGED],
     async (event) => {
       if (event.type === EventType.MESSAGE_RECEIVED) {
-        // Generate draft response
-        await generateDraft(event.data.contactId, event.data.content);
+        try {
+          await generateDraft(event.data.contactId, event.data.content);
+        } catch (err: unknown) {
+          const e = err as Error & { statusCode?: number };
+          if (e.statusCode === 503 || e.message === OPENAI_NOT_CONFIGURED_MSG) {
+            // Do not log as error; key is simply not configured
+            return;
+          }
+          console.error('Error generating draft (event):', err);
+        }
       }
     },
     'events',
@@ -40,7 +61,16 @@ async function subscribeToEvents() {
   );
 }
 
+const OPENAI_NOT_CONFIGURED_MSG =
+  'OpenAI API key is not configured or is a placeholder. Set OPENAI_API_KEY to a valid key from https://platform.openai.com/account/api-keys';
+
 async function generateDraft(contactId: string, context: string) {
+  if (!isOpenAIKeyConfigured || !openai) {
+    const err = new Error(OPENAI_NOT_CONFIGURED_MSG) as Error & { statusCode?: number };
+    err.statusCode = 503;
+    throw err;
+  }
+
   try {
     // Get contact context from cache or CRM service
     const contactKey = `contact:${contactId}`;
@@ -126,7 +156,16 @@ app.post('/api/ai/drafts/generate', async (req, res) => {
     const draft = await generateDraft(contactId, context || '');
 
     res.json(draft);
-  } catch (error) {
+  } catch (error: unknown) {
+    const err = error as Error & { statusCode?: number };
+    if (err.statusCode === 503 || err.message === OPENAI_NOT_CONFIGURED_MSG) {
+      res.status(503).json({
+        error: 'Service Unavailable',
+        code: 'OPENAI_NOT_CONFIGURED',
+        message: OPENAI_NOT_CONFIGURED_MSG,
+      });
+      return;
+    }
     console.error('Error generating draft:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
