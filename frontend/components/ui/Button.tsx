@@ -17,16 +17,18 @@ export default function Button({
   return (
     <button
       className={clsx(
-        'font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+        'inline-flex items-center justify-center font-medium rounded-lg transition-all duration-150',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+        'active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none disabled:active:scale-100',
         {
-          'bg-blue-600 hover:bg-blue-700 text-white': variant === 'primary',
-          'bg-gray-200 hover:bg-gray-300 text-gray-900 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-white': variant === 'secondary',
-          'bg-red-600 hover:bg-red-700 text-white': variant === 'danger',
-          'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300': variant === 'ghost',
-          'border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300': variant === 'outline',
+          'bg-primary hover:bg-primary/90 text-primary-foreground shadow-soft': variant === 'primary',
+          'bg-secondary hover:bg-secondary/80 text-secondary-foreground': variant === 'secondary',
+          'bg-destructive hover:bg-destructive/90 text-destructive-foreground': variant === 'danger',
+          'hover:bg-accent text-foreground': variant === 'ghost',
+          'border border-border hover:bg-accent text-foreground': variant === 'outline',
           'px-3 py-1.5 text-sm': size === 'sm',
-          'px-4 py-2 text-base': size === 'md',
-          'px-6 py-3 text-lg': size === 'lg',
+          'px-4 py-2 text-sm': size === 'md',
+          'px-6 py-3 text-base': size === 'lg',
         },
         className
       )}

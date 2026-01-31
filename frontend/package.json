@@ -20,7 +20,10 @@
     "recharts": "^2.10.3",
     "lucide-react": "^0.294.0",
     "clsx": "^2.0.0",
-    "tailwind-merge": "^2.1.0"
+    "tailwind-merge": "^2.1.0",
+    "i18next": "^23.7.0",
+    "react-i18next": "^14.0.0",
+    "i18next-browser-languagedetector": "^7.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

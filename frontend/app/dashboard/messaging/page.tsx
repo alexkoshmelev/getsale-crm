@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import { useWebSocketContext } from '@/lib/contexts/websocket-context';
@@ -188,7 +189,7 @@ function MessageContent({
   const label = mediaLabels[mediaType];
   const hasCaption = !!((msg.content ?? (msg as any).body ?? '')?.trim());
   const textCls = 'text-sm leading-relaxed whitespace-pre-wrap break-words';
-  const iconCls = isOutbound ? 'text-blue-100' : 'text-gray-500';
+  const iconCls = isOutbound ? 'text-primary-foreground/80' : 'text-muted-foreground';
   const canLoadMedia =
     bdAccountId && channelId && msg.telegram_message_id && mediaType !== 'text' && mediaType !== 'unknown';
 
@@ -247,6 +248,7 @@ function MessageContent({
 }
 
 export default function MessagingPage() {
+  const { t } = useTranslation();
   const { user: currentUser } = useAuthStore();
   const [accounts, setAccounts] = useState<BDAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
@@ -837,19 +839,19 @@ export default function MessagingPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full">
+      <div className="flex items-center justify-center h-[calc(100vh-6.5rem)] min-h-0">
         <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
       </div>
     );
   }
 
   return (
-    <div className="relative flex h-[calc(100vh-12rem)] bg-white -m-6 rounded-lg border border-gray-200 overflow-hidden">
+    <div className="relative flex h-[calc(100vh-6.5rem)] min-h-0 bg-card -m-6 rounded-lg border border-border overflow-hidden">
       {/* BD Accounts Sidebar */}
-      <div className="w-64 bg-gray-50 border-r border-gray-200 flex flex-col">
-        <div className="p-4 border-b border-gray-200">
+      <div className="w-64 min-h-0 bg-muted/50 border-r border-border flex flex-col">
+        <div className="p-4 border-b border-border">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="font-semibold text-gray-900">BD Аккаунты</h3>
+            <h3 className="font-semibold text-foreground">{t('messaging.bdAccounts')}</h3>
             <Button
               size="sm"
               onClick={() => window.location.href = '/dashboard/bd-accounts'}
@@ -859,10 +861,10 @@ export default function MessagingPage() {
             </Button>
           </div>
           <div className="relative">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
+            <Search className="w-4 h-4 absolute left-3 top-2.5 text-muted-foreground" />
             <Input
               type="text"
-              placeholder="Поиск..."
+              placeholder={t('common.search')}
               value={accountSearch}
               onChange={(e) => setAccountSearch(e.target.value)}
               className="pl-9 text-sm"
@@ -872,8 +874,8 @@ export default function MessagingPage() {
 
         <div className="flex-1 overflow-y-auto">
           {filteredAccounts.length === 0 ? (
-            <div className="p-4 text-center text-sm text-gray-500">
-              Нет аккаунтов
+            <div className="p-4 text-center text-sm text-muted-foreground">
+              {t('messaging.noAccounts')}
             </div>
           ) : (
             filteredAccounts.map((account) => (
@@ -884,9 +886,9 @@ export default function MessagingPage() {
                   setSelectedChat(null);
                   setMessages([]);
                 }}
-                className={`p-3 cursor-pointer border-b border-gray-200 hover:bg-gray-100 ${
+                className={`p-3 cursor-pointer border-b border-border hover:bg-accent ${
                   selectedAccountId === account.id
-                    ? 'bg-blue-50 border-l-4 border-l-blue-500'
+                    ? 'bg-primary/10 border-l-4 border-l-primary'
                     : ''
                 }`}
               >
@@ -896,23 +898,23 @@ export default function MessagingPage() {
                       {account.phone_number || account.telegram_id || 'Unknown'}
                     </div>
                     <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                      <span className="text-xs text-gray-500">Telegram</span>
+                      <span className="text-xs text-muted-foreground">Telegram</span>
                       {account.is_owner ? (
-                        <span className="text-xs text-blue-600 font-medium">Ваш</span>
+                        <span className="text-xs text-primary font-medium">{t('messaging.yourAccount')}</span>
                       ) : (
-                        <span className="text-xs text-gray-500">Коллега</span>
+                        <span className="text-xs text-muted-foreground">{t('messaging.colleague')}</span>
                       )}
                       {account.sync_status === 'completed' ? (
-                        <span className="text-xs text-green-600 font-medium">Готов</span>
+                        <span className="text-xs text-green-600 dark:text-green-400 font-medium">{t('messaging.ready')}</span>
                       ) : (
-                        <span className="text-xs text-amber-600 font-medium">Ожидает синхронизации</span>
+                        <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">{t('messaging.syncing')}</span>
                       )}
                     </div>
                   </div>
                   {account.is_active ? (
-                    <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0" />
+                    <CheckCircle2 className="w-4 h-4 text-green-500 dark:text-green-400 flex-shrink-0" />
                   ) : (
-                    <XCircle className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                    <XCircle className="w-4 h-4 text-muted-foreground flex-shrink-0" />
                   )}
                 </div>
               </div>
@@ -922,13 +924,13 @@ export default function MessagingPage() {
       </div>
 
       {/* Chats List */}
-      <div className="w-80 bg-white border-r border-gray-200 flex flex-col">
-        <div className="p-4 border-b border-gray-200 space-y-2">
+      <div className="w-80 min-h-0 bg-card border-r border-border flex flex-col">
+        <div className="p-4 border-b border-border space-y-2">
           <div className="relative">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
+            <Search className="w-4 h-4 absolute left-3 top-2.5 text-muted-foreground" />
             <Input
               type="text"
-              placeholder="Поиск чатов..."
+              placeholder={t('messaging.searchChats')}
               value={chatSearch}
               onChange={(e) => setChatSearch(e.target.value)}
               className="pl-9 text-sm"
@@ -936,14 +938,14 @@ export default function MessagingPage() {
           </div>
 
           {!accountSyncReady && (
-            <div className="text-xs text-gray-600 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 space-y-2">
+            <div className="text-xs text-muted-foreground bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/30 dark:border-amber-500/40 rounded-md px-3 py-2 space-y-2">
               {accountSyncProgress ? (
                 `Идёт начальная синхронизация аккаунта (${accountSyncProgress.done} / ${accountSyncProgress.total} чатов)…`
               ) : isSelectedAccountMine ? (
                 <>
-                  <p className="font-medium text-gray-800">Чтобы начать работу с этим аккаунтом:</p>
-                  <p>Выберите чаты и папки для синхронизации и нажмите «Начать синхронизацию» в BD Аккаунтах.</p>
-                  {accountSyncError && <div className="text-red-600">{accountSyncError}</div>}
+                  <p className="font-medium text-foreground">Чтобы начать работу с этим аккаунтом:</p>
+                  <p className="text-muted-foreground">{t('messaging.selectChatsSync')}</p>
+                  {accountSyncError && <div className="text-destructive">{accountSyncError}</div>}
                   <div className="flex gap-2 flex-wrap">
                     <Button
                       size="sm"
@@ -963,7 +965,7 @@ export default function MessagingPage() {
                   </div>
                 </>
               ) : (
-                <p className="text-gray-600">Аккаунт коллеги. Синхронизацию может настроить только владелец.</p>
+                <p className="text-muted-foreground">{t('messaging.colleagueAccountHint')}</p>
               )}
             </div>
           )}
@@ -986,7 +988,7 @@ export default function MessagingPage() {
               <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
             </div>
           ) : !accountSyncReady ? (
-            <div className="p-4 flex flex-col items-center justify-center text-center text-sm text-gray-600">
+            <div className="p-4 flex flex-col items-center justify-center text-center text-sm text-muted-foreground">
               {accountSyncProgress ? (
                 <span>Ожидание завершения начальной синхронизации аккаунта…</span>
               ) : isSelectedAccountMine ? (
@@ -1004,32 +1006,34 @@ export default function MessagingPage() {
               )}
             </div>
           ) : filteredChats.length === 0 ? (
-            <div className="p-4 text-center text-sm text-gray-500">
-              Нет чатов
+            <div className="p-4 text-center text-sm text-muted-foreground">
+              {t('messaging.noChats')}
             </div>
           ) : (
             filteredChats.map((chat) => (
               <div
                 key={`${chat.channel}-${chat.channel_id}`}
                 onClick={() => setSelectedChat(chat)}
-                className={`p-4 cursor-pointer border-b border-gray-100 hover:bg-gray-50 ${
-                  selectedChat?.channel_id === chat.channel_id ? 'bg-blue-50' : ''
+                className={`p-4 cursor-pointer border-b border-border transition-colors ${
+                  selectedChat?.channel_id === chat.channel_id
+                    ? 'bg-primary/10 dark:bg-primary/20'
+                    : 'hover:bg-accent'
                 }`}
               >
                 <div className="flex items-start justify-between mb-1">
                   <div className="font-medium text-sm truncate flex-1">
                     {getChatName(chat)}
                   </div>
-                  <span className="text-xs text-gray-500 ml-2 flex-shrink-0">
+                  <span className="text-xs text-muted-foreground ml-2 flex-shrink-0">
                     {formatTime(chat.last_message_at)}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <div className="text-sm text-gray-600 truncate flex-1">
-                    {chat.last_message || 'Нет сообщений'}
+                  <div className="text-sm text-muted-foreground truncate flex-1">
+                    {chat.last_message || t('messaging.noMessages')}
                   </div>
                   {chat.unread_count > 0 && (
-                    <span className="ml-2 bg-blue-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center flex-shrink-0">
+                    <span className="ml-2 bg-primary text-primary-foreground text-xs rounded-full w-5 h-5 flex items-center justify-center flex-shrink-0">
                       {chat.unread_count}
                     </span>
                   )}
@@ -1041,14 +1045,14 @@ export default function MessagingPage() {
       </div>
 
       {/* Chat Messages */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 min-h-0 flex flex-col">
         {selectedChat ? (
           <>
-            <div className="p-4 border-b border-gray-200 bg-white">
+            <div className="p-4 border-b border-border bg-card">
               <div className="flex items-center justify-between">
                 <div>
                   <div className="font-semibold">{getChatName(selectedChat)}</div>
-                  <div className="text-sm text-gray-500">
+                  <div className="text-sm text-muted-foreground">
                     {selectedChat.telegram_id && `Telegram ID: ${selectedChat.telegram_id}`}
                   </div>
                 </div>
@@ -1056,20 +1060,20 @@ export default function MessagingPage() {
                   <button
                     type="button"
                     onClick={() => setShowChatHeaderMenu((v) => !v)}
-                    className="p-2 hover:bg-gray-100 rounded"
+                    className="p-2 hover:bg-accent rounded"
                   >
                     <MoreVertical className="w-5 h-5" />
                   </button>
                   {showChatHeaderMenu && (
-                    <div className="absolute right-0 top-full mt-1 py-1 bg-white border border-gray-200 rounded-lg shadow-lg z-10 min-w-[180px]">
+                    <div className="absolute right-0 top-full mt-1 py-1 bg-card border border-border rounded-lg shadow-lg z-10 min-w-[180px]">
                       <button
                         type="button"
                         onClick={openEditNameModal}
                         disabled={!selectedChat.contact_id}
-                        className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                        className="w-full px-4 py-2 text-left text-sm hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                       >
                         <UserCircle className="w-4 h-4" />
-                        {selectedChat.contact_id ? 'Изменить имя контакта' : 'Нет контакта (имя нельзя изменить)'}
+                        {selectedChat.contact_id ? t('messaging.changeContactName') : t('messaging.noContact')}
                       </button>
                     </div>
                   )}
@@ -1080,10 +1084,10 @@ export default function MessagingPage() {
             {/* Модалка: кастомное имя контакта */}
             {showEditNameModal && (
               <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => !savingDisplayName && setShowEditNameModal(false)}>
-                <div className="bg-white rounded-xl shadow-xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
-                  <h3 className="text-lg font-semibold mb-2">Имя контакта</h3>
-                  <p className="text-sm text-gray-500 mb-4">
-                    Это имя будет отображаться в чатах вместо имени из Telegram (first name, username).
+                <div className="bg-card rounded-xl shadow-xl p-6 max-w-md w-full mx-4 border border-border" onClick={(e) => e.stopPropagation()}>
+                  <h3 className="text-lg font-semibold mb-2 text-foreground">{t('messaging.contactName')}</h3>
+                  <p className="text-sm text-muted-foreground mb-4">
+                    {t('messaging.contactNameHint')}
                   </p>
                   <Input
                     value={editDisplayNameValue}
@@ -1103,16 +1107,16 @@ export default function MessagingPage() {
               </div>
             )}
 
-            <div className="flex-1 overflow-y-auto p-4 bg-gray-50">
+            <div className="flex-1 overflow-y-auto p-4 bg-muted/30">
               {loadingMessages ? (
                 <div className="flex items-center justify-center h-full">
                   <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
                 </div>
               ) : messages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-gray-500">
-                  <MessageSquare className="w-12 h-12 mb-3 text-gray-400" />
-                  <p className="text-sm">Нет сообщений</p>
-                  <p className="text-xs mt-1 text-gray-400">Начните переписку</p>
+                <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
+                  <MessageSquare className="w-12 h-12 mb-3 text-muted-foreground" />
+                  <p className="text-sm">{t('messaging.noMessages')}</p>
+                  <p className="text-xs mt-1 text-muted-foreground">{t('messaging.startConversation')}</p>
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -1128,7 +1132,7 @@ export default function MessagingPage() {
                       <div key={msg.id}>
                         {showDateSeparator && (
                           <div className="flex justify-center my-4">
-                            <span className="text-xs text-gray-500 bg-gray-200 px-3 py-1 rounded-full">
+                            <span className="text-xs text-muted-foreground bg-muted px-3 py-1 rounded-full">
                               {new Date(msgTime).toLocaleDateString('ru-RU', {
                                 day: 'numeric',
                                 month: 'long',
@@ -1146,7 +1150,7 @@ export default function MessagingPage() {
                             className={`max-w-[70%] rounded-2xl px-4 py-2 ${
                               isOutbound
                                 ? 'bg-blue-500 text-white rounded-br-md'
-                                : 'bg-white text-gray-900 rounded-bl-md shadow-sm'
+                                : 'bg-card text-foreground rounded-bl-md shadow-sm border border-border'
                             }`}
                           >
                             <MessageContent
@@ -1159,7 +1163,7 @@ export default function MessagingPage() {
                               className={`text-xs mt-1 flex items-center gap-1 ${
                                 isOutbound
                                   ? 'text-blue-100 justify-end'
-                                  : 'text-gray-500 justify-start'
+                                  : 'text-muted-foreground justify-start'
                               }`}
                             >
                               <span>{formatTime(msgTime)}</span>
@@ -1182,67 +1186,67 @@ export default function MessagingPage() {
 
             {/* Команды CRM - верхняя панель */}
             {showCommandsMenu && (
-              <div className="commands-menu px-4 pt-3 pb-2 bg-gray-50 border-t border-gray-200">
+              <div className="commands-menu px-4 pt-3 pb-2 bg-muted/30 border-t border-border">
                 <div className="flex items-center gap-2 flex-wrap">
                   <button
                     onClick={handleInsertFromScript}
-                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <FileCode className="w-4 h-4 text-blue-600" />
                     <span>Из скрипта</span>
                   </button>
                   <button
                     onClick={handleInsertPrevious}
-                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <History className="w-4 h-4 text-purple-600" />
                     <span>Предыдущее</span>
                   </button>
                   <button
                     onClick={handleInsertAIGenerated}
-                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <Sparkles className="w-4 h-4 text-yellow-600" />
                     <span>AI-ответ</span>
                   </button>
                   <button
                     onClick={handleAutomation}
-                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <Zap className="w-4 h-4 text-orange-600" />
                     <span>Автоматизация</span>
                   </button>
                   <button
                     onClick={handleCreateContact}
-                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <UserCircle className="w-4 h-4 text-green-600" />
                     <span>Создать контакт</span>
                   </button>
                   <button
                     onClick={handleAddTag}
-                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <Tag className="w-4 h-4 text-indigo-600" />
                     <span>Добавить тег</span>
                   </button>
                   <button
                     onClick={handleViewAnalytics}
-                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <BarChart3 className="w-4 h-4 text-cyan-600" />
                     <span>Аналитика</span>
                   </button>
                   <button
                     onClick={handleScheduleMessage}
-                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <Clock className="w-4 h-4 text-pink-600" />
                     <span>Отложить</span>
                   </button>
                   <button
                     onClick={() => setShowCommandsMenu(false)}
-                    className="ml-auto p-1.5 text-gray-400 hover:text-gray-600 transition-colors"
+                    className="ml-auto p-1.5 text-muted-foreground hover:text-foreground transition-colors"
                   >
                     <X className="w-4 h-4" />
                   </button>
@@ -1250,14 +1254,14 @@ export default function MessagingPage() {
               </div>
             )}
 
-            <div className="p-4 bg-white border-t border-gray-200">
+            <div className="p-4 bg-card border-t border-border">
               {/* Панель ввода сообщения */}
               <div className="flex items-end gap-2">
                 {/* Кнопка прикрепления файлов */}
                 <div className="relative attach-menu">
                   <button
                     onClick={() => setShowAttachMenu(!showAttachMenu)}
-                    className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+                    className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
                     title="Прикрепить файл"
                   >
                     <Paperclip className="w-5 h-5" />
@@ -1265,26 +1269,26 @@ export default function MessagingPage() {
                   
                   {/* Выпадающее меню прикрепления */}
                   {showAttachMenu && (
-                    <div className="absolute bottom-full left-0 mb-2 bg-white border border-gray-200 rounded-lg shadow-lg p-2 z-10 min-w-[180px]">
+                    <div className="absolute bottom-full left-0 mb-2 bg-card border border-border rounded-lg shadow-lg p-2 z-10 min-w-[180px]">
                       <button
                         onClick={() => handleAttachFile('photo')}
-                        className="w-full flex items-center gap-3 px-3 py-2 text-sm hover:bg-gray-50 rounded-lg transition-colors"
+                        className="w-full flex items-center gap-3 px-3 py-2 text-sm hover:bg-accent rounded-lg transition-colors"
                       >
                         <Image className="w-4 h-4 text-blue-600" />
                         <span>Фото</span>
                       </button>
                       <button
                         onClick={() => handleAttachFile('video')}
-                        className="w-full flex items-center gap-3 px-3 py-2 text-sm hover:bg-gray-50 rounded-lg transition-colors"
+                        className="w-full flex items-center gap-3 px-3 py-2 text-sm hover:bg-accent rounded-lg transition-colors"
                       >
                         <Video className="w-4 h-4 text-red-600" />
                         <span>Видео</span>
                       </button>
                       <button
                         onClick={() => handleAttachFile('file')}
-                        className="w-full flex items-center gap-3 px-3 py-2 text-sm hover:bg-gray-50 rounded-lg transition-colors"
+                        className="w-full flex items-center gap-3 px-3 py-2 text-sm hover:bg-accent rounded-lg transition-colors"
                       >
-                        <File className="w-4 h-4 text-gray-600" />
+                        <File className="w-4 h-4 text-muted-foreground" />
                         <span>Файл</span>
                       </button>
                     </div>
@@ -1306,7 +1310,7 @@ export default function MessagingPage() {
                   className={`p-2 rounded-lg transition-colors ${
                     isRecording
                       ? 'bg-red-100 text-red-600 animate-pulse'
-                      : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                   }`}
                   title="Голосовое сообщение"
                 >
@@ -1318,7 +1322,7 @@ export default function MessagingPage() {
                   <div className="w-full">
                     <Input
                       type="text"
-                      placeholder={isSelectedAccountMine ? 'Написать сообщение...' : 'Аккаунт коллеги — только просмотр'}
+                      placeholder={isSelectedAccountMine ? t('messaging.writeMessage') : t('messaging.colleagueViewOnly')}
                       value={newMessage}
                       onChange={(e) => setNewMessage(e.target.value)}
                       onKeyPress={(e) => {
@@ -1338,7 +1342,7 @@ export default function MessagingPage() {
                     className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg transition-colors ${
                       showCommandsMenu
                         ? 'bg-blue-100 text-blue-600'
-                        : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+                        : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                     }`}
                     title="Команды CRM"
                   >
@@ -1368,7 +1372,7 @@ export default function MessagingPage() {
                   <span>Идет запись голосового сообщения...</span>
                   <button
                     onClick={() => setIsRecording(false)}
-                    className="ml-auto text-xs text-gray-500 hover:text-gray-700"
+                    className="ml-auto text-xs text-muted-foreground hover:text-foreground"
                   >
                     Отменить
                   </button>
@@ -1377,7 +1381,7 @@ export default function MessagingPage() {
 
               {/* Подсказка о командах */}
               {!showCommandsMenu && (
-                <div className="mt-2 flex items-center gap-2 text-xs text-gray-400">
+                <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
                   <Bot className="w-3 h-3" />
                   <span>Нажмите на иконку бота для доступа к командам CRM</span>
                 </div>
@@ -1385,13 +1389,13 @@ export default function MessagingPage() {
             </div>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center bg-gray-50">
+          <div className="flex-1 flex items-center justify-center bg-muted/30">
             <div className="text-center">
-              <MessageSquare className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+              <MessageSquare className="w-16 h-16 text-muted-foreground mx-auto mb-4" />
+              <h3 className="text-lg font-semibold text-foreground mb-2">
                 Выберите чат
               </h3>
-              <p className="text-gray-500">
+              <p className="text-muted-foreground">
                 Выберите чат из списка, чтобы начать переписку
               </p>
             </div>

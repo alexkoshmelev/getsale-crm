@@ -1,212 +1,753 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import axios from 'axios';
-import { Plus, Building2, User } from 'lucide-react';
-import Link from 'next/link';
-import { CreateCompanyModal } from '@/components/modals/CreateCompanyModal';
+import { useEffect, useState, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
+import {
+  Plus,
+  Building2,
+  User,
+  TrendingUp,
+  Pencil,
+  Trash2,
+  ChevronRight,
+  Mail,
+  Phone,
+  Briefcase,
+} from 'lucide-react';
+import { apiClient } from '@/lib/api/client';
+import {
+  fetchCompanies,
+  fetchContacts,
+  fetchDeals,
+  deleteCompany,
+  deleteContact,
+  deleteDeal,
+  type Company,
+  type Contact,
+  type Deal,
+  type PaginationMeta,
+} from '@/lib/api/crm';
+import { Modal } from '@/components/ui/Modal';
+import { SearchInput } from '@/components/ui/SearchInput';
+import { Pagination } from '@/components/ui/Pagination';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { TableSkeleton } from '@/components/ui/Skeleton';
+import Button from '@/components/ui/Button';
+import { SlideOver } from '@/components/ui/SlideOver';
+import { CompanyFormModal } from '@/components/crm/CompanyFormModal';
+import { ContactFormModal } from '@/components/crm/ContactFormModal';
+import { DealFormModal } from '@/components/crm/DealFormModal';
+import { clsx } from 'clsx';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+type TabId = 'companies' | 'contacts' | 'deals';
 
-interface Company {
-  id: string;
-  name: string;
-  industry?: string;
-  size?: string;
-}
+const TABS: { id: TabId; i18nKey: string; icon: typeof Building2 }[] = [
+  { id: 'companies', i18nKey: 'companies', icon: Building2 },
+  { id: 'contacts', i18nKey: 'contacts', icon: User },
+  { id: 'deals', i18nKey: 'deals', icon: TrendingUp },
+];
 
-interface Contact {
-  id: string;
-  first_name: string;
-  last_name?: string;
-  email?: string;
-  company_id?: string;
-}
+const DEFAULT_PAGE = 1;
+const DEFAULT_LIMIT = 10;
 
 export default function CRMPage() {
-  const [companies, setCompanies] = useState<Company[]>([]);
-  const [contacts, setContacts] = useState<Contact[]>([]);
+  const { t } = useTranslation();
+  const [activeTab, setActiveTab] = useState<TabId>('companies');
+  const [search, setSearch] = useState('');
+  const [searchDebounced, setSearchDebounced] = useState('');
+  const [page, setPage] = useState(DEFAULT_PAGE);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'companies' | 'contacts'>('companies');
-  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [companies, setCompanies] = useState<Company[]>([]);
+  const [companiesPagination, setCompaniesPagination] = useState<PaginationMeta | null>(null);
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [contactsPagination, setContactsPagination] = useState<PaginationMeta | null>(null);
+  const [deals, setDeals] = useState<Deal[]>([]);
+  const [dealsPagination, setDealsPagination] = useState<PaginationMeta | null>(null);
+
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [detailType, setDetailType] = useState<TabId | null>(null);
+  const [detailData, setDetailData] = useState<Company | Contact | Deal | null>(null);
+
+  const [companyModalOpen, setCompanyModalOpen] = useState(false);
+  const [companyEdit, setCompanyEdit] = useState<Company | null>(null);
+  const [contactModalOpen, setContactModalOpen] = useState(false);
+  const [contactEdit, setContactEdit] = useState<Contact | null>(null);
+  const [dealModalOpen, setDealModalOpen] = useState(false);
+  const [dealEdit, setDealEdit] = useState<Deal | null>(null);
+
+  const [deleteConfirm, setDeleteConfirm] = useState<{ type: TabId; id: string; name: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
-    fetchData();
-  }, []);
+    const t = setTimeout(() => setSearchDebounced(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
 
-  const fetchData = async () => {
+  useEffect(() => {
+    setPage(1);
+  }, [activeTab, searchDebounced]);
+
+  const loadCompanies = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      const [companiesRes, contactsRes] = await Promise.all([
-        axios.get(`${API_URL}/api/crm/companies`),
-        axios.get(`${API_URL}/api/crm/contacts`),
-      ]);
-
-      setCompanies(companiesRes.data);
-      setContacts(contactsRes.data);
-    } catch (error) {
-      console.error('Error fetching data:', error);
+      const res = await fetchCompanies({
+        page,
+        limit: DEFAULT_LIMIT,
+        search: searchDebounced || undefined,
+      });
+      setCompanies(res.items);
+      setCompaniesPagination(res.pagination);
+    } catch (e) {
+      setError(t('crm.loadError'));
+      setCompanies([]);
+      setCompaniesPagination(null);
     } finally {
       setLoading(false);
     }
+  }, [page, searchDebounced]);
+
+  const loadContacts = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetchContacts({
+        page,
+        limit: DEFAULT_LIMIT,
+        search: searchDebounced || undefined,
+      });
+      setContacts(res.items);
+      setContactsPagination(res.pagination);
+    } catch (e) {
+      setError('Не удалось загрузить контакты');
+      setContacts([]);
+      setContactsPagination(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [page, searchDebounced]);
+
+  const loadDeals = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetchDeals({
+        page,
+        limit: DEFAULT_LIMIT,
+        search: searchDebounced || undefined,
+      });
+      setDeals(res.items);
+      setDealsPagination(res.pagination);
+    } catch (e) {
+      setError(t('crm.loadError'));
+      setDeals([]);
+      setDealsPagination(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [page, searchDebounced]);
+
+  useEffect(() => {
+    if (activeTab === 'companies') loadCompanies();
+    else if (activeTab === 'contacts') loadContacts();
+    else loadDeals();
+  }, [activeTab, loadCompanies, loadContacts, loadDeals]);
+
+  useEffect(() => {
+    if (!detailId || !detailType) {
+      setDetailData(null);
+      return;
+    }
+    if (detailType === 'companies') {
+      apiClient.get(`/api/crm/companies/${detailId}`).then((r) => setDetailData(r.data));
+    } else if (detailType === 'contacts') {
+      apiClient.get(`/api/crm/contacts/${detailId}`).then((r) => setDetailData(r.data));
+    } else {
+      apiClient.get(`/api/crm/deals/${detailId}`).then((r) => setDetailData(r.data));
+    }
+  }, [detailId, detailType]);
+
+  const refresh = useCallback(() => {
+    if (activeTab === 'companies') loadCompanies();
+    else if (activeTab === 'contacts') loadContacts();
+    else loadDeals();
+  }, [activeTab, loadCompanies, loadContacts, loadDeals]);
+
+  const openDetail = (type: TabId, id: string) => {
+    setDetailType(type);
+    setDetailId(id);
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      </div>
-    );
-  }
+  const handleDelete = async () => {
+    if (!deleteConfirm) return;
+    setDeleting(true);
+    try {
+      if (deleteConfirm.type === 'companies') await deleteCompany(deleteConfirm.id);
+      else if (deleteConfirm.type === 'contacts') await deleteContact(deleteConfirm.id);
+      else await deleteDeal(deleteConfirm.id);
+      setDeleteConfirm(null);
+      if (detailId === deleteConfirm.id) {
+        setDetailId(null);
+        setDetailType(null);
+        setDetailData(null);
+      }
+      refresh();
+    } catch (e) {
+      setError((e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? t('crm.deleteError'));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const pagination = activeTab === 'companies' ? companiesPagination : activeTab === 'contacts' ? contactsPagination : dealsPagination;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
-            CRM
+          <h1 className="font-heading text-2xl font-bold text-foreground tracking-tight">
+            {t('crm.title')}
           </h1>
-          <p className="text-gray-600 dark:text-gray-400">
-            Управление компаниями и контактами
+          <p className="mt-1 text-sm text-muted-foreground">
+            {t('crm.subtitle')}
           </p>
         </div>
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-        >
-          <Plus className="w-5 h-5" />
-          <span>Добавить</span>
-        </button>
+        <div className="flex items-center gap-2">
+          {activeTab === 'companies' && (
+            <Button onClick={() => { setCompanyEdit(null); setCompanyModalOpen(true); }}>
+              <Plus className="w-4 h-4 mr-2" />
+              {t('common.company')}
+            </Button>
+          )}
+          {activeTab === 'contacts' && (
+            <Button onClick={() => { setContactEdit(null); setContactModalOpen(true); }}>
+              <Plus className="w-4 h-4 mr-2" />
+              {t('common.contact')}
+            </Button>
+          )}
+          {activeTab === 'deals' && (
+            <Button onClick={() => { setDealEdit(null); setDealModalOpen(true); }}>
+              <Plus className="w-4 h-4 mr-2" />
+              {t('common.deal')}
+            </Button>
+          )}
+        </div>
       </div>
 
-      {/* Tabs */}
-      <div className="border-b border-gray-200 dark:border-gray-700">
-        <nav className="flex space-x-8">
-          <button
-            onClick={() => setActiveTab('companies')}
-            className={`py-4 px-1 border-b-2 font-medium text-sm ${
-              activeTab === 'companies'
-                ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400'
-            }`}
-          >
-            Компании ({companies.length})
-          </button>
-          <button
-            onClick={() => setActiveTab('contacts')}
-            className={`py-4 px-1 border-b-2 font-medium text-sm ${
-              activeTab === 'contacts'
-                ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400'
-            }`}
-          >
-            Контакты ({contacts.length})
-          </button>
+      <div className="border-b border-border">
+        <nav className="flex gap-1" aria-label="Вкладки CRM">
+          {TABS.map((tab) => {
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={clsx(
+                  'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-t-lg -mb-px',
+                  activeTab === tab.id
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
+                )}
+              >
+                <Icon className="w-4 h-4" />
+                {t(`crm.${tab.i18nKey}`)}
+              </button>
+            );
+          })}
         </nav>
       </div>
 
-      {/* Content */}
-      {activeTab === 'companies' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {companies.map((company) => (
-            <div
-              key={company.id}
-              className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 border border-gray-200 dark:border-gray-700 hover:shadow-lg transition-shadow"
-            >
-              <div className="flex items-start justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-blue-100 dark:bg-blue-900/20 rounded-lg">
-                    <Building2 className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold text-gray-900 dark:text-white">
-                      {company.name}
-                    </h3>
-                    {company.industry && (
-                      <p className="text-sm text-gray-500 dark:text-gray-400">
-                        {company.industry}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </div>
-              {company.size && (
-                <p className="text-sm text-gray-600 dark:text-gray-300">
-                  Размер: {company.size}
-                </p>
-              )}
-            </div>
-          ))}
-          {companies.length === 0 && (
-            <div className="col-span-full text-center py-12">
-              <Building2 className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-              <p className="text-gray-500 dark:text-gray-400">
-                Нет компаний. Создайте первую компанию.
-              </p>
-            </div>
-          )}
+      <div className="flex flex-col sm:flex-row gap-4">
+        <div className="flex-1">
+          <SearchInput
+            placeholder={activeTab === 'companies' ? t('crm.searchCompanies') : activeTab === 'contacts' ? t('crm.searchContacts') : t('crm.searchDeals')}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="max-w-xs"
+          />
+        </div>
+      </div>
+
+      {error && (
+        <div className="p-4 rounded-xl bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+          {error}
         </div>
       )}
 
-      {activeTab === 'contacts' && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 overflow-hidden">
-          <table className="w-full">
-            <thead className="bg-gray-50 dark:bg-gray-700">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                  Имя
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                  Email
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                  Действия
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-              {contacts.map((contact) => (
-                <tr key={contact.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 bg-green-100 dark:bg-green-900/20 rounded-full">
-                        <User className="w-4 h-4 text-green-600 dark:text-green-400" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-medium text-gray-900 dark:text-white">
-                          {contact.first_name} {contact.last_name}
+      <div className="rounded-xl border border-border bg-card shadow-soft overflow-hidden">
+        {activeTab === 'companies' && (
+          <>
+            {loading ? (
+              <table className="w-full">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.name')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.industry')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.size')}</th>
+                    <th className="px-6 py-3 w-24" />
+                  </tr>
+                </thead>
+                <TableSkeleton rows={5} cols={3} />
+              </table>
+            ) : (
+              <table className="w-full">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.name')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.industry')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.size')}</th>
+                    <th className="px-6 py-3 w-24" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {companies.map((c) => (
+                    <tr
+                      key={c.id}
+                      className="hover:bg-muted/30 transition-colors cursor-pointer group"
+                      onClick={() => openDetail('companies', c.id)}
+                    >
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-lg bg-primary/10 text-primary">
+                            <Building2 className="w-4 h-4" />
+                          </div>
+                          <span className="font-medium text-foreground">{c.name}</span>
                         </div>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                    {contact.email || '-'}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm">
-                    <button className="text-blue-600 hover:text-blue-700 dark:text-blue-400">
-                      Открыть
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {contacts.length === 0 && (
-            <div className="text-center py-12">
-              <User className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-              <p className="text-gray-500 dark:text-gray-400">
-                Нет контактов. Добавьте первый контакт.
-              </p>
-            </div>
-          )}
-        </div>
-      )}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">{c.industry ?? '—'}</td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">{c.size ?? '—'}</td>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setCompanyEdit(c); setCompanyModalOpen(true); }}
+                            className="p-2 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground"
+                            aria-label={t('crm.editAction')}
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'companies', id: c.id, name: c.name }); }}
+                            className="p-2 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                            aria-label={t('crm.deleteAction')}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                          <ChevronRight className="w-4 h-4 text-muted-foreground" />
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {!loading && companies.length === 0 && (
+              <EmptyState
+                icon={Building2}
+                title={t('crm.noCompanies')}
+                description={t('crm.noCompaniesDesc')}
+                action={<Button onClick={() => setCompanyModalOpen(true)}>{t('crm.addCompany')}</Button>}
+              />
+            )}
+          </>
+        )}
 
-      <CreateCompanyModal
-        isOpen={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        onSuccess={fetchData}
+        {activeTab === 'contacts' && (
+          <>
+            {loading ? (
+              <table className="w-full">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.name')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.email')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('common.company')}</th>
+                    <th className="px-6 py-3 w-24" />
+                  </tr>
+                </thead>
+                <TableSkeleton rows={5} cols={3} />
+              </table>
+            ) : (
+              <table className="w-full">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.name')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.email')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('common.company')}</th>
+                    <th className="px-6 py-3 w-24" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {contacts.map((c) => (
+                    <tr
+                      key={c.id}
+                      className="hover:bg-muted/30 transition-colors cursor-pointer group"
+                      onClick={() => openDetail('contacts', c.id)}
+                    >
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-full bg-primary/10 text-primary">
+                            <User className="w-4 h-4" />
+                          </div>
+                          <span className="font-medium text-foreground">
+                            {[c.first_name, c.last_name].filter(Boolean).join(' ') || 'Без имени'}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">{c.email ?? '—'}</td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">{(c as Contact & { companyName?: string }).companyName ?? (c as Contact & { company_name?: string }).company_name ?? '—'}</td>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setContactEdit(c); setContactModalOpen(true); }}
+                            className="p-2 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground"
+                            aria-label={t('crm.editAction')}
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'contacts', id: c.id, name: [c.first_name, c.last_name].filter(Boolean).join(' ') || c.email || c.id }); }}
+                            className="p-2 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                            aria-label={t('crm.deleteAction')}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                          <ChevronRight className="w-4 h-4 text-muted-foreground" />
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {!loading && contacts.length === 0 && (
+              <EmptyState
+                icon={User}
+                title={t('crm.noContacts')}
+                description={t('crm.noContactsDesc')}
+                action={<Button onClick={() => setContactModalOpen(true)}>{t('crm.addContact')}</Button>}
+              />
+            )}
+          </>
+        )}
+
+        {activeTab === 'deals' && (
+          <>
+            {loading ? (
+              <table className="w-full">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('common.deal')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('common.company')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.pipelineStage')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.amount')}</th>
+                    <th className="px-6 py-3 w-24" />
+                  </tr>
+                </thead>
+                <TableSkeleton rows={5} cols={4} />
+              </table>
+            ) : (
+              <table className="w-full">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('common.deal')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('common.company')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.pipelineStage')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.amount')}</th>
+                    <th className="px-6 py-3 w-24" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {deals.map((d) => (
+                    <tr
+                      key={d.id}
+                      className="hover:bg-muted/30 transition-colors cursor-pointer group"
+                      onClick={() => openDetail('deals', d.id)}
+                    >
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-lg bg-primary/10 text-primary">
+                            <TrendingUp className="w-4 h-4" />
+                          </div>
+                          <span className="font-medium text-foreground">{d.title}</span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">{d.companyName ?? d.company_name ?? '—'}</td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">
+                        {(d.pipelineName ?? d.pipeline_name ?? '—')} / {(d.stageName ?? d.stage_name ?? '—')}
+                      </td>
+                      <td className="px-6 py-4 text-sm font-medium text-foreground">
+                        {d.value != null ? `${Number(d.value).toLocaleString()} ${d.currency ?? 'RUB'}` : '—'}
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setDealEdit(d); setDealModalOpen(true); }}
+                            className="p-2 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground"
+                            aria-label={t('crm.editAction')}
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'deals', id: d.id, name: d.title }); }}
+                            className="p-2 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                            aria-label={t('crm.deleteAction')}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                          <ChevronRight className="w-4 h-4 text-muted-foreground" />
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {!loading && deals.length === 0 && (
+              <EmptyState
+                icon={TrendingUp}
+                title={t('crm.noDeals')}
+                description={t('crm.noDealsDesc')}
+                action={<Button onClick={() => setDealModalOpen(true)}>{t('crm.addDeal')}</Button>}
+              />
+            )}
+          </>
+        )}
+
+        {pagination && pagination.totalPages > 1 && (
+          <div className="px-6 py-4 border-t border-border">
+            <Pagination
+              page={page}
+              totalPages={pagination.totalPages}
+              onPageChange={setPage}
+            />
+            <p className="mt-2 text-center text-sm text-muted-foreground">
+              {t('crm.shownCount', {
+                from: ((page - 1) * pagination.limit) + 1,
+                to: Math.min(page * pagination.limit, pagination.total),
+                total: pagination.total,
+              })}
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Detail SlideOver */}
+      <SlideOver
+        isOpen={Boolean(detailId && detailType)}
+        onClose={() => { setDetailId(null); setDetailType(null); setDetailData(null); }}
+        title={
+          detailType === 'companies' ? t('common.company') :
+          detailType === 'contacts' ? t('common.contact') : t('common.deal')
+        }
+      >
+        {detailData && detailType === 'companies' && (
+          <CompanyDetail
+            company={detailData as Company}
+            onEdit={() => { setCompanyEdit(detailData as Company); setCompanyModalOpen(true); setDetailId(null); }}
+            onDelete={() => setDeleteConfirm({ type: 'companies', id: (detailData as Company).id, name: (detailData as Company).name })}
+            t={t}
+          />
+        )}
+        {detailData && detailType === 'contacts' && (
+          <ContactDetail
+            contact={detailData as Contact}
+            onEdit={() => { setContactEdit(detailData as Contact); setContactModalOpen(true); setDetailId(null); }}
+            onDelete={() => setDeleteConfirm({ type: 'contacts', id: (detailData as Contact).id, name: [(detailData as Contact).first_name, (detailData as Contact).last_name].filter(Boolean).join(' ') || (detailData as Contact).email || '' })}
+            t={t}
+          />
+        )}
+        {detailData && detailType === 'deals' && (
+          <DealDetail
+            deal={detailData as Deal}
+            onEdit={() => { setDealEdit(detailData as Deal); setDealModalOpen(true); setDetailId(null); }}
+            onDelete={() => setDeleteConfirm({ type: 'deals', id: (detailData as Deal).id, name: (detailData as Deal).title })}
+            t={t}
+          />
+        )}
+      </SlideOver>
+
+      {/* Modals */}
+      <CompanyFormModal
+        isOpen={companyModalOpen}
+        onClose={() => { setCompanyModalOpen(false); setCompanyEdit(null); }}
+        onSuccess={() => { refresh(); setCompanyModalOpen(false); setCompanyEdit(null); }}
+        edit={companyEdit}
       />
+      <ContactFormModal
+        isOpen={contactModalOpen}
+        onClose={() => { setContactModalOpen(false); setContactEdit(null); }}
+        onSuccess={() => { refresh(); setContactModalOpen(false); setContactEdit(null); }}
+        edit={contactEdit}
+      />
+      <DealFormModal
+        isOpen={dealModalOpen}
+        onClose={() => { setDealModalOpen(false); setDealEdit(null); }}
+        onSuccess={() => { refresh(); setDealModalOpen(false); setDealEdit(null); }}
+        edit={dealEdit}
+      />
+
+      {/* Delete confirmation */}
+      <Modal
+        isOpen={Boolean(deleteConfirm)}
+        onClose={() => setDeleteConfirm(null)}
+        title={t('crm.deleteConfirmTitle')}
+        size="sm"
+      >
+        {deleteConfirm && (
+          <div className="space-y-4">
+            <p className="text-muted-foreground">
+              {t('crm.deleteConfirmText', { name: deleteConfirm.name })}
+            </p>
+            <div className="flex gap-3">
+              <Button variant="outline" className="flex-1" onClick={() => setDeleteConfirm(null)}>
+                {t('common.cancel')}
+              </Button>
+              <Button variant="danger" className="flex-1" onClick={handleDelete} disabled={deleting}>
+                {deleting ? t('common.deleting') : t('common.delete')}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
 
+function CompanyDetail({
+  company,
+  onEdit,
+  onDelete,
+  t,
+}: {
+  company: Company;
+  onEdit: () => void;
+  onDelete: () => void;
+  t: (key: string) => string;
+}) {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start gap-4">
+        <div className="p-3 rounded-xl bg-primary/10 text-primary">
+          <Building2 className="w-8 h-8" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h3 className="font-heading text-lg font-semibold text-foreground truncate">{company.name}</h3>
+          {company.industry && <p className="text-sm text-muted-foreground">{company.industry}</p>}
+          {company.size && <p className="text-sm text-muted-foreground">{t('crm.size')}: {company.size}</p>}
+        </div>
+      </div>
+      {company.description && (
+        <div>
+          <h4 className="text-sm font-medium text-foreground mb-1">{t('crm.description')}</h4>
+          <p className="text-sm text-muted-foreground whitespace-pre-wrap">{company.description}</p>
+        </div>
+      )}
+      <div className="flex gap-2 pt-4 border-t border-border">
+        <Button variant="outline" size="sm" onClick={onEdit}>{t('crm.editAction')}</Button>
+        <Button variant="danger" size="sm" onClick={onDelete}>{t('crm.deleteAction')}</Button>
+      </div>
+    </div>
+  );
+}
+
+function ContactDetail({
+  contact,
+  onEdit,
+  onDelete,
+  t,
+}: {
+  contact: Contact & { companyName?: string | null };
+  onEdit: () => void;
+  onDelete: () => void;
+  t: (key: string) => string;
+}) {
+  const name = [contact.first_name, contact.last_name].filter(Boolean).join(' ') || '—';
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start gap-4">
+        <div className="p-3 rounded-full bg-primary/10 text-primary">
+          <User className="w-8 h-8" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h3 className="font-heading text-lg font-semibold text-foreground">{name}</h3>
+          {(contact as Contact & { companyName?: string }).companyName && (
+            <p className="text-sm text-muted-foreground flex items-center gap-1 mt-1">
+              <Briefcase className="w-4 h-4" />
+              {(contact as Contact & { companyName?: string }).companyName}
+            </p>
+          )}
+        </div>
+      </div>
+      <div className="space-y-3">
+        {contact.email && (
+          <div className="flex items-center gap-2 text-sm">
+            <Mail className="w-4 h-4 text-muted-foreground" />
+            <a href={`mailto:${contact.email}`} className="text-primary hover:underline">{contact.email}</a>
+          </div>
+        )}
+        {contact.phone && (
+          <div className="flex items-center gap-2 text-sm">
+            <Phone className="w-4 h-4 text-muted-foreground" />
+            <a href={`tel:${contact.phone}`} className="text-primary hover:underline">{contact.phone}</a>
+          </div>
+        )}
+      </div>
+      <div className="flex gap-2 pt-4 border-t border-border">
+        <Button variant="outline" size="sm" onClick={onEdit}>{t('crm.editAction')}</Button>
+        <Button variant="danger" size="sm" onClick={onDelete}>{t('crm.deleteAction')}</Button>
+      </div>
+    </div>
+  );
+}
+
+function DealDetail({
+  deal,
+  onEdit,
+  onDelete,
+  t,
+}: {
+  deal: Deal;
+  onEdit: () => void;
+  onDelete: () => void;
+  t: (key: string) => string;
+}) {
+  const pipelineName = deal.pipelineName ?? deal.pipeline_name ?? '—';
+  const stageName = deal.stageName ?? deal.stage_name ?? '—';
+  const companyName = deal.companyName ?? deal.company_name ?? '—';
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start gap-4">
+        <div className="p-3 rounded-xl bg-primary/10 text-primary">
+          <TrendingUp className="w-8 h-8" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h3 className="font-heading text-lg font-semibold text-foreground">{deal.title}</h3>
+          <p className="text-sm text-muted-foreground mt-1">{companyName}</p>
+        </div>
+      </div>
+      <dl className="grid grid-cols-1 gap-3 text-sm">
+        <div>
+          <dt className="text-muted-foreground">{t('crm.pipelineStage')}</dt>
+          <dd className="font-medium text-foreground">{pipelineName} → {stageName}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">{t('crm.amount')}</dt>
+          <dd className="font-medium text-foreground">
+            {deal.value != null ? `${Number(deal.value).toLocaleString()} ${deal.currency ?? 'RUB'}` : '—'}
+          </dd>
+        </div>
+      </dl>
+      <div className="flex gap-2 pt-4 border-t border-border">
+        <Button variant="outline" size="sm" onClick={onEdit}>{t('crm.editAction')}</Button>
+        <Button variant="danger" size="sm" onClick={onDelete}>{t('crm.deleteAction')}</Button>
+      </div>
+    </div>
+  );
+}

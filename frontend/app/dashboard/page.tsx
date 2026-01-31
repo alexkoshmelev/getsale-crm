@@ -1,12 +1,25 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import Link from 'next/link';
 import axios from 'axios';
-import { Building2, Users, MessageSquare, TrendingUp } from 'lucide-react';
+import { Building2, Users, MessageSquare, TrendingUp, ArrowRight } from 'lucide-react';
+import { Card } from '@/components/ui/Card';
+import Button from '@/components/ui/Button';
+import { OnboardingBanner } from '@/components/layout/OnboardingBanner';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
+const statCardsConfig = [
+  { titleKey: 'companies', icon: Building2, href: '/dashboard/crm' },
+  { titleKey: 'contacts', icon: Users, href: '/dashboard/crm' },
+  { titleKey: 'messages', icon: MessageSquare, href: '/dashboard/messaging' },
+  { titleKey: 'deals', icon: TrendingUp, href: '/dashboard/pipeline' },
+];
+
 export default function DashboardPage() {
+  const { t } = useTranslation();
   const [stats, setStats] = useState({
     companies: 0,
     contacts: 0,
@@ -41,104 +54,88 @@ export default function DashboardPage() {
     fetchStats();
   }, []);
 
-  const statCards = [
-    {
-      title: 'Компании',
-      value: stats.companies,
-      icon: Building2,
-      color: 'bg-blue-500',
-    },
-    {
-      title: 'Контакты',
-      value: stats.contacts,
-      icon: Users,
-      color: 'bg-green-500',
-    },
-    {
-      title: 'Сообщения',
-      value: stats.messages,
-      icon: MessageSquare,
-      color: 'bg-purple-500',
-    },
-    {
-      title: 'Сделки',
-      value: stats.deals,
-      icon: TrendingUp,
-      color: 'bg-orange-500',
-    },
-  ];
-
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      <div className="flex items-center justify-center min-h-[320px]">
+        <div className="animate-spin rounded-full h-10 w-10 border-2 border-primary border-t-transparent" aria-hidden />
       </div>
     );
   }
 
+  const values = [stats.companies, stats.contacts, stats.messages, stats.deals];
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
+      <OnboardingBanner />
       <div>
-        <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
-          Dashboard
+        <h1 className="font-heading text-3xl font-bold text-foreground tracking-tight mb-1.5">
+          {t('dashboard.title')}
         </h1>
-        <p className="text-gray-600 dark:text-gray-400">
-          Обзор вашей CRM системы
+        <p className="text-muted-foreground text-base">
+          {t('dashboard.subtitle')}
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {statCards.map((stat) => {
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {statCardsConfig.map((stat, i) => {
           const Icon = stat.icon;
+          const value = values[i];
           return (
-            <div
-              key={stat.title}
-              className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 border border-gray-200 dark:border-gray-700"
-            >
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-gray-600 dark:text-gray-400">
-                    {stat.title}
-                  </p>
-                  <p className="text-3xl font-bold text-gray-900 dark:text-white mt-2">
-                    {stat.value}
-                  </p>
+            <Link key={stat.titleKey} href={stat.href} className="block focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-xl">
+              <Card
+                className="group cursor-pointer border-l-4 border-l-primary hover:shadow-soft-md hover:-translate-y-0.5 transition-all duration-200"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-muted-foreground">
+                      {t(`dashboard.${stat.titleKey}`)}
+                    </p>
+                    <p className="font-heading text-2xl font-bold text-foreground mt-1 tracking-tight">
+                      {value}
+                    </p>
+                  </div>
+                  <div className="p-3 rounded-xl bg-primary/10 text-primary transition-transform duration-200 group-hover:scale-105">
+                    <Icon className="w-5 h-5" />
+                  </div>
                 </div>
-                <div className={`${stat.color} p-3 rounded-lg`}>
-                  <Icon className="w-6 h-6 text-white" />
-                </div>
-              </div>
-            </div>
+              </Card>
+            </Link>
           );
         })}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 border border-gray-200 dark:border-gray-700">
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
-            Последние активности
-          </h2>
-          <p className="text-gray-500 dark:text-gray-400">
-            Активности появятся здесь
+        <Card title={t('dashboard.recentActivity')}>
+          <p className="text-muted-foreground text-sm leading-relaxed">
+            {t('dashboard.recentActivityPlaceholder')}
           </p>
-        </div>
+        </Card>
 
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 border border-gray-200 dark:border-gray-700">
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
-            Быстрые действия
-          </h2>
+        <Card title={t('dashboard.quickActions')}>
           <div className="space-y-2">
-            <button className="w-full text-left px-4 py-2 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors">
-              Создать компанию
-            </button>
-            <button className="w-full text-left px-4 py-2 bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 rounded-lg hover:bg-green-100 dark:hover:bg-green-900/30 transition-colors">
-              Добавить контакт
-            </button>
-            <button className="w-full text-left px-4 py-2 bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 rounded-lg hover:bg-purple-100 dark:hover:bg-purple-900/30 transition-colors">
-              Новая сделка
-            </button>
+            <Link href="/dashboard/crm" className="block">
+              <Button variant="secondary" className="w-full justify-start gap-2 h-11">
+                <Building2 className="w-4 h-4" />
+                {t('dashboard.createCompany')}
+                <ArrowRight className="w-4 h-4 ml-auto opacity-50" />
+              </Button>
+            </Link>
+            <Link href="/dashboard/crm" className="block">
+              <Button variant="secondary" className="w-full justify-start gap-2 h-11">
+                <Users className="w-4 h-4" />
+                {t('dashboard.addContact')}
+                <ArrowRight className="w-4 h-4 ml-auto opacity-50" />
+              </Button>
+            </Link>
+            <Link href="/dashboard/pipeline" className="block">
+              <Button variant="secondary" className="w-full justify-start gap-2 h-11">
+                <TrendingUp className="w-4 h-4" />
+                {t('dashboard.newDeal')}
+                <ArrowRight className="w-4 h-4 ml-auto opacity-50" />
+              </Button>
+            </Link>
           </div>
-        </div>
+        </Card>
       </div>
     </div>
   );

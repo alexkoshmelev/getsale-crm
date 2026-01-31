@@ -11,12 +11,13 @@ export function Card({ children, className, title }: CardProps) {
   return (
     <div
       className={clsx(
-        'bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-6',
+        'bg-card text-card-foreground rounded-xl border border-border shadow-soft p-6',
+        'transition-shadow duration-200 hover:shadow-soft-md',
         className
       )}
     >
       {title && (
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+        <h3 className="font-heading text-lg font-semibold text-foreground tracking-tight mb-4">
           {title}
         </h3>
       )}

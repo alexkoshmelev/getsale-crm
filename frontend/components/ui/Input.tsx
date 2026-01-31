@@ -10,22 +10,22 @@ export function Input({ label, error, className, ...props }: InputProps) {
   return (
     <div className="w-full">
       {label && (
-        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+        <label className="block text-sm font-medium text-foreground mb-2">
           {label}
         </label>
       )}
       <input
         className={clsx(
-          'w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white',
-          error
-            ? 'border-red-300 dark:border-red-600'
-            : 'border-gray-300 dark:border-gray-600',
+          'w-full px-3.5 py-2.5 border rounded-lg bg-background text-foreground placeholder:text-muted-foreground',
+          'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0 focus:border-transparent',
+          'hover:border-input/80 transition-colors duration-150 border-input',
+          error && 'border-destructive focus:ring-destructive/50',
           className
         )}
         {...props}
       />
       {error && (
-        <p className="mt-1 text-sm text-red-600 dark:text-red-400">{error}</p>
+        <p className="mt-1 text-sm text-destructive">{error}</p>
       )}
     </div>
   );

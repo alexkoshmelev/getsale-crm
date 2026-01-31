@@ -1,8 +1,13 @@
 'use client';
 
-import { ReactNode } from 'react';
-import { useRouter } from 'next/navigation';
+import { ReactNode, useState, useEffect } from 'react';
+import { useRouter, usePathname } from 'next/navigation';
+import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/lib/stores/auth-store';
+import { useLayoutStore } from '@/lib/stores/layout-store';
+import { useThemeStore, type ThemeMode } from '@/lib/stores/theme-store';
+import { useLocaleStore } from '@/lib/stores/locale-store';
+import type { Locale } from '@/lib/i18n';
 import Link from 'next/link';
 import {
   LayoutDashboard,
@@ -14,90 +19,282 @@ import {
   Building2,
   Workflow,
   Smartphone,
+  PanelLeftClose,
+  PanelLeft,
+  Sun,
+  Moon,
+  Monitor,
+  Keyboard,
 } from 'lucide-react';
+import { clsx } from 'clsx';
+import { GlobalSearch } from '@/components/layout/GlobalSearch';
+import { Breadcrumbs } from '@/components/layout/Breadcrumbs';
+import { NotificationsDropdown } from '@/components/layout/NotificationsDropdown';
+import { KeyboardShortcutsModal } from '@/components/layout/KeyboardShortcutsModal';
+import { HelpDropdown } from '@/components/layout/HelpDropdown';
 
 interface DashboardLayoutProps {
   children: ReactNode;
 }
 
+const productItems: { href: string; i18nKey: string; icon: typeof LayoutDashboard }[] = [
+  { href: '/dashboard', i18nKey: 'home', icon: LayoutDashboard },
+  { href: '/dashboard/crm', i18nKey: 'crm', icon: Building2 },
+  { href: '/dashboard/pipeline', i18nKey: 'pipeline', icon: Workflow },
+  { href: '/dashboard/messaging', i18nKey: 'messaging', icon: MessageSquare },
+  { href: '/dashboard/bd-accounts', i18nKey: 'bdAccounts', icon: Smartphone },
+  { href: '/dashboard/analytics', i18nKey: 'analytics', icon: BarChart3 },
+  { href: '/dashboard/team', i18nKey: 'team', icon: Users },
+];
+const accountItems: { href: string; i18nKey: string; icon: typeof Settings }[] = [
+  { href: '/dashboard/settings', i18nKey: 'settings', icon: Settings },
+];
+
+const themeOptions: { value: ThemeMode; i18nKey: string; icon: typeof Sun }[] = [
+  { value: 'light', i18nKey: 'light', icon: Sun },
+  { value: 'dark', i18nKey: 'dark', icon: Moon },
+  { value: 'system', i18nKey: 'system', icon: Monitor },
+];
+
 export default function DashboardLayout({ children }: DashboardLayoutProps) {
+  const { t } = useTranslation();
   const router = useRouter();
+  const pathname = usePathname();
   const { user, logout } = useAuthStore();
+  const { sidebarCollapsed, toggleSidebar } = useLayoutStore();
+  const { mode: themeMode, setMode: setThemeMode } = useThemeStore();
+  const { locale, setLocale } = useLocaleStore();
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const target = e.target as HTMLElement;
+        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+        e.preventDefault();
+        setShortcutsOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const handleLogout = () => {
     logout();
     router.push('/auth/login');
   };
 
-  const menuItems = [
-    { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { href: '/dashboard/crm', label: 'CRM', icon: Building2 },
-    { href: '/dashboard/pipeline', label: 'Воронка', icon: Workflow },
-    { href: '/dashboard/messaging', label: 'Сообщения', icon: MessageSquare },
-    { href: '/dashboard/bd-accounts', label: 'BD Аккаунты', icon: Smartphone },
-    { href: '/dashboard/analytics', label: 'Аналитика', icon: BarChart3 },
-    { href: '/dashboard/team', label: 'Команда', icon: Users },
-    { href: '/dashboard/settings', label: 'Настройки', icon: Settings },
-  ];
+  const sidebarWidth = sidebarCollapsed ? 'w-16' : 'w-64';
+  const mainMargin = sidebarCollapsed ? 'ml-16' : 'ml-64';
+  const allItems = [...productItems, ...accountItems];
+  const currentItem = allItems.find((m) => m.href === pathname);
+  const pageTitle = currentItem ? t(`nav.${currentItem.i18nKey}`) : t('dashboard.title');
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
+    <div className="min-h-screen bg-background transition-colors">
       {/* Sidebar */}
-      <aside className="fixed left-0 top-0 h-full w-64 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700">
-        <div className="p-6">
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-            GetSale CRM
-          </h1>
+      <aside
+        className={clsx(
+          'fixed left-0 top-0 z-40 h-full bg-card border-r border-border flex flex-col transition-[width] duration-200 ease-in-out',
+          sidebarWidth
+        )}
+      >
+        {/* Logo / Toggle — h-14 to align with header */}
+        <div className="shrink-0 flex items-center h-14 min-h-[3.5rem] border-b border-border px-3">
+          {sidebarCollapsed ? (
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              className="w-10 h-10 flex items-center justify-center rounded-lg text-muted-foreground hover:bg-accent transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+              title={t('nav.expandMenu')}
+            >
+              <PanelLeft className="w-5 h-5" />
+            </button>
+          ) : (
+            <>
+              <span className="font-heading text-lg font-bold text-foreground truncate flex-1 tracking-tight">
+                GetSale
+              </span>
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                className="shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:bg-accent transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+                title={t('nav.collapseMenu')}
+              >
+                <PanelLeftClose className="w-5 h-5" />
+              </button>
+            </>
+          )}
         </div>
 
-        <nav className="px-4 space-y-2">
-          {menuItems.map((item) => {
+        {/* Nav — Product */}
+        <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5">
+          {!sidebarCollapsed && (
+            <p className="px-3 mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              {t('nav.product')}
+            </p>
+          )}
+          {productItems.map((item) => {
             const Icon = item.icon;
+            const isActive = pathname === item.href;
+            const label = t(`nav.${item.i18nKey}`);
             return (
               <Link
                 key={item.href}
                 href={item.href}
-                className="flex items-center gap-3 px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                title={sidebarCollapsed ? label : undefined}
+                className={clsx(
+                  'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors',
+                  sidebarCollapsed && 'justify-center px-2',
+                  isActive
+                    ? 'bg-primary/10 text-primary dark:bg-primary/20 dark:text-primary'
+                    : 'text-foreground hover:bg-accent',
+                  isActive && !sidebarCollapsed && 'border-l-2 border-l-primary -ml-0.5 pl-3.5'
+                )}
               >
-                <Icon className="w-5 h-5" />
-                <span>{item.label}</span>
+                <Icon className="w-5 h-5 shrink-0" />
+                {!sidebarCollapsed && <span>{label}</span>}
+              </Link>
+            );
+          })}
+          {!sidebarCollapsed && (
+            <p className="px-3 mt-4 mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              {t('nav.account')}
+            </p>
+          )}
+          {accountItems.map((item) => {
+            const Icon = item.icon;
+            const isActive = pathname === item.href;
+            const label = t(`nav.${item.i18nKey}`);
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                title={sidebarCollapsed ? label : undefined}
+                className={clsx(
+                  'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors',
+                  sidebarCollapsed && 'justify-center px-2',
+                  isActive
+                    ? 'bg-primary/10 text-primary dark:bg-primary/20 dark:text-primary'
+                    : 'text-foreground hover:bg-accent',
+                  isActive && !sidebarCollapsed && 'border-l-2 border-l-primary -ml-0.5 pl-3.5'
+                )}
+              >
+                <Icon className="w-5 h-5 shrink-0" />
+                {!sidebarCollapsed && <span>{label}</span>}
               </Link>
             );
           })}
         </nav>
 
-        <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-gray-200 dark:border-gray-700">
-          <div className="mb-4 px-4">
-            <p className="text-sm font-medium text-gray-900 dark:text-white">
-              {user?.email}
-            </p>
-            <p className="text-xs text-gray-500 dark:text-gray-400">
-              {user?.role}
-            </p>
-          </div>
+        {/* User + Logout only */}
+        <div className="shrink-0 border-t border-border p-2 space-y-1">
+          {!sidebarCollapsed && (
+            <div className="px-3 py-2">
+              <p className="text-sm font-medium text-foreground truncate">
+                {user?.email}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {user?.role}
+              </p>
+            </div>
+          )}
+
           <button
             onClick={handleLogout}
-            className="w-full flex items-center gap-3 px-4 py-2 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+            title={sidebarCollapsed ? t('nav.logout') : undefined}
+            className={clsx(
+              'w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-destructive hover:bg-destructive/10 transition-colors',
+              sidebarCollapsed && 'justify-center px-2'
+            )}
           >
-            <LogOut className="w-5 h-5" />
-            <span>Выйти</span>
+            <LogOut className="w-5 h-5 shrink-0" />
+            {!sidebarCollapsed && <span>{t('nav.logout')}</span>}
           </button>
         </div>
       </aside>
 
-      {/* Main Content */}
-      <div className="ml-64">
-        <header className="sticky top-0 z-10 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-              Dashboard
-            </h2>
+      {/* Main Content — header h-14 to align with sidebar top border */}
+      <div className={clsx('flex flex-col min-h-screen transition-[margin] duration-200 ease-in-out', mainMargin)}>
+        <header className="shrink-0 z-10 bg-card/95 backdrop-blur-sm border-b border-border min-h-[3.5rem] px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2 shadow-soft">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            <GlobalSearch />
+            <div className="hidden sm:block flex-1 min-w-0">
+              <Breadcrumbs />
+              <h2 className="font-heading text-lg sm:text-xl font-semibold text-foreground truncate tracking-tight">
+                {pageTitle}
+              </h2>
+            </div>
+            <div className="sm:hidden flex-1 min-w-0">
+              <h2 className="font-heading text-lg font-semibold text-foreground truncate tracking-tight">
+                {pageTitle}
+              </h2>
+            </div>
+          </div>
+
+          {/* Notifications, Help, Shortcuts, Theme, Language */}
+          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+            <NotificationsDropdown />
+            <HelpDropdown />
+            <button
+              type="button"
+              onClick={() => setShortcutsOpen(true)}
+              className="p-2 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              title={t('nav.keyboardShortcuts')}
+            >
+              <Keyboard className="w-5 h-5" />
+            </button>
+            {/* Theme switcher */}
+            <div className="flex items-center gap-0.5 rounded-lg p-0.5 bg-muted/50">
+              {themeOptions.map((opt) => {
+                const Icon = opt.icon;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    title={t(`theme.${opt.i18nKey}`)}
+                    onClick={() => setThemeMode(opt.value)}
+                    className={clsx(
+                      'p-2 rounded-md transition-colors',
+                      themeMode === opt.value
+                        ? 'bg-primary text-primary-foreground shadow-sm'
+                        : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                    )}
+                  >
+                    <Icon className="w-4 h-4" />
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Language switcher */}
+            <div className="flex items-center gap-0.5 rounded-lg p-0.5 bg-muted/50">
+              {(['en', 'ru'] as Locale[]).map((loc) => (
+                <button
+                  key={loc}
+                  type="button"
+                  title={t(`locale.${loc}`)}
+                  onClick={() => setLocale(loc)}
+                  className={clsx(
+                    'px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors',
+                    locale === loc
+                      ? 'bg-primary text-primary-foreground shadow-sm'
+                      : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                  )}
+                >
+                  {loc.toUpperCase()}
+                </button>
+              ))}
+            </div>
           </div>
         </header>
 
-        <main className="p-6">{children}</main>
+        <main className="flex-1 min-h-0 p-4 sm:p-6 overflow-auto animate-in fade-in duration-200">
+          <div className="sm:hidden mb-2"><Breadcrumbs /></div>
+          {children}
+        </main>
       </div>
+      <KeyboardShortcutsModal isOpen={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
     </div>
   );
 }
-
