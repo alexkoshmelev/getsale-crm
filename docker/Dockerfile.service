@@ -11,8 +11,8 @@ COPY package*.json ./
 COPY shared/ ./shared/
 COPY ${SERVICE_PATH}/package*.json ./${SERVICE_PATH}/
 
-# Install dependencies (production only for smaller image; workspaces need all for build)
-RUN npm install
+# Install all dependencies including dev (tsc etc.) for build; NODE_ENV=production skips dev by default
+RUN npm install --include=dev
 
 # Build shared packages (types -> events -> utils)
 RUN npm run build --workspace=shared/types && \
