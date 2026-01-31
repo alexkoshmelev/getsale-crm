@@ -6,6 +6,16 @@ import Redis from 'ioredis';
 import fetch from 'node-fetch';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType } from '@getsale/events';
+import { UserRole } from '@getsale/types';
+
+/** Auth service verify response shape */
+interface AuthUserData {
+  id: string;
+  email: string;
+  organization_id?: string;
+  organizationId?: string;
+  role: UserRole;
+}
 
 const app = express();
 const httpServer = createServer(app);
@@ -203,7 +213,7 @@ io.use(async (socket, next) => {
         return next(new Error('Authentication error: Invalid token'));
       }
 
-      const userData = await response.json();
+      const userData = (await response.json()) as AuthUserData;
       const user = {
         id: userData.id,
         email: userData.email,

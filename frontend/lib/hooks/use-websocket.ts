@@ -36,7 +36,7 @@ export function useWebSocket() {
     }
 
     let socket = socketRef.current;
-    const reuseSocket = socket && (socket.connected || socket.connecting);
+    const reuseSocket = socket && (socket.connected || (socket as Socket & { connecting?: boolean }).connecting);
 
     if (!reuseSocket) {
       socket = io(WS_URL, {
@@ -53,6 +53,7 @@ export function useWebSocket() {
     } else {
       (socket as any).auth = { token: accessToken };
     }
+    const s: Socket = socket as Socket;
 
     const onConnect = () => {
       console.log('[WebSocket] Connected');
@@ -73,7 +74,7 @@ export function useWebSocket() {
       setIsConnected(false);
       if (reason === 'io server disconnect') {
         reconnectTimeoutRef.current = setTimeout(() => {
-          socket!.connect();
+          s.connect();
         }, 2000);
       }
     };
@@ -85,7 +86,7 @@ export function useWebSocket() {
     };
 
     const onPing = () => {
-      socket.emit('pong');
+      s.emit('pong');
     };
 
     const onError = (data: { message: string }) => {
@@ -94,23 +95,23 @@ export function useWebSocket() {
     };
 
     if (reuseSocket) {
-      socket.off('connect');
-      socket.off('connected');
-      socket.off('disconnect');
-      socket.off('connect_error');
-      socket.off('ping');
-      socket.off('error');
-      if (socket.connected) {
+      s.off('connect');
+      s.off('connected');
+      s.off('disconnect');
+      s.off('connect_error');
+      s.off('ping');
+      s.off('error');
+      if (s.connected) {
         setIsConnected(true);
         setError(null);
       }
     }
-    socket.on('connect', onConnect);
-    socket.on('connected', onConnected);
-    socket.on('disconnect', onDisconnect);
-    socket.on('connect_error', onConnectError);
-    socket.on('ping', onPing);
-    socket.on('error', onError);
+    s.on('connect', onConnect);
+    s.on('connected', onConnected);
+    s.on('disconnect', onDisconnect);
+    s.on('connect_error', onConnectError);
+    s.on('ping', onPing);
+    s.on('error', onError);
 
     return () => {
       if (reconnectTimeoutRef.current) {
@@ -119,7 +120,7 @@ export function useWebSocket() {
       }
       disconnectTimeoutRef.current = setTimeout(() => {
         disconnectTimeoutRef.current = null;
-        socket.disconnect();
+        s.disconnect();
       }, DISCONNECT_DELAY_MS);
     };
   }, [accessToken]);
