@@ -1,0 +1,339 @@
+# Server Docker Compose for GetSale CRM
+# This file is used on the remote server to run the entire project
+# All app images are pulled from the DigitalOcean registry
+# Set REGISTRY in .env to override (default: registry.digitalocean.com/regestry-getsale-ai)
+
+services:
+  # ==================== Infrastructure ====================
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-15-alpine}
+    container_name: getsale-crm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./.data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - default
+
+  redis:
+    image: redis:${REDIS_VERSION:-7-alpine}
+    container_name: getsale-crm-redis
+    restart: unless-stopped
+    volumes:
+      - ./.data/redis:/data
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"${REDIS_PASSWORD}\" ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - default
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: getsale-crm-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: getsale
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    volumes:
+      - ./.data/rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - default
+
+  # ==================== App services (from registry) ====================
+  api-gateway:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-api-gateway:latest
+    container_name: getsale-crm-api-gateway
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=8000
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - CRM_SERVICE_URL=http://crm-service:3002
+      - MESSAGING_SERVICE_URL=http://messaging-service:3003
+      - AI_SERVICE_URL=http://ai-service:3005
+      - USER_SERVICE_URL=http://user-service:3006
+      - BD_ACCOUNTS_SERVICE_URL=http://bd-accounts-service:3007
+      - PIPELINE_SERVICE_URL=http://pipeline-service:3008
+      - AUTOMATION_SERVICE_URL=http://automation-service:3009
+      - ANALYTICS_SERVICE_URL=http://analytics-service:3010
+      - TEAM_SERVICE_URL=http://team-service:3011
+    depends_on:
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - default
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.getsale-crm-api.rule=Host(`api-crm.getsale.ai`)"
+      - "traefik.http.routers.getsale-crm-api.entrypoints=websecure"
+      - "traefik.http.routers.getsale-crm-api.tls.certresolver=myresolver"
+      - "traefik.http.routers.getsale-crm-api.middlewares=security-headers"
+      - "traefik.http.services.getsale-crm-api.loadbalancer.server.port=8000"
+
+  auth-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-auth-service:latest
+    container_name: getsale-crm-auth-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+
+  crm-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-crm-service:latest
+    container_name: getsale-crm-crm-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3002
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+
+  messaging-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-messaging-service:latest
+    container_name: getsale-crm-messaging-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3003
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - WEBSOCKET_SERVICE_URL=http://websocket-service:3004
+      - BD_ACCOUNTS_SERVICE_URL=http://bd-accounts-service:3007
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+
+  websocket-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-websocket-service:latest
+    container_name: getsale-crm-websocket-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3004
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - CORS_ORIGIN=${CORS_ORIGIN:-https://app.getsale.ai}
+      - MAX_CONNECTIONS_PER_ORG=100
+    depends_on:
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.getsale-crm-ws.rule=Host(`ws-crm.getsale.ai`)"
+      - "traefik.http.routers.getsale-crm-ws.entrypoints=websecure"
+      - "traefik.http.routers.getsale-crm-ws.tls.certresolver=myresolver"
+      - "traefik.http.routers.getsale-crm-ws.middlewares=security-headers"
+      - "traefik.http.services.getsale-crm-ws.loadbalancer.server.port=3004"
+
+  ai-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-ai-service:latest
+    container_name: getsale-crm-ai-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3005
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+
+  user-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-user-service:latest
+    container_name: getsale-crm-user-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3006
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+
+  bd-accounts-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-bd-accounts-service:latest
+    container_name: getsale-crm-bd-accounts-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3007
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+
+  pipeline-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-pipeline-service:latest
+    container_name: getsale-crm-pipeline-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3008
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+
+  automation-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-automation-service:latest
+    container_name: getsale-crm-automation-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3009
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - PIPELINE_SERVICE_URL=http://pipeline-service:3008
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+
+  analytics-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-analytics-service:latest
+    container_name: getsale-crm-analytics-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3010
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+
+  team-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-team-service:latest
+    container_name: getsale-crm-team-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3011
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+
+  # Frontend from registry
+  frontend:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-frontend:latest
+    container_name: getsale-crm-frontend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      api-gateway: { condition: service_healthy }
+    networks:
+      - default
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.getsale-crm.rule=Host(`app.getsale.ai`)"
+      - "traefik.http.routers.getsale-crm.entrypoints=websecure"
+      - "traefik.http.routers.getsale-crm.tls.certresolver=myresolver"
+      - "traefik.http.routers.getsale-crm.middlewares=security-headers"
+      - "traefik.http.services.getsale-crm.loadbalancer.server.port=3000"
+
+  # Migrations from registry (run once on deploy)
+  migrations:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-migrations:latest
+    container_name: getsale-crm-migrations
+    environment:
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks:
+      - default
+    restart: "no"
+
+networks:
+  default:
+    driver: bridge
+  traefik:
+    name: traefik
+    external: true

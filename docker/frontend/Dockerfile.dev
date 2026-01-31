@@ -1,0 +1,17 @@
+# Development Dockerfile for frontend (Next.js).
+# Build context: repo root. Build: docker build -f docker/frontend/Dockerfile.dev -t getsale-crm-frontend-dev .
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Copy frontend from repo root context
+COPY frontend/package*.json ./
+RUN npm install
+
+COPY frontend/ ./
+
+# Expose port
+EXPOSE 3000
+
+# Run in development mode on port 3000, binding to all interfaces
+CMD ["npm", "run", "dev", "--", "-p", "3000", "-H", "0.0.0.0"]

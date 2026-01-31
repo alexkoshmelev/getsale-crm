@@ -1,6 +1,8 @@
+# Development Dockerfile for backend services (monorepo). Shared for all services via SERVICE_PATH.
+# Build context: repo root. Example: docker build -f docker/services/Dockerfile.dev --build-arg SERVICE_PATH=services/api-gateway .
 FROM node:18-alpine
 
-ARG SERVICE_PATH=services/ai-service
+ARG SERVICE_PATH=services/api-gateway
 
 WORKDIR /app
 
@@ -24,15 +26,15 @@ RUN npm run build --workspace=shared/types && \
 # Copy service source code
 COPY ${SERVICE_PATH}/ ./${SERVICE_PATH}/
 
-# Copy entrypoint script
+# Copy entrypoint script (from repo root)
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Set working directory to service
 WORKDIR /app/${SERVICE_PATH}
 
-# Expose port
-EXPOSE 3005
+# Expose port (actual port set via env in compose)
+EXPOSE 8000
 
 # Use entrypoint to build shared packages before running
 ENTRYPOINT ["docker-entrypoint.sh"]

@@ -63,7 +63,7 @@ services:
   api-gateway:
     build:
       context: .
-      dockerfile: ./services/api-gateway/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/api-gateway
     container_name: getsale-api-gateway
@@ -108,7 +108,7 @@ services:
   auth-service:
     build:
       context: .
-      dockerfile: ./services/auth-service/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/auth-service
     container_name: getsale-auth-service
@@ -140,7 +140,7 @@ services:
   crm-service:
     build:
       context: .
-      dockerfile: ./services/crm-service/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/crm-service
     container_name: getsale-crm-service
@@ -170,7 +170,7 @@ services:
   messaging-service:
     build:
       context: .
-      dockerfile: ./services/messaging-service/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/messaging-service
     container_name: getsale-messaging-service
@@ -202,7 +202,7 @@ services:
   websocket-service:
     build:
       context: .
-      dockerfile: ./services/websocket-service/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/websocket-service
     container_name: getsale-websocket-service
@@ -234,7 +234,7 @@ services:
   ai-service:
     build:
       context: .
-      dockerfile: ./services/ai-service/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/ai-service
     container_name: getsale-ai-service
@@ -262,7 +262,7 @@ services:
   user-service:
     build:
       context: .
-      dockerfile: ./services/user-service/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/user-service
     container_name: getsale-user-service
@@ -293,7 +293,7 @@ services:
   bd-accounts-service:
     build:
       context: .
-      dockerfile: ./services/bd-accounts-service/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/bd-accounts-service
     container_name: getsale-bd-accounts-service
@@ -329,7 +329,7 @@ services:
   pipeline-service:
     build:
       context: .
-      dockerfile: ./services/pipeline-service/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/pipeline-service
     container_name: getsale-pipeline-service
@@ -359,7 +359,7 @@ services:
   automation-service:
     build:
       context: .
-      dockerfile: ./services/automation-service/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/automation-service
     container_name: getsale-automation-service
@@ -390,7 +390,7 @@ services:
   analytics-service:
     build:
       context: .
-      dockerfile: ./services/analytics-service/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/analytics-service
     container_name: getsale-analytics-service
@@ -420,7 +420,7 @@ services:
   team-service:
     build:
       context: .
-      dockerfile: ./services/team-service/Dockerfile.dev
+      dockerfile: docker/services/Dockerfile.dev
       args:
         SERVICE_PATH: services/team-service
     container_name: getsale-team-service
@@ -451,8 +451,8 @@ services:
   
   migrations:
     build:
-      context: ./migrations
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: docker/migrations/Dockerfile
     container_name: getsale-migrations
     environment:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
@@ -465,8 +465,8 @@ services:
 
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile.dev
+      context: .
+      dockerfile: docker/frontend/Dockerfile.dev
     container_name: getsale-frontend
     ports:
       - "5173:3000"

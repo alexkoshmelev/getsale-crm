@@ -1,0 +1,28 @@
+# Production Dockerfile for backend services (monorepo).
+# Build: docker build -f docker/Dockerfile.service --build-arg SERVICE_PATH=services/api-gateway -t getsale-crm-api-gateway .
+FROM node:18-alpine
+
+ARG SERVICE_PATH=services/api-gateway
+ENV NODE_ENV=production
+WORKDIR /app
+
+# Copy root and workspace config
+COPY package*.json ./
+COPY shared/ ./shared/
+COPY ${SERVICE_PATH}/package*.json ./${SERVICE_PATH}/
+
+# Install dependencies (production only for smaller image; workspaces need all for build)
+RUN npm install
+
+# Build shared packages (types -> events -> utils)
+RUN npm run build --workspace=shared/types && \
+    npm run build --workspace=shared/events && \
+    npm run build --workspace=shared/utils
+
+# Copy service source and build
+COPY ${SERVICE_PATH}/ ./${SERVICE_PATH}/
+RUN npm run build --workspace=${SERVICE_PATH}
+
+WORKDIR /app/${SERVICE_PATH}
+EXPOSE 3000
+CMD ["node", "dist/index.js"]

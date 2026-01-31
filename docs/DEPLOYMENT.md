@@ -160,9 +160,39 @@ spec:
         averageUtilization: 70
 ```
 
-## CI/CD
+## CI/CD (Docker + DigitalOcean Registry + SSH)
 
-### GitHub Actions пример
+### Автоматический деплой на сервер
+
+Workflow `.github/workflows/deploy.yml` при пуше в `main` (или по кнопке):
+
+1. Собирает образы всех сервисов и пушит в DigitalOcean Container Registry.
+2. По SSH подключается к серверу и обновляет контейнеры через `docker compose -f docker-compose.server.yml`.
+
+**Секреты в GitHub (Settings → Secrets):**
+
+- `DO_REGISTRY_USERNAME` — логин для registry.digitalocean.com
+- `DO_REGISTRY_PASSWORD` — токен/пароль registry
+- `PROD_SERVER_HOST` — IP или хост сервера
+- `SERVER_USERNAME` — пользователь SSH
+- `PROD_SERVER_KEY` — приватный ключ SSH
+- `SERVER_PORT` — порт SSH (обычно 22)
+
+**Переменные репозитория (Settings → Variables), опционально для фронта:**
+
+- `NEXT_PUBLIC_API_URL` — публичный URL API (например `https://api.getsale.example`)
+- `NEXT_PUBLIC_WS_URL` — публичный URL WebSocket (например `wss://ws.getsale.example`)
+
+**На сервере:**
+
+1. Создать каталог: `mkdir -p /docker/getsale-crm && cd /docker/getsale-crm`
+2. Скопировать туда `docker-compose.server.yml` из репозитория.
+3. Создать `.env` с продакшн-переменными: `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `RABBITMQ_PASSWORD`, `JWT_SECRET`, `JWT_REFRESH_SECRET`, `OPENAI_API_KEY`, `CORS_ORIGIN` и др. (см. комментарии в `docker-compose.server.yml`).
+4. При первом деплое образы подтянутся через `docker compose pull`; далее workflow сам делает `down` → `pull` → `up -d` и запуск миграций.
+
+Путь на сервере по умолчанию: `/docker/getsale-crm`. Его можно поменять в шаге «Deploy to Prod Server» в workflow.
+
+### GitHub Actions пример (Kubernetes)
 
 ```yaml
 name: Build and Deploy
