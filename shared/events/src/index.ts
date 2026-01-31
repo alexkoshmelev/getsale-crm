@@ -128,6 +128,7 @@ export interface DealStageChangedEvent extends BaseEvent {
     fromStageId?: string;
     toStageId: string;
     reason?: string;
+    autoMoved?: boolean;
   };
 }
 
@@ -141,12 +142,20 @@ export interface AIDraftGeneratedEvent extends BaseEvent {
   };
 }
 
+export interface AIDraftApprovedEvent extends BaseEvent {
+  type: EventType.AI_DRAFT_APPROVED;
+  data: {
+    draftId: string;
+    content?: string;
+  };
+}
+
 export interface BDAccountConnectedEvent extends BaseEvent {
   type: EventType.BD_ACCOUNT_CONNECTED;
   data: {
     bdAccountId: string;
     platform: string;
-    userId: string;
+    userId?: string;
   };
 }
 
@@ -166,6 +175,7 @@ export interface BDAccountSyncProgressEvent extends BaseEvent {
     total: number;
     currentChatId?: string;
     currentChatTitle?: string;
+    error?: string;
   };
 }
 
@@ -174,7 +184,8 @@ export interface BDAccountSyncCompletedEvent extends BaseEvent {
   data: {
     bdAccountId: string;
     totalChats: number;
-    totalMessages: number;
+    totalMessages?: number;
+    failedChats?: number;
   };
 }
 
@@ -290,8 +301,8 @@ export interface StageCreatedEvent extends BaseEvent {
   data: {
     stageId: string;
     pipelineId: string;
-    name: string;
-    order: number;
+    name?: string;
+    order?: number;
   };
 }
 
@@ -318,11 +329,53 @@ export interface AutomationRuleCreatedEvent extends BaseEvent {
   type: EventType.AUTOMATION_RULE_CREATED;
   data: {
     ruleId: string;
-    name: string;
-    organizationId: string;
-    conditions: Record<string, any>;
-    actions: Record<string, any>;
+    name?: string;
+    organizationId?: string;
+    conditions?: Record<string, any>;
+    actions?: Record<string, any>;
   };
+}
+
+export interface TriggerExecutedEvent extends BaseEvent {
+  type: EventType.TRIGGER_EXECUTED;
+  data: {
+    type?: string;
+    ruleId: string;
+    action?: string;
+    message?: string;
+    userIds?: string[];
+  };
+}
+
+// Company / Contact / Deal events (CRM)
+export interface CompanyCreatedEvent extends BaseEvent {
+  type: EventType.COMPANY_CREATED;
+  data: { companyId: string };
+}
+
+export interface CompanyUpdatedEvent extends BaseEvent {
+  type: EventType.COMPANY_UPDATED;
+  data: { companyId: string };
+}
+
+export interface ContactCreatedEvent extends BaseEvent {
+  type: EventType.CONTACT_CREATED;
+  data: { contactId: string };
+}
+
+export interface ContactUpdatedEvent extends BaseEvent {
+  type: EventType.CONTACT_UPDATED;
+  data: { contactId: string };
+}
+
+export interface DealCreatedEvent extends BaseEvent {
+  type: EventType.DEAL_CREATED;
+  data: { dealId: string; pipelineId?: string };
+}
+
+export interface DealUpdatedEvent extends BaseEvent {
+  type: EventType.DEAL_UPDATED;
+  data: { dealId: string };
 }
 
 // Analytics events
@@ -342,6 +395,14 @@ export type Event =
   | MessageSentEvent
   | DealStageChangedEvent
   | AIDraftGeneratedEvent
+  | AIDraftApprovedEvent
+  | TriggerExecutedEvent
+  | CompanyCreatedEvent
+  | CompanyUpdatedEvent
+  | ContactCreatedEvent
+  | ContactUpdatedEvent
+  | DealCreatedEvent
+  | DealUpdatedEvent
   | BDAccountConnectedEvent
   | BDAccountDisconnectedEvent
   | BDAccountPurchasedEvent

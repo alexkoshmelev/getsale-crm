@@ -2,7 +2,7 @@ import express from 'express';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 import { RabbitMQClient } from '@getsale/utils';
-import { EventType } from '@getsale/events';
+import { EventType, Event } from '@getsale/events';
 import {
   AppError,
   isAppError,
@@ -189,7 +189,7 @@ app.post('/api/crm/companies', async (req, res, next) => {
       organizationId: user.organizationId,
       userId: user.id,
       data: { companyId: result.rows[0].id },
-    });
+    } as Event);
     res.status(201).json(result.rows[0]);
   } catch (e) {
     next(e);
@@ -246,7 +246,7 @@ app.put('/api/crm/companies/:id', async (req, res, next) => {
       organizationId: user.organizationId,
       userId: user.id,
       data: { companyId: id },
-    });
+    } as Event);
     res.json(result.rows[0]);
   } catch (e) {
     next(e);
@@ -424,7 +424,7 @@ app.post('/api/crm/contacts', async (req, res, next) => {
       organizationId: user.organizationId,
       userId: user.id,
       data: { contactId: result.rows[0].id },
-    });
+    } as Event);
     res.status(201).json(result.rows[0]);
   } catch (e) {
     next(e);
@@ -495,7 +495,7 @@ async function updateContactHandler(req: express.Request, res: express.Response,
       organizationId: user.organizationId,
       userId: user.id,
       data: { contactId: id },
-    });
+    } as Event);
     res.json(result.rows[0]);
   } catch (e) {
     next(e);
@@ -736,7 +736,7 @@ app.post('/api/crm/deals', async (req, res, next) => {
       organizationId: user.organizationId,
       userId: user.id,
       data: { dealId: result.rows[0].id, pipelineId, stageId },
-    });
+    } as Event);
     res.status(201).json(result.rows[0]);
   } catch (e) {
     next(e);
@@ -791,7 +791,7 @@ app.put('/api/crm/deals/:id', async (req, res, next) => {
       organizationId: user.organizationId,
       userId: user.id,
       data: { dealId: id },
-    });
+    } as Event);
     res.json(result.rows[0]);
   } catch (e) {
     next(e);
@@ -844,7 +844,7 @@ app.patch('/api/crm/deals/:id/stage', async (req, res, next) => {
       organizationId: user.organizationId,
       userId: user.id,
       data: { dealId: id, fromStageId: deal.stage_id, toStageId: stageId, reason },
-    });
+    } as Event);
     res.json({ success: true });
   } catch (e) {
     next(e);

@@ -2,7 +2,7 @@ import express from 'express';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 import { RabbitMQClient, RedisClient } from '@getsale/utils';
-import { EventType, BDAccountConnectedEvent } from '@getsale/events';
+import { EventType, Event } from '@getsale/events';
 import { TelegramManager } from './telegram-manager';
 
 const app = express();
@@ -323,18 +323,14 @@ app.post('/api/bd-accounts/verify-code', async (req, res) => {
     );
 
       // Publish event
-      const event: BDAccountConnectedEvent = {
+      await rabbitmq.publishEvent({
         id: randomUUID(),
-      type: EventType.BD_ACCOUNT_CONNECTED,
-      timestamp: new Date(),
-      organizationId: user.organizationId,
-      userId: user.id,
-      data: {
-        bdAccountId: accountId,
-        platform: 'telegram',
-      },
-    };
-    await rabbitmq.publishEvent(event);
+        type: EventType.BD_ACCOUNT_CONNECTED,
+        timestamp: new Date(),
+        organizationId: user.organizationId,
+        userId: user.id,
+        data: { bdAccountId: accountId, platform: 'telegram', userId: user.id },
+      } as Event);
 
     res.json(result.rows[0]);
   } catch (error: any) {
@@ -422,18 +418,14 @@ app.post('/api/bd-accounts/connect', async (req, res) => {
       );
 
       // Publish event
-      const event: BDAccountConnectedEvent = {
+      await rabbitmq.publishEvent({
         id: randomUUID(),
         type: EventType.BD_ACCOUNT_CONNECTED,
         timestamp: new Date(),
         organizationId: user.organizationId,
         userId: user.id,
-        data: {
-          bdAccountId: accountId,
-          platform: 'telegram',
-        },
-      };
-      await rabbitmq.publishEvent(event);
+        data: { bdAccountId: accountId, platform: 'telegram', userId: user.id },
+      } as Event);
 
       res.json(result.rows[0]);
     } else {

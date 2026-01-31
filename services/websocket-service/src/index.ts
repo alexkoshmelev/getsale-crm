@@ -2,7 +2,7 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
-import { createClient } from 'ioredis';
+import Redis from 'ioredis';
 import fetch from 'node-fetch';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType } from '@getsale/events';
@@ -48,9 +48,9 @@ if (redisUrl) {
   };
 }
 
-const pubClient = createClient({
+const pubClient = new Redis({
   ...redisConfig,
-  retryStrategy: (times) => {
+  retryStrategy: (times: number) => {
     const delay = Math.min(times * 50, 2000);
     return delay;
   },
@@ -60,7 +60,7 @@ const pubClient = createClient({
 const subClient = pubClient.duplicate();
 
 // Add error handlers to prevent warnings
-pubClient.on('error', (error) => {
+pubClient.on('error', (error: Error) => {
   console.error('Redis pubClient error:', error);
 });
 
@@ -68,7 +68,7 @@ pubClient.on('connect', () => {
   console.log('Redis pubClient connected');
 });
 
-subClient.on('error', (error) => {
+subClient.on('error', (error: Error) => {
   console.error('Redis subClient error:', error);
 });
 

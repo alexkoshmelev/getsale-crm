@@ -1,3 +1,4 @@
+// @ts-nocheck — telegram (GramJS) types are incomplete; remove when @types/telegram or package types are used
 import { TelegramClient, Api } from 'telegram';
 import { NewMessage, Raw } from 'telegram/events';
 import { StringSession } from 'telegram/sessions';
@@ -6,6 +7,7 @@ import { randomUUID } from 'crypto';
 import { RabbitMQClient, RedisClient } from '@getsale/utils';
 import {
   EventType,
+  Event,
   MessageReceivedEvent,
   BDAccountSyncStartedEvent,
   BDAccountSyncProgressEvent,
@@ -416,15 +418,14 @@ export class TelegramManager {
         this.qrSessions.set(sessionId, state);
         this.persistQrState(sessionId);
 
-        const { BDAccountConnectedEvent } = await import('@getsale/events');
         await this.rabbitmq.publishEvent({
           id: randomUUID(),
           type: EventType.BD_ACCOUNT_CONNECTED,
           timestamp: new Date(),
           organizationId,
           userId,
-          data: { bdAccountId: accountId, platform: 'telegram' },
-        });
+          data: { bdAccountId: accountId, platform: 'telegram', userId },
+        } as Event);
       } catch (err: any) {
         const msg = err?.message || String(err);
         console.error('[TelegramManager] QR login failed:', msg, err?.stack);

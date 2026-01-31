@@ -1,7 +1,7 @@
 import express from 'express';
 import { Pool } from 'pg';
 import { RabbitMQClient } from '@getsale/utils';
-import { EventType } from '@getsale/events';
+import { EventType, Event } from '@getsale/events';
 
 const app = express();
 const PORT = process.env.PORT || 3008;
@@ -121,7 +121,7 @@ app.post('/api/pipeline/stages', async (req, res) => {
       organizationId: user.organizationId,
       userId: user.id,
       data: { stageId: result.rows[0].id, pipelineId },
-    });
+    } as Event);
 
     res.json(result.rows[0]);
   } catch (error) {
@@ -168,7 +168,7 @@ app.put('/api/pipeline/clients/:clientId/stage', async (req, res) => {
       organizationId: user.organizationId,
       userId: user.id,
       data: { dealId: dealId || clientId, fromStageId, toStageId: stageId, reason, autoMoved },
-    });
+    } as Event);
 
     res.json({ success: true });
   } catch (error) {

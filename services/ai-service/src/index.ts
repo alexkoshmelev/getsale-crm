@@ -1,7 +1,7 @@
 import express from 'express';
 import OpenAI from 'openai';
 import { RabbitMQClient, RedisClient } from '@getsale/utils';
-import { EventType, AIDraftGeneratedEvent } from '@getsale/events';
+import { EventType, AIDraftGeneratedEvent, Event } from '@getsale/events';
 import { AIDraftStatus } from '@getsale/types';
 
 const app = express();
@@ -45,7 +45,8 @@ async function subscribeToEvents() {
     async (event) => {
       if (event.type === EventType.MESSAGE_RECEIVED) {
         try {
-          await generateDraft(event.data.contactId, event.data.content);
+          const data = event.data as { contactId?: string; content: string };
+          await generateDraft(data.contactId, data.content);
         } catch (err: unknown) {
           const e = err as Error & { statusCode?: number };
           if (e.statusCode === 503 || e.message === OPENAI_NOT_CONFIGURED_MSG) {
@@ -64,7 +65,12 @@ async function subscribeToEvents() {
 const OPENAI_NOT_CONFIGURED_MSG =
   'OpenAI API key is not configured or is a placeholder. Set OPENAI_API_KEY to a valid key from https://platform.openai.com/account/api-keys';
 
-async function generateDraft(contactId: string, context: string) {
+interface ContactContext {
+  name: string;
+  company: string;
+}
+
+async function generateDraft(contactId: string | undefined, context: string) {
   if (!isOpenAIKeyConfigured || !openai) {
     const err = new Error(OPENAI_NOT_CONFIGURED_MSG) as Error & { statusCode?: number };
     err.statusCode = 503;
@@ -73,13 +79,9 @@ async function generateDraft(contactId: string, context: string) {
 
   try {
     // Get contact context from cache or CRM service
-    const contactKey = `contact:${contactId}`;
-    let contact = await redis.get(contactKey);
-
-    if (!contact) {
-      // Fetch from CRM service (simplified)
-      contact = { name: 'Contact', company: 'Company' };
-    }
+    const contactKey = contactId ? `contact:${contactId}` : null;
+    const cached = contactKey ? await redis.get<ContactContext>(contactKey) : null;
+    const contact: ContactContext = cached ?? { name: 'Contact', company: 'Company' };
 
     // Generate draft using OpenAI
     const completion = await openai.chat.completions.create({
@@ -209,14 +211,15 @@ app.post('/api/ai/drafts/:id/approve', async (req, res) => {
     await redis.set(`draft:${id}`, updatedDraft, 3600);
 
     // Publish event
-    await rabbitmq.publishEvent({
+    const approvedEvent = {
       id: crypto.randomUUID(),
       type: EventType.AI_DRAFT_APPROVED,
       timestamp: new Date(),
       organizationId: user.organizationId,
       userId: user.id,
       data: { draftId: id },
-    });
+    };
+    await rabbitmq.publishEvent(approvedEvent as Event);
 
     res.json(updatedDraft);
   } catch (error) {

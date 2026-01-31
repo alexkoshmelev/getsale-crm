@@ -2,7 +2,7 @@ import express from 'express';
 import { Pool } from 'pg';
 import cron from 'node-cron';
 import { RabbitMQClient } from '@getsale/utils';
-import { EventType, AutomationRuleTriggeredEvent } from '@getsale/events';
+import { EventType, AutomationRuleTriggeredEvent, Event } from '@getsale/events';
 
 const app = express();
 const PORT = process.env.PORT || 3009;
@@ -125,7 +125,8 @@ async function executeRule(rule: any, event: any) {
       ]
     );
 
-    // Publish event
+    // Publish event (use last action type for event payload)
+    const lastActionType = actions.length > 0 ? actions[actions.length - 1].type : 'executed';
     const automationEvent: AutomationRuleTriggeredEvent = {
       id: crypto.randomUUID(),
       type: EventType.AUTOMATION_RULE_TRIGGERED,
@@ -135,7 +136,7 @@ async function executeRule(rule: any, event: any) {
       data: {
         ruleId: rule.id,
         clientId: event.data?.clientId || event.data?.contactId,
-        action: action.type,
+        action: lastActionType,
       },
     };
     await rabbitmq.publishEvent(automationEvent);
@@ -161,17 +162,20 @@ async function moveToStage(action: any, event: any) {
 
 async function notifyTeam(action: any, event: any) {
   // Publish notification event
-  await rabbitmq.publishEvent({
+  const triggerEvent = {
     id: crypto.randomUUID(),
     type: EventType.TRIGGER_EXECUTED,
     timestamp: new Date(),
     organizationId: event.organizationId,
+    userId: event.userId,
     data: {
       type: 'notification',
+      ruleId: '',
       message: action.message || 'Automation rule triggered',
       userIds: action.userIds || [],
     },
-  });
+  };
+  await rabbitmq.publishEvent(triggerEvent as Event);
 }
 
 async function createTask(action: any, event: any) {
@@ -266,14 +270,15 @@ app.post('/api/automation/rules', async (req, res) => {
     );
 
     // Publish event
-    await rabbitmq.publishEvent({
+    const createdEvent = {
       id: crypto.randomUUID(),
       type: EventType.AUTOMATION_RULE_CREATED,
       timestamp: new Date(),
       organizationId: user.organizationId,
       userId: user.id,
       data: { ruleId: result.rows[0].id },
-    });
+    };
+    await rabbitmq.publishEvent(createdEvent as Event);
 
     res.json(result.rows[0]);
   } catch (error) {

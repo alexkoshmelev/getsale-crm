@@ -376,8 +376,8 @@ app.post('/api/messaging/send', async (req, res) => {
           ]);
           sent = true;
         } else {
-          const error = await response.json();
-          throw new Error(error.message || 'Failed to send message');
+          const errorBody = (await response.json()) as { message?: string };
+          throw new Error(errorBody.message || 'Failed to send message');
         }
       } catch (error: any) {
         console.error('Error sending Telegram message:', error);

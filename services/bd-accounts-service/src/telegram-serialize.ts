@@ -2,6 +2,7 @@
  * Сериализация объектов GramJS (Api.Message, entities, media и т.д.) в JSON
  * для хранения в БД без потери данных Telegram API.
  */
+// @ts-nocheck — telegram (GramJS) types incomplete
 import { Api } from 'telegram';
 
 type JsonSafe = string | number | boolean | null | JsonSafe[] | { [key: string]: JsonSafe };
