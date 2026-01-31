@@ -3,6 +3,15 @@ import { createProxyMiddleware } from 'http-proxy-middleware';
 import { RedisClient } from '@getsale/utils';
 import { UserRole } from '@getsale/types';
 
+/** Auth service response shape */
+interface AuthUserData {
+  id: string;
+  email: string;
+  organization_id?: string;
+  organizationId?: string;
+  role: UserRole;
+}
+
 const app = express();
 const PORT = process.env.PORT || 8000;
 
@@ -88,7 +97,7 @@ async function authenticate(req: express.Request, res: express.Response, next: e
       return res.status(401).json({ error: 'Invalid token' });
     }
 
-    const userData = await response.json();
+    const userData = (await response.json()) as AuthUserData;
     console.log(`[API Gateway] ✅ Token verified, user data:`, JSON.stringify(userData));
     
     // Map user data to expected format
