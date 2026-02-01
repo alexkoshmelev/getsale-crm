@@ -26,3 +26,16 @@ docker/
 - **Миграции:** `docker build -f docker/migrations/Dockerfile ./migrations -t getsale-crm-migrations`
 
 Скрипт `docker-entrypoint.sh` для dev-сервисов остаётся в корне репозитория (копируется в образ из контекста).
+
+## Продакшн на сервере (docker-compose.server.yml)
+
+На сервере в каталоге с `docker-compose.server.yml` (например `/docker/getsale-crm`) должен быть файл **`.env`** с переменными окружения для прода. Локальный `.env` из репозитория — для разработки; на сервере используйте отдельные секреты.
+
+Скопируйте шаблон и заполните значения:
+
+```bash
+cp env.server.example .env
+# отредактируйте .env: пароли, JWT_SECRET, JWT_REFRESH_SECRET, OPENAI_API_KEY и т.д.
+```
+
+Обязательные переменные: `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `RABBITMQ_PASSWORD`, `JWT_SECRET`, `JWT_REFRESH_SECRET`. Остальные — см. `env.server.example`.
