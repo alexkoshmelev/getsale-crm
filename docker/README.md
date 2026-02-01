@@ -49,3 +49,7 @@ cp env.server.example .env
 ```bash
 docker login registry.digitalocean.com -u <DO_REGISTRY_USERNAME> -p <DO_REGISTRY_PASSWORD>
 ```
+
+**Frontend (https://app.getsale.ai):** приложение отдаёт Traefik по правилу `Host(\`app.getsale.ai\`)`. Проверьте: (1) контейнер `getsale-crm-frontend` запущен: `docker ps | grep frontend`; (2) Traefik запущен и контейнеры CRM в сети `traefik`: `docker network inspect traefik`; (3) DNS `app.getsale.ai` указывает на сервер с Traefik.
+
+**Не трогать Traefik при деплое:** в `docker-compose.server.yml` задано `name: getsale-crm`, чтобы проект Compose всегда назывался `getsale-crm`. Тогда `docker compose down` в каталоге CRM останавливает только контейнеры CRM и не затрагивает Traefik (другой проект). Для стека Traefik в его compose-файле тоже лучше задать явное имя проекта, например `name: traefik`.

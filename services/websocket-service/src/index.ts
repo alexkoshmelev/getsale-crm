@@ -3,7 +3,6 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import Redis from 'ioredis';
-import fetch from 'node-fetch';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType } from '@getsale/events';
 import { UserRole } from '@getsale/types';

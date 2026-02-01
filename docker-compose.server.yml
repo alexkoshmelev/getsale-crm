@@ -2,6 +2,9 @@
 # This file is used on the remote server to run the entire project
 # All app images are pulled from the DigitalOcean registry
 # Set REGISTRY in .env to override (default: registry.digitalocean.com/regestry-getsale-ai)
+#
+# name: fixes project name so "compose down" never touches Traefik (run from /docker/getsale-crm)
+name: getsale-crm
 
 services:
   # ==================== Infrastructure ====================
