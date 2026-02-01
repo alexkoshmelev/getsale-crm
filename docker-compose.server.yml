@@ -323,11 +323,12 @@ services:
       - "traefik.http.services.getsale-crm.loadbalancer.server.port=3000"
 
   # Migrations from registry (run once on deploy)
+  # Host getsale-crm-postgres avoids resolving to another stack's "postgres" container
   migrations:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:migrations
     container_name: getsale-crm-migrations
     environment:
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@getsale-crm-postgres:5432/postgres
     depends_on:
       postgres: { condition: service_healthy }
     networks:
