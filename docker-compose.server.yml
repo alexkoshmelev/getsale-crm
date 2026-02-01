@@ -61,7 +61,7 @@ services:
 
   # ==================== App services (from registry) ====================
   api-gateway:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-api-gateway:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:api-gateway
     container_name: getsale-crm-api-gateway
     restart: unless-stopped
     environment:
@@ -99,7 +99,7 @@ services:
       - "traefik.http.services.getsale-crm-api.loadbalancer.server.port=8000"
 
   auth-service:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-auth-service:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:auth-service
     container_name: getsale-crm-auth-service
     restart: unless-stopped
     environment:
@@ -118,7 +118,7 @@ services:
       - default
 
   crm-service:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-crm-service:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:crm-service
     container_name: getsale-crm-crm-service
     restart: unless-stopped
     environment:
@@ -135,7 +135,7 @@ services:
       - default
 
   messaging-service:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-messaging-service:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:messaging-service
     container_name: getsale-crm-messaging-service
     restart: unless-stopped
     environment:
@@ -154,7 +154,7 @@ services:
       - default
 
   websocket-service:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-websocket-service:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:websocket-service
     container_name: getsale-crm-websocket-service
     restart: unless-stopped
     environment:
@@ -180,7 +180,7 @@ services:
       - "traefik.http.services.getsale-crm-ws.loadbalancer.server.port=3004"
 
   ai-service:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-ai-service:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:ai-service
     container_name: getsale-crm-ai-service
     restart: unless-stopped
     environment:
@@ -196,7 +196,7 @@ services:
       - default
 
   user-service:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-user-service:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:user-service
     container_name: getsale-crm-user-service
     restart: unless-stopped
     environment:
@@ -214,7 +214,7 @@ services:
       - default
 
   bd-accounts-service:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-bd-accounts-service:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:bd-accounts-service
     container_name: getsale-crm-bd-accounts-service
     restart: unless-stopped
     environment:
@@ -231,7 +231,7 @@ services:
       - default
 
   pipeline-service:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-pipeline-service:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:pipeline-service
     container_name: getsale-crm-pipeline-service
     restart: unless-stopped
     environment:
@@ -248,7 +248,7 @@ services:
       - default
 
   automation-service:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-automation-service:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:automation-service
     container_name: getsale-crm-automation-service
     restart: unless-stopped
     environment:
@@ -266,7 +266,7 @@ services:
       - default
 
   analytics-service:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-analytics-service:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:analytics-service
     container_name: getsale-crm-analytics-service
     restart: unless-stopped
     environment:
@@ -283,7 +283,7 @@ services:
       - default
 
   team-service:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-team-service:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:team-service
     container_name: getsale-crm-team-service
     restart: unless-stopped
     environment:
@@ -301,7 +301,7 @@ services:
 
   # Frontend from registry
   frontend:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-frontend:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:frontend
     container_name: getsale-crm-frontend
     restart: unless-stopped
     environment:
@@ -321,7 +321,7 @@ services:
 
   # Migrations from registry (run once on deploy)
   migrations:
-    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm-migrations:latest
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:migrations
     container_name: getsale-crm-migrations
     environment:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
