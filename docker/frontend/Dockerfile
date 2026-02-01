@@ -8,8 +8,9 @@ RUN npm install
 COPY . .
 
 # Build-time env (NEXT_PUBLIC_* must be set at build for client bundle)
-ARG NEXT_PUBLIC_API_URL=https://api.getsale.example
-ARG NEXT_PUBLIC_WS_URL=wss://ws.getsale.example
+# Defaults to prod URLs so CI build works even if GitHub Variables are not set
+ARG NEXT_PUBLIC_API_URL=https://api-crm.getsale.ai
+ARG NEXT_PUBLIC_WS_URL=wss://ws-crm.getsale.ai
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 ENV NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
 RUN npm run build
