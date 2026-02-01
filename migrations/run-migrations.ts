@@ -12,8 +12,9 @@ async function waitForDatabase(maxRetries = 60, delay = 2000) {
       await pool.query('SELECT 1');
       console.log('✅ Database is ready');
       return;
-    } catch (error) {
-      console.log(`⏳ Waiting for database... (${i + 1}/${maxRetries})`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.log(`⏳ Waiting for database... (${i + 1}/${maxRetries}) ${msg}`);
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
