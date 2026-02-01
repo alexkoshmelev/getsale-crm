@@ -135,11 +135,12 @@ jobs:
           script: |
             cd /docker/getsale-crm
             git pull origin main || true
+            echo "${{ secrets.DO_REGISTRY_PASSWORD }}" | docker login registry.digitalocean.com -u "${{ secrets.DO_REGISTRY_USERNAME }}" --password-stdin
             docker compose -f docker-compose.server.yml down
             docker image prune -f
             docker compose -f docker-compose.server.yml pull
             docker compose -f docker-compose.server.yml up -d postgres redis rabbitmq
-            sleep 15
+            sleep 30
             docker compose -f docker-compose.server.yml run --rm migrations || true
             docker compose -f docker-compose.server.yml up -d
             docker compose -f docker-compose.server.yml ps

@@ -6,7 +6,7 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
 });
 
-async function waitForDatabase(maxRetries = 30, delay = 1000) {
+async function waitForDatabase(maxRetries = 60, delay = 2000) {
   for (let i = 0; i < maxRetries; i++) {
     try {
       await pool.query('SELECT 1');
