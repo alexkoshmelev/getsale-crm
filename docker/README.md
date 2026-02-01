@@ -29,6 +29,10 @@ docker/
 
 ## Продакшн на сервере (docker-compose.server.yml)
 
+**Важно:** на сервере должен быть **актуальный** `docker-compose.server.yml` из репозитория. Образы указываются как один репозиторий с тегами: `getsale-crm:api-gateway`, `getsale-crm:auth-service` и т.д. (не `getsale-crm-api-gateway:latest`). Если на сервере старая версия compose — будет ошибка `unauthorized` при pull.
+
+Проверка на сервере: `grep "image:.*getsale" docker-compose.server.yml` — должно быть `getsale-crm:api-gateway`, а не `getsale-crm-api-gateway:latest`. Если видите старый формат — выполните `git pull origin main` в `/docker/getsale-crm` или скопируйте файл из репо вручную.
+
 На сервере в каталоге с `docker-compose.server.yml` (например `/docker/getsale-crm`) должен быть файл **`.env`** с переменными окружения для прода. Локальный `.env` из репозитория — для разработки; на сервере используйте отдельные секреты.
 
 Скопируйте шаблон и заполните значения:
