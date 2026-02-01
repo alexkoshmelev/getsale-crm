@@ -39,3 +39,9 @@ cp env.server.example .env
 ```
 
 Обязательные переменные: `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `RABBITMQ_PASSWORD`, `JWT_SECRET`, `JWT_REFRESH_SECRET`. Остальные — см. `env.server.example`.
+
+**Реестр DigitalOcean:** на сервере один раз выполните вход в registry, иначе `docker compose pull` выдаст `unauthorized`:
+
+```bash
+docker login registry.digitalocean.com -u <DO_REGISTRY_USERNAME> -p <DO_REGISTRY_PASSWORD>
+```
