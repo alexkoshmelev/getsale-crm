@@ -31,10 +31,11 @@ process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
       reason?.stack?.includes('builder.resolve')) {
     return;
   }
-  // TIMEOUT from telegram/client/updates.js — цикл обновлений таймаутит; переподключаем клиентов, чтобы перезапустить update loop
+  // TIMEOUT from telegram/client/updates.js — цикл обновлений таймаутит; переподключаем клиентов, чтобы перезапустить update loop (не крашим и не логируем стек)
   if (reason?.message === 'TIMEOUT') {
     if (reason?.stack?.includes('updates.js')) {
       telegramManager.scheduleReconnectAllAfterTimeout();
+      console.log('[BD Accounts Service] Update loop TIMEOUT handled — reconnecting clients');
     }
     return;
   }
@@ -131,7 +132,8 @@ app.get('/api/bd-accounts', async (req, res) => {
     const result = await pool.query(
       `SELECT id, organization_id, telegram_id, phone_number, is_active, connected_at, last_activity,
               created_at, sync_status, sync_progress_done, sync_progress_total, sync_error,
-              created_by_user_id AS owner_id
+              created_by_user_id AS owner_id,
+              first_name, last_name, username, bio, photo_file_id, display_name
        FROM bd_accounts WHERE organization_id = $1 ORDER BY created_at DESC`,
       [user.organizationId]
     );
@@ -144,6 +146,119 @@ app.get('/api/bd-accounts', async (req, res) => {
   } catch (error: any) {
     console.error('Error fetching BD accounts:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Get single BD account (for card/detail view)
+app.get('/api/bd-accounts/:id', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `SELECT id, organization_id, telegram_id, phone_number, is_active, connected_at, last_activity,
+              created_at, sync_status, sync_progress_done, sync_progress_total, sync_error,
+              created_by_user_id AS owner_id,
+              first_name, last_name, username, bio, photo_file_id, display_name
+       FROM bd_accounts WHERE id = $1 AND organization_id = $2`,
+      [id, user.organizationId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const row = result.rows[0] as any;
+    res.json({
+      ...row,
+      is_owner: row.owner_id != null && row.owner_id === user.id,
+    });
+  } catch (error: any) {
+    console.error('Error fetching BD account:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Update BD account (display_name / custom name only)
+app.patch('/api/bd-accounts/:id', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { display_name: displayName } = req.body ?? {};
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const isOwner = await requireAccountOwner(id, user);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Only the account owner can update' });
+    }
+
+    const value = typeof displayName === 'string' ? displayName.trim() || null : null;
+    await pool.query(
+      'UPDATE bd_accounts SET display_name = $1, updated_at = NOW() WHERE id = $2',
+      [value, id]
+    );
+    res.json({ success: true, display_name: value });
+  } catch (error: any) {
+    console.error('Error updating BD account:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Avatar image for BD account (profile photo from Telegram)
+app.get('/api/bd-accounts/:id/avatar', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+
+    const result = await telegramManager.downloadAccountProfilePhoto(id);
+    if (!result) {
+      return res.status(404).json({ error: 'Avatar not available (account offline or no photo)' });
+    }
+    res.setHeader('Content-Type', result.mimeType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.send(result.buffer);
+  } catch (error: any) {
+    console.error('Error fetching avatar:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Chat/peer avatar (for chat list — user or group photo from Telegram)
+app.get('/api/bd-accounts/:id/chats/:chatId/avatar', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id, chatId } = req.params;
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+
+    const result = await telegramManager.downloadChatProfilePhoto(id, chatId);
+    if (!result) {
+      return res.status(404).json({ error: 'Chat avatar not available' });
+    }
+    res.setHeader('Content-Type', result.mimeType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.send(result.buffer);
+  } catch (error: any) {
+    console.error('Error fetching chat avatar:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -1026,7 +1141,7 @@ app.get('/api/bd-accounts/:id/media', async (req, res) => {
   }
 });
 
-// Disconnect account — только владелец
+// Disconnect account (temporarily disable) — только владелец
 app.post('/api/bd-accounts/:id/disconnect', async (req, res) => {
   try {
     const user = getUser(req);
@@ -1045,8 +1160,7 @@ app.post('/api/bd-accounts/:id/disconnect', async (req, res) => {
     }
 
     await telegramManager.disconnectAccount(id);
-    
-    // Update account status
+
     await pool.query(
       'UPDATE bd_accounts SET is_active = false WHERE id = $1',
       [id]
@@ -1055,9 +1169,93 @@ app.post('/api/bd-accounts/:id/disconnect', async (req, res) => {
     res.json({ success: true });
   } catch (error: any) {
     console.error('Error disconnecting account:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Internal server error',
       message: error.message || 'Failed to disconnect account'
+    });
+  }
+});
+
+// Enable account (reconnect after disconnect) — только владелец
+app.post('/api/bd-accounts/:id/enable', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+
+    const accountResult = await pool.query(
+      `SELECT id, organization_id, created_by_user_id, phone_number, api_id, api_hash, session_string
+       FROM bd_accounts WHERE id = $1 AND organization_id = $2`,
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const isOwner = await requireAccountOwner(id, user);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Only the account owner can enable' });
+    }
+
+    const row = accountResult.rows[0] as any;
+    if (!row.session_string) {
+      return res.status(400).json({ error: 'Account has no session; reconnect via QR or phone' });
+    }
+
+    await pool.query(
+      'UPDATE bd_accounts SET is_active = true WHERE id = $1',
+      [id]
+    );
+
+    await telegramManager.connectAccount(
+      id,
+      row.organization_id,
+      row.created_by_user_id || user.userId,
+      row.phone_number || '',
+      parseInt(row.api_id, 10),
+      row.api_hash,
+      row.session_string
+    );
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Error enabling account:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message || 'Failed to enable account'
+    });
+  }
+});
+
+// Delete account permanently — только владелец. Сообщения остаются, bd_account_id обнуляется.
+app.delete('/api/bd-accounts/:id', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const isOwner = await requireAccountOwner(id, user);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Only the account owner can delete' });
+    }
+
+    await telegramManager.disconnectAccount(id);
+
+    await pool.query('UPDATE messages SET bd_account_id = NULL WHERE bd_account_id = $1', [id]);
+    await pool.query('DELETE FROM bd_account_sync_chats WHERE bd_account_id = $1', [id]);
+    await pool.query('DELETE FROM bd_account_sync_folders WHERE bd_account_id = $1', [id]);
+    await pool.query('DELETE FROM bd_accounts WHERE id = $1', [id]);
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Error deleting account:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message || 'Failed to delete account'
     });
   }
 });

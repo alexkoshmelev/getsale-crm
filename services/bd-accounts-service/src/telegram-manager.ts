@@ -58,7 +58,7 @@ export class TelegramManager {
 
   /** Интервалы вызова updates.GetState() для поддержания потока апдейтов (Telegram перестаёт слать, если нет активности). */
   private updateKeepaliveIntervals: Map<string, NodeJS.Timeout> = new Map();
-  private readonly UPDATE_KEEPALIVE_MS = 10 * 60 * 1000; // 10 минут
+  private readonly UPDATE_KEEPALIVE_MS = 2 * 60 * 1000; // 2 минуты — чаще пинг, меньше TIMEOUT в update loop
 
   /** Сессии QR-логина: sessionId -> состояние + резолвер для пароля 2FA */
   private qrSessions: Map<string, QrLoginState & {
@@ -219,13 +219,14 @@ export class TelegramManager {
 
       // Save session immediately after successful sign in
       await this.saveSession(accountId, client);
-      
+
       // Update account with telegram_id and connection status
       await this.pool.query(
         'UPDATE bd_accounts SET telegram_id = $1, connected_at = NOW(), last_activity = NOW(), is_active = true WHERE id = $2',
         [String(user.id), accountId]
       );
 
+      await this.saveAccountProfile(accountId, client);
       await this.updateAccountStatus(accountId, 'connected', 'Successfully signed in');
 
       return { requiresPassword: false };
@@ -278,13 +279,14 @@ export class TelegramManager {
 
       // Save session immediately after successful sign in with password
       await this.saveSession(accountId, client);
-      
+
       // Update account with telegram_id and connection status
       await this.pool.query(
         'UPDATE bd_accounts SET telegram_id = $1, connected_at = NOW(), last_activity = NOW(), is_active = true WHERE id = $2',
         [String(user.id), accountId]
       );
 
+      await this.saveAccountProfile(accountId, client);
       await this.updateAccountStatus(accountId, 'connected', 'Successfully signed in with password');
     } catch (error: any) {
       console.error(`[TelegramManager] Error signing in with password for account ${accountId}:`, error);
@@ -630,6 +632,8 @@ export class TelegramManager {
       // Save session immediately after connection
       await this.saveSession(accountId, client);
 
+      await this.saveAccountProfile(accountId, client);
+
       // Store client info
       const clientInfo: TelegramClientInfo = {
         client,
@@ -667,8 +671,6 @@ export class TelegramManager {
       const info = this.clients.get(accountId);
       if (!info?.client?.connected) return;
       try {
-        await info.client.invoke(new Api.updates.GetState());
-        console.log(`[TelegramManager] GetState keepalive OK for account ${accountId}`);
       } catch (e: any) {
         if (e?.message !== 'TIMEOUT' && !e?.message?.includes('builder.resolve')) {
           console.warn(`[TelegramManager] GetState keepalive failed for ${accountId}:`, e?.message);
@@ -714,14 +716,12 @@ export class TelegramManager {
         );
       } catch (_) {}
 
-      // UpdateShortMessage / UpdateShortChatMessage — личные и групповые сообщения в «коротком» формате (часто приходят первыми).
+      // UpdateShortMessage / UpdateShortChatMessage — личные и групповые (входящие и исходящие с другого устройства).
       try {
         client.addEventHandler(
           async (update: any) => {
             try {
               if (!client.connected) return;
-              const out = (update as any).out === true;
-              if (out) return; // только входящие
               await this.handleShortMessageUpdate(update, accountId, organizationId);
             } catch (err: any) {
               if (err?.message === 'TIMEOUT' || err?.message?.includes('TIMEOUT')) return;
@@ -735,9 +735,8 @@ export class TelegramManager {
                 if (!update) return false;
                 const name = update.className ?? update.constructor?.name ?? '';
                 if (name === 'UpdateShortMessage' || name === 'UpdateShortChatMessage') {
-                  const out = (update as any).out === true;
                   const text = (update as any).message;
-                  return !out && typeof text === 'string' && text.length > 0;
+                  return typeof text === 'string' && text.length > 0;
                 }
                 return false;
               } catch (_) {
@@ -793,12 +792,11 @@ export class TelegramManager {
         }
       }
 
-      // Дублируем подписку через NewMessage (incoming) — надёжнее ловит входящие от сторонних аккаунтов
+      // NewMessage (incoming) — входящие от других
       try {
         client.addEventHandler(
           async (event: any) => {
             try {
-              console.log(`[TelegramManager] NewMessage(incoming) handler fired, accountId=${accountId}, hasMessage=${!!event?.message}`);
               if (!client.connected) return;
               const accountCheck = await this.pool.query(
                 'SELECT id, is_active FROM bd_accounts WHERE id = $1',
@@ -812,7 +810,7 @@ export class TelegramManager {
             } catch (err: any) {
               if (err?.message === 'TIMEOUT' || err?.message?.includes('TIMEOUT')) return;
               if (err?.message?.includes('builder.resolve')) return;
-              console.error(`[TelegramManager] NewMessage handler error for ${accountId}:`, err?.message || err);
+              console.error(`[TelegramManager] NewMessage(incoming) handler error for ${accountId}:`, err?.message || err);
             }
           },
           new NewMessage({ incoming: true })
@@ -820,7 +818,37 @@ export class TelegramManager {
         console.log(`[TelegramManager] NewMessage(incoming) handler registered for account ${accountId}`);
       } catch (err: any) {
         if (err?.message?.includes('builder.resolve') || err?.stack?.includes('builder.resolve')) {
-          console.warn(`[TelegramManager] Could not set up NewMessage handler for ${accountId}`);
+          console.warn(`[TelegramManager] Could not set up NewMessage(incoming) handler for ${accountId}`);
+        }
+      }
+
+      // NewMessage (outgoing) — сообщения, отправленные с другого устройства этого аккаунта
+      try {
+        client.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!client.connected) return;
+              const accountCheck = await this.pool.query(
+                'SELECT id, is_active FROM bd_accounts WHERE id = $1',
+                [accountId]
+              );
+              if (accountCheck.rows.length === 0 || !accountCheck.rows[0].is_active) return;
+              const message = event?.message;
+              if (message && (message.className === 'Message' || message instanceof Api.Message)) {
+                await this.handleNewMessage(message, accountId, organizationId);
+              }
+            } catch (err: any) {
+              if (err?.message === 'TIMEOUT' || err?.message?.includes('TIMEOUT')) return;
+              if (err?.message?.includes('builder.resolve')) return;
+              console.error(`[TelegramManager] NewMessage(outgoing) handler error for ${accountId}:`, err?.message || err);
+            }
+          },
+          new NewMessage({ incoming: false })
+        );
+        console.log(`[TelegramManager] NewMessage(outgoing) handler registered for account ${accountId}`);
+      } catch (err: any) {
+        if (err?.message?.includes('builder.resolve') || err?.stack?.includes('builder.resolve')) {
+          console.warn(`[TelegramManager] Could not set up NewMessage(outgoing) handler for ${accountId}`);
         }
       }
 
@@ -928,9 +956,9 @@ export class TelegramManager {
     try {
       const insert = await this.pool.query(
         `INSERT INTO contacts (organization_id, telegram_id, first_name, last_name)
-         VALUES ($1, $2, $3, NULL)
+         VALUES ($1, $2, '', NULL)
          RETURNING id`,
-        [organizationId, telegramId, `Telegram ${telegramId}`]
+        [organizationId, telegramId]
       );
       if (insert.rows.length > 0) return insert.rows[0].id;
     } catch (_) {}
@@ -942,8 +970,7 @@ export class TelegramManager {
   }
 
   /**
-   * Handle incoming short update (UpdateShortMessage / UpdateShortChatMessage).
-   * Личные и групповые сообщения часто приходят в этом формате.
+   * Handle short update (UpdateShortMessage / UpdateShortChatMessage) — входящие и исходящие с другого устройства.
    */
   private async handleShortMessageUpdate(
     update: any,
@@ -951,6 +978,7 @@ export class TelegramManager {
     organizationId: string
   ): Promise<void> {
     try {
+      const isOut = (update as any).out === true;
       const name = update?.className ?? update?.constructor?.name ?? '';
       const userId = (update as any).userId ?? (update as any).user_id;
       const fromId = (update as any).fromId ?? (update as any).from_id;
@@ -958,7 +986,7 @@ export class TelegramManager {
       const msgId = (update as any).id;
       const text = (update as any).message;
       const date = (update as any).date;
-      console.log(`[TelegramManager] Short message received: ${name}, accountId=${accountId}, chatId=${chatIdRaw ?? userId}`);
+      console.log(`[TelegramManager] Short message ${isOut ? 'outgoing' : 'incoming'}: ${name}, accountId=${accountId}, chatId=${chatIdRaw ?? userId}`);
       if (typeof text !== 'string' || !text.trim()) return;
 
       const chatId = name === 'UpdateShortChatMessage'
@@ -985,6 +1013,7 @@ export class TelegramManager {
       }
 
       const contactId = await this.ensureContactForTelegramId(organizationId, senderId || chatId);
+      const direction = isOut ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
       const telegramDate = date ? (typeof date === 'number' ? new Date(date * 1000) : new Date(date)) : null;
       const serialized: SerializedTelegramMessage = {
         telegram_message_id: String(msgId),
@@ -1002,9 +1031,9 @@ export class TelegramManager {
         contactId,
         channel: MessageChannel.TELEGRAM,
         channelId: chatId,
-        direction: MessageDirection.INBOUND,
+        direction,
         status: MessageStatus.DELIVERED,
-        unread: true,
+        unread: !isOut,
         serialized,
         metadata: { senderId, short: true },
       });
@@ -1027,6 +1056,7 @@ export class TelegramManager {
           contactId: contactId || undefined,
           bdAccountId: accountId,
           content: serialized.content,
+          direction: isOut ? 'outbound' : 'inbound',
         },
       };
       await this.rabbitmq.publishEvent(event);
@@ -1037,7 +1067,7 @@ export class TelegramManager {
   }
 
   /**
-   * Handle new incoming message (only for allowed chats; save to DB + emit event for WS)
+   * Handle new message (incoming or outgoing from another device). Only for allowed chats; save to DB + emit event for WS.
    */
   private async handleNewMessage(
     message: Api.Message,
@@ -1045,6 +1075,7 @@ export class TelegramManager {
     organizationId: string
   ): Promise<void> {
     try {
+      const isOut = (message as any).out === true;
       let chatId = '';
       if (message.peerId) {
         if (message.peerId instanceof Api.PeerUser) chatId = String(message.peerId.userId);
@@ -1052,7 +1083,7 @@ export class TelegramManager {
         else if (message.peerId instanceof Api.PeerChannel) chatId = String(message.peerId.channelId);
         else chatId = String(message.peerId);
       }
-      console.log('[TelegramManager] New message received', { accountId, chatId });
+      console.log(`[TelegramManager] New message ${isOut ? 'outgoing' : 'incoming'}`, { accountId, chatId });
       const text = getMessageText(message);
       if (!text.trim() && !message.media) {
         return; // Skip empty messages
@@ -1083,6 +1114,7 @@ export class TelegramManager {
       }
 
       const contactId = await this.ensureContactForTelegramId(organizationId, senderId || chatId);
+      const direction = isOut ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
 
       const serialized = serializeMessage(message);
       const savedMessage = await this.saveMessageToDb({
@@ -1091,9 +1123,9 @@ export class TelegramManager {
         contactId,
         channel: MessageChannel.TELEGRAM,
         channelId: chatId,
-        direction: MessageDirection.INBOUND,
+        direction,
         status: MessageStatus.DELIVERED,
-        unread: true,
+        unread: !isOut,
         serialized,
         metadata: { senderId, hasMedia: !!message.media },
       });
@@ -1121,6 +1153,7 @@ export class TelegramManager {
           contactId: contactId || undefined,
           bdAccountId: accountId,
           content: serialized.content,
+          direction: isOut ? 'outbound' : 'inbound',
         },
       };
 
@@ -1644,8 +1677,14 @@ export class TelegramManager {
     let offsetId = 0;
     let offsetDate = 0;
     if (row.telegram_message_id != null) offsetId = parseInt(String(row.telegram_message_id), 10) || 0;
-    if (row.telegram_date) offsetDate = row.telegram_date;
-    else if (row.created_at) offsetDate = Math.floor(new Date(row.created_at).getTime() / 1000);
+    if (row.telegram_date != null || row.created_at != null) {
+      let ts: number;
+      const raw = row.telegram_date ?? row.created_at;
+      if (raw instanceof Date) ts = Math.floor(raw.getTime() / 1000);
+      else if (typeof raw === 'number') ts = raw > 1e12 ? Math.floor(raw / 1000) : Math.floor(raw);
+      else ts = Math.floor(new Date(raw).getTime() / 1000);
+      offsetDate = Math.max(-2147483648, Math.min(2147483647, ts));
+    }
 
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const limit = 100;
@@ -2046,6 +2085,111 @@ export class TelegramManager {
       );
     } catch (error) {
       console.error(`[TelegramManager] Error saving session for account ${accountId}:`, error);
+    }
+  }
+
+  /**
+   * Fetch full profile from Telegram (getMe + GetFullUser + profile photo) and save to bd_accounts.
+   * Does not overwrite display_name (custom name).
+   */
+  async saveAccountProfile(accountId: string, client: TelegramClient): Promise<void> {
+    try {
+      const me = (await client.getMe()) as Api.User;
+      const telegramId = String(me?.id ?? '');
+      const firstName = (me?.firstName ?? '').trim() || null;
+      const lastName = (me?.lastName ?? '').trim() || null;
+      const username = (me?.username ?? '').trim() || null;
+      const phoneNumber = (me?.phone ?? '').trim() || null;
+
+      let bio: string | null = null;
+      let photoFileId: string | null = null;
+
+      try {
+        const inputMe = await client.getInputEntity('me');
+        const fullUserResult = await client.invoke(
+          new Api.users.GetFullUser({ id: inputMe })
+        ) as Api.users.UserFull;
+        if (fullUserResult?.fullUser?.about) {
+          bio = String(fullUserResult.fullUser.about).trim() || null;
+        }
+        const profilePhoto = fullUserResult?.fullUser?.profile_photo;
+        if (profilePhoto && typeof (profilePhoto as any).id === 'number') {
+          photoFileId = String((profilePhoto as any).id);
+        }
+      } catch (e: any) {
+        console.warn(`[TelegramManager] GetFullUser for ${accountId} failed (non-fatal):`, e?.message);
+      }
+
+      if (!photoFileId) {
+        try {
+          const inputMe = await client.getInputEntity('me');
+          const photos = await client.invoke(
+            new Api.photos.GetUserPhotos({
+              userId: inputMe,
+              offset: 0,
+              maxId: BigInt(0),
+              limit: 1,
+            })
+          ) as Api.photos.Photos;
+          const photo = (photos as any).photos?.[0];
+          if (photo && typeof (photo as any).id === 'number') {
+            photoFileId = String((photo as any).id);
+          }
+        } catch (e: any) {
+          console.warn(`[TelegramManager] GetUserPhotos for ${accountId} failed (non-fatal):`, e?.message);
+        }
+      }
+
+      await this.pool.query(
+        `UPDATE bd_accounts SET
+          telegram_id = $1, phone_number = COALESCE($2, phone_number),
+          first_name = $3, last_name = $4, username = $5, bio = $6, photo_file_id = $7,
+          last_activity = NOW()
+         WHERE id = $8`,
+        [telegramId, phoneNumber, firstName, lastName, username, bio, photoFileId, accountId]
+      );
+      console.log(`[TelegramManager] Profile saved for account ${accountId}`);
+    } catch (error: any) {
+      console.error(`[TelegramManager] Error saving profile for account ${accountId}:`, error);
+    }
+  }
+
+  /**
+   * Download current profile photo for an account (for avatar display).
+   */
+  async downloadAccountProfilePhoto(accountId: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      return null;
+    }
+    try {
+      const buffer = await clientInfo.client.downloadProfilePhoto('me', { isBig: false });
+      if (!buffer || !(buffer instanceof Buffer)) return null;
+      return { buffer, mimeType: 'image/jpeg' };
+    } catch (e: any) {
+      console.warn(`[TelegramManager] downloadProfilePhoto for ${accountId}:`, e?.message);
+      return null;
+    }
+  }
+
+  /**
+   * Download profile/chat photo for a peer (user or group) — for avatars in chat list.
+   */
+  async downloadChatProfilePhoto(accountId: string, chatId: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      return null;
+    }
+    try {
+      const peerIdNum = Number(chatId);
+      const peerInput = Number.isNaN(peerIdNum) ? chatId : peerIdNum;
+      const peer = await clientInfo.client.getInputEntity(peerInput);
+      const buffer = await clientInfo.client.downloadProfilePhoto(peer as any, { isBig: false });
+      if (!buffer || !(buffer instanceof Buffer)) return null;
+      return { buffer, mimeType: 'image/jpeg' };
+    } catch (e: any) {
+      console.warn(`[TelegramManager] downloadChatProfilePhoto ${accountId}/${chatId}:`, e?.message);
+      return null;
     }
   }
 

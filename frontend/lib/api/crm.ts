@@ -110,8 +110,10 @@ export async function fetchContact(id: string): Promise<Contact & { companyName?
 }
 
 export async function createContact(body: {
-  firstName: string;
+  firstName?: string;
   lastName?: string;
+  displayName?: string;
+  username?: string;
   email?: string;
   phone?: string;
   telegramId?: string;

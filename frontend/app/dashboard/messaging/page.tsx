@@ -12,7 +12,7 @@ import {
   Mic, Paperclip, FileText, Image, Video, File,
   Sparkles, Zap, History, FileCode, Bot, Workflow,
   ChevronDown, ChevronRight, ChevronLeft, X, Clock, UserCircle, Tag, BarChart3,
-  Music, Film
+  Music, Film, Users
 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -100,6 +100,79 @@ const mediaLabels: Record<MessageMediaType, string> = {
   sticker: 'Стикер',
   unknown: 'Вложение',
 };
+
+function getChatDisplayName(chat: Chat): string {
+  if (chat.display_name?.trim()) return chat.display_name.trim();
+  const firstLast = `${chat.first_name || ''} ${chat.last_name || ''}`.trim();
+  if (firstLast && !/^Telegram\s+\d+$/.test(firstLast)) return firstLast;
+  if (chat.username) return chat.username.startsWith('@') ? chat.username : `@${chat.username}`;
+  if (chat.name?.trim()) return chat.name.trim();
+  if (chat.email?.trim()) return chat.email.trim();
+  if (chat.telegram_id) return chat.telegram_id;
+  return '?';
+}
+
+function getChatInitials(chat: Chat): string {
+  const name = getChatDisplayName(chat).replace(/^@/, '').trim();
+  const parts = name.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase().slice(0, 2);
+  if (name.length >= 2) return name.slice(0, 2).toUpperCase();
+  return name.slice(0, 1).toUpperCase() || '?';
+}
+
+function ChatAvatar({
+  bdAccountId,
+  chatId,
+  chat,
+  className = 'w-10 h-10',
+}: {
+  bdAccountId: string;
+  chatId: string;
+  chat: Chat;
+  className?: string;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  const mounted = useRef(true);
+  const blobUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!bdAccountId || !chatId) return;
+    mounted.current = true;
+    apiClient
+      .get(`/api/bd-accounts/${bdAccountId}/chats/${chatId}/avatar`, { responseType: 'blob' })
+      .then((res) => {
+        if (mounted.current && res.data instanceof Blob && res.data.size > 0) {
+          const u = URL.createObjectURL(res.data);
+          blobUrlRef.current = u;
+          setSrc(u);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted.current = false;
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+      setSrc(null);
+    };
+  }, [bdAccountId, chatId]);
+
+  const initials = getChatInitials(chat);
+  const isGroup = chat.peer_type === 'chat' || chat.peer_type === 'channel';
+
+  if (src) {
+    return <img src={src} alt="" className={`rounded-full object-cover bg-muted shrink-0 ${className}`} />;
+  }
+  return (
+    <div
+      className={`rounded-full bg-primary/15 flex items-center justify-center text-primary font-semibold text-sm shrink-0 ${className}`}
+      title={getChatDisplayName(chat)}
+    >
+      {isGroup ? <Users className="w-1/2 h-1/2" /> : initials}
+    </div>
+  );
+}
 
 function DownloadLink({ url, className }: { url: string; className?: string }) {
   const [loading, setLoading] = useState(false);
@@ -260,6 +333,7 @@ export default function MessagingPage() {
   const [loading, setLoading] = useState(true);
   const [loadingChats, setLoadingChats] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [sendingMessage, setSendingMessage] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [messagesPage, setMessagesPage] = useState(1);
   const [messagesTotal, setMessagesTotal] = useState(0);
@@ -270,6 +344,9 @@ export default function MessagingPage() {
   const messagesTopSentinelRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const scrollRestoreRef = useRef<{ height: number; top: number } | null>(null);
+  const hasUserScrolledUpRef = useRef(false);
+  const loadOlderLastCallRef = useRef<number>(0);
+  const LOAD_OLDER_COOLDOWN_MS = 2500;
   const MESSAGES_PAGE_SIZE = 50;
   const hasMoreMessages = messagesPage * MESSAGES_PAGE_SIZE < messagesTotal || !historyExhausted;
   const [showCommandsMenu, setShowCommandsMenu] = useState(false);
@@ -464,42 +541,45 @@ export default function MessagingPage() {
     };
   }, [selectedAccountId, isConnected, subscribe, unsubscribe, on, off]);
 
-  // Подписка на новые сообщения в открытом чате. Если сообщения не приходят — в логах bd-accounts-service ищите "[TelegramManager] New message received".
+  // Подписка на все аккаунты — пуши по любому аккаунту/чату
   useEffect(() => {
-    if (!selectedChat || !selectedAccountId) return;
-    const room = `bd-account:${selectedAccountId}:chat:${selectedChat.channel_id}`;
-    subscribe(room);
+    if (!accounts.length || !isConnected) return;
+    const accountRooms = accounts.map((a: BDAccount) => `bd-account:${a.id}`);
+    accountRooms.forEach((room: string) => subscribe(room));
     const handler = (payload: { message?: any; timestamp?: string }) => {
       const msg = payload?.message;
-      if (!msg || msg.bdAccountId !== selectedAccountId || msg.channelId !== selectedChat.channel_id) return;
-      setMessages((prev) => {
-        const existing = prev.find((m) => m.id === msg.messageId);
-        if (existing) return prev;
-        return [
-          ...prev,
-          {
-            id: msg.messageId ?? '',
-            content: msg.content ?? '',
-            direction: 'inbound',
-            created_at: payload?.timestamp ?? new Date().toISOString(),
-            status: 'delivered',
-            contact_id: msg.contactId ?? null,
-            channel: selectedChat.channel,
-            channel_id: selectedChat.channel_id,
-            telegram_message_id: msg.telegramMessageId ?? null,
-            telegram_media: msg.telegramMedia ?? null,
-            telegram_date: payload?.timestamp ?? null,
-          },
-        ];
-      });
-      scrollToBottom();
+      if (!msg?.bdAccountId) return;
+      if (msg.bdAccountId === selectedAccountId) fetchChats();
+      if (msg.bdAccountId === selectedAccountId && selectedChat && msg.channelId === selectedChat.channel_id) {
+        setMessages((prev) => {
+          const existing = prev.find((m) => m.id === msg.messageId);
+          if (existing) return prev;
+          return [
+            ...prev,
+            {
+              id: msg.messageId ?? '',
+              content: msg.content ?? '',
+              direction: (msg.direction === 'outbound' ? 'outbound' : 'inbound') as 'inbound' | 'outbound',
+              created_at: payload?.timestamp ?? new Date().toISOString(),
+              status: 'delivered',
+              contact_id: msg.contactId ?? null,
+              channel: selectedChat.channel,
+              channel_id: selectedChat.channel_id,
+              telegram_message_id: msg.telegramMessageId ?? null,
+              telegram_media: msg.telegramMedia ?? null,
+              telegram_date: payload?.timestamp ?? null,
+            },
+          ];
+        });
+        scrollToBottom();
+      }
     };
     on('new-message', handler);
     return () => {
       off('new-message', handler);
-      unsubscribe(room);
+      accountRooms.forEach((room: string) => unsubscribe(room));
     };
-  }, [selectedChat?.channel_id, selectedAccountId, isConnected, subscribe, unsubscribe, on, off]);
+  }, [accounts, isConnected, selectedAccountId, selectedChat, subscribe, unsubscribe, on, off]);
 
   useEffect(() => {
     scrollToBottom();
@@ -680,6 +760,22 @@ export default function MessagingPage() {
     });
   }, [messages.length]);
 
+  // Сброс «пользователь скроллил вверх» при смене чата
+  useEffect(() => {
+    hasUserScrolledUpRef.current = false;
+  }, [selectedChat?.channel_id]);
+
+  // Отслеживание скролла вверх — подгрузка только после явного скролла (избегаем 429)
+  useEffect(() => {
+    const container = messagesScrollRef.current;
+    if (!container) return;
+    const onScroll = () => {
+      if (container.scrollTop < 150) hasUserScrolledUpRef.current = true;
+    };
+    container.addEventListener('scroll', onScroll, { passive: true });
+    return () => container.removeEventListener('scroll', onScroll);
+  }, []);
+
   // Подгрузка старых сообщений при скролле вверх (как в Telegram)
   useEffect(() => {
     const el = messagesTopSentinelRef.current;
@@ -687,9 +783,14 @@ export default function MessagingPage() {
     const observer = new IntersectionObserver(
       (entries) => {
         const [e] = entries;
-        if (e?.isIntersecting && hasMoreMessages && !loadingOlder) loadOlderMessages();
+        if (!e?.isIntersecting || !hasMoreMessages || loadingOlder) return;
+        if (!hasUserScrolledUpRef.current) return;
+        const now = Date.now();
+        if (now - loadOlderLastCallRef.current < LOAD_OLDER_COOLDOWN_MS) return;
+        loadOlderLastCallRef.current = now;
+        loadOlderMessages();
       },
-      { root: el.closest('.overflow-y-auto') || null, rootMargin: '100px', threshold: 0 }
+      { root: el.closest('.overflow-y-auto') || null, rootMargin: '80px', threshold: 0 }
     );
     observer.observe(el);
     return () => observer.disconnect();
@@ -1198,29 +1299,37 @@ export default function MessagingPage() {
               <div
                 key={`${chat.channel}-${chat.channel_id}`}
                 onClick={() => setSelectedChat(chat)}
-                className={`p-4 cursor-pointer border-b border-border transition-colors ${
+                className={`p-4 cursor-pointer border-b border-border transition-colors flex gap-3 ${
                   selectedChat?.channel_id === chat.channel_id
                     ? 'bg-primary/10 dark:bg-primary/20'
                     : 'hover:bg-accent'
                 }`}
               >
-                <div className="flex items-start justify-between mb-1">
-                  <div className="font-medium text-sm truncate flex-1">
-                    {getChatName(chat)}
-                  </div>
-                  <span className="text-xs text-muted-foreground ml-2 flex-shrink-0">
-                    {formatTime(chat.last_message_at)}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <div className="text-sm text-muted-foreground truncate flex-1">
-                    {chat.last_message || t('messaging.noMessages')}
-                  </div>
-                  {chat.unread_count > 0 && (
-                    <span className="ml-2 bg-primary text-primary-foreground text-xs rounded-full w-5 h-5 flex items-center justify-center flex-shrink-0">
-                      {chat.unread_count}
+                <ChatAvatar
+                  bdAccountId={selectedAccountId!}
+                  chatId={chat.channel_id}
+                  chat={chat}
+                  className="w-10 h-10 shrink-0"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between mb-1 gap-2">
+                    <div className="font-medium text-sm truncate min-w-0">
+                      {getChatName(chat)}
+                    </div>
+                    <span className="text-xs text-muted-foreground flex-shrink-0">
+                      {formatTime(chat.last_message_at)}
                     </span>
-                  )}
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm text-muted-foreground truncate min-w-0">
+                      {chat.last_message || t('messaging.noMessages')}
+                    </div>
+                    {chat.unread_count > 0 && (
+                      <span className="bg-primary text-primary-foreground text-xs rounded-full min-w-[1.25rem] h-5 px-1.5 flex items-center justify-center flex-shrink-0">
+                        {chat.unread_count}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             ))

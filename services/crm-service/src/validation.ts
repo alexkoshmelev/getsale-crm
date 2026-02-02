@@ -14,8 +14,10 @@ export const CompanyCreateSchema = z.object({
 export const CompanyUpdateSchema = CompanyCreateSchema.partial();
 
 export const ContactCreateSchema = z.object({
-  firstName: z.string().min(1, 'First name is required').max(255).trim(),
+  firstName: z.string().max(255).trim().optional(),
   lastName: z.string().max(255).trim().optional(),
+  displayName: z.string().max(255).trim().optional(),
+  username: z.string().max(255).trim().optional(),
   email: z.string().email().max(255).optional().or(z.literal('')),
   phone: z.string().max(50).optional(),
   telegramId: z.string().max(100).optional(),
@@ -31,7 +33,7 @@ export const ContactCreateSchema = z.object({
 });
 
 export const ContactUpdateSchema = z.object({
-  firstName: z.string().min(1).max(255).trim().optional(),
+  firstName: z.string().max(255).trim().optional().nullable(),
   lastName: z.string().max(255).trim().optional().nullable(),
   email: z.string().email().max(255).optional().nullable().or(z.literal('')),
   phone: z.string().max(50).optional().nullable(),

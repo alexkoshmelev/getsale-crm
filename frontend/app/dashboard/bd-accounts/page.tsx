@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import Link from 'next/link';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { apiClient } from '@/lib/api/client';
 import { useWebSocketContext } from '@/lib/contexts/websocket-context';
-import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Search, FolderOpen, ChevronRight, ChevronDown } from 'lucide-react';
+import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Power, PowerOff, Search, FolderOpen, ChevronRight, ChevronDown, User } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
@@ -21,7 +22,70 @@ interface BDAccount {
   sync_progress_done?: number;
   sync_progress_total?: number;
   sync_error?: string;
-  is_owner?: boolean; // только свои аккаунты показываем на этой странице
+  is_owner?: boolean;
+  first_name?: string | null;
+  last_name?: string | null;
+  username?: string | null;
+  bio?: string | null;
+  photo_file_id?: string | null;
+  display_name?: string | null;
+}
+
+function getAccountDisplayName(account: BDAccount): string {
+  if (account.display_name?.trim()) return account.display_name.trim();
+  const first = (account.first_name ?? '').trim();
+  const last = (account.last_name ?? '').trim();
+  if (first || last) return [first, last].filter(Boolean).join(' ');
+  if (account.username?.trim()) return account.username.trim();
+  if (account.phone_number?.trim()) return account.phone_number.trim();
+  return account.telegram_id || account.id;
+}
+
+function getAccountInitials(account: BDAccount): string {
+  const name = getAccountDisplayName(account);
+  const parts = name.replace(/@/g, '').trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase().slice(0, 2);
+  if (name.length >= 2) return name.slice(0, 2).toUpperCase();
+  return name.slice(0, 1).toUpperCase() || '?';
+}
+
+function AccountAvatar({ accountId, account, className = 'w-12 h-12' }: { accountId: string; account: BDAccount; className?: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const mounted = useRef(true);
+  const blobUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    apiClient
+      .get(`/api/bd-accounts/${accountId}/avatar`, { responseType: 'blob' })
+      .then((res) => {
+        if (mounted.current && res.data instanceof Blob && res.data.size > 0) {
+          const u = URL.createObjectURL(res.data);
+          blobUrlRef.current = u;
+          setSrc(u);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted.current = false;
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+      setSrc(null);
+    };
+  }, [accountId]);
+
+  const initials = getAccountInitials(account);
+
+  if (src) {
+    return <img src={src} alt="" className={`rounded-full object-cover bg-gray-100 dark:bg-gray-800 ${className}`} />;
+  }
+  return (
+    <div className={`rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-700 dark:text-blue-300 font-semibold text-sm ${className}`}>
+      {initials}
+    </div>
+  );
 }
 
 interface Dialog {
@@ -484,14 +548,39 @@ export default function BDAccountsPage() {
   };
 
   const handleDisconnect = async (accountId: string) => {
-    if (!confirm('Вы уверены, что хотите отключить этот аккаунт?')) return;
+    if (!confirm('Отключить аккаунт? Получение сообщений будет приостановлено до включения.')) return;
 
     try {
+      setError('');
       await apiClient.post(`/api/bd-accounts/${accountId}/disconnect`);
       await fetchAccounts();
     } catch (error: any) {
       console.error('Error disconnecting account:', error);
-      setError(error.response?.data?.error || 'Ошибка отключения');
+      setError(error.response?.data?.error || error.response?.data?.message || 'Ошибка отключения');
+    }
+  };
+
+  const handleEnable = async (accountId: string) => {
+    try {
+      setError('');
+      await apiClient.post(`/api/bd-accounts/${accountId}/enable`);
+      await fetchAccounts();
+    } catch (error: any) {
+      console.error('Error enabling account:', error);
+      setError(error.response?.data?.error || error.response?.data?.message || 'Ошибка включения');
+    }
+  };
+
+  const handleDelete = async (accountId: string) => {
+    if (!confirm('Удалить аккаунт навсегда? История сообщений останется, аккаунт будет отвязан.')) return;
+
+    try {
+      setError('');
+      await apiClient.delete(`/api/bd-accounts/${accountId}`);
+      await fetchAccounts();
+    } catch (error: any) {
+      console.error('Error deleting account:', error);
+      setError(error.response?.data?.error || error.response?.data?.message || 'Ошибка удаления');
     }
   };
 
@@ -528,21 +617,22 @@ export default function BDAccountsPage() {
         {accounts.map((account) => (
           <Card key={account.id} className="p-6">
             <div className="flex items-start justify-between mb-4">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 bg-blue-100 dark:bg-blue-900/20 rounded-full flex items-center justify-center">
-                  <MessageSquare className="w-6 h-6 text-blue-600 dark:text-blue-400" />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-gray-900 dark:text-white">
-                    {account.phone_number || account.telegram_id}
+              <Link href={`/dashboard/bd-accounts/${account.id}`} className="flex items-center gap-3 min-w-0 flex-1 hover:opacity-90 transition-opacity">
+                <AccountAvatar accountId={account.id} account={account} className="w-12 h-12 shrink-0" />
+                <div className="min-w-0">
+                  <h3 className="font-semibold text-gray-900 dark:text-white truncate">
+                    {getAccountDisplayName(account)}
                   </h3>
-                  <p className="text-sm text-gray-500 dark:text-gray-400">Telegram</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    {account.username ? `@${account.username}` : account.phone_number || 'Telegram'}
+                  </p>
                 </div>
-              </div>
+                <ChevronRight className="w-5 h-5 text-gray-400 shrink-0" />
+              </Link>
               {account.is_active ? (
-                <CheckCircle2 className="w-5 h-5 text-green-500" />
+                <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0" />
               ) : (
-                <XCircle className="w-5 h-5 text-gray-400" />
+                <XCircle className="w-5 h-5 text-gray-400 shrink-0" />
               )}
             </div>
 
@@ -559,12 +649,12 @@ export default function BDAccountsPage() {
               )}
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => fetchDialogs(account.id)}
-                className="flex-1"
+                className="flex-1 min-w-0"
               >
                 <MessageSquare className="w-4 h-4 mr-2" />
                 Диалоги
@@ -573,14 +663,35 @@ export default function BDAccountsPage() {
                 variant="outline"
                 size="sm"
                 onClick={() => fetchAccountStatus(account.id)}
+                title="Статус"
               >
                 <Settings className="w-4 h-4" />
               </Button>
+              {account.is_active ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleDisconnect(account.id)}
+                  title="Отключить (временно)"
+                >
+                  <PowerOff className="w-4 h-4" />
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleEnable(account.id)}
+                  title="Включить"
+                >
+                  <Power className="w-4 h-4" />
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => handleDisconnect(account.id)}
+                onClick={() => handleDelete(account.id)}
                 className="text-red-600 hover:text-red-700"
+                title="Удалить аккаунт"
               >
                 <Trash2 className="w-4 h-4" />
               </Button>

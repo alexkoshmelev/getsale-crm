@@ -145,12 +145,16 @@ async function subscribeToEvents() {
               timestamp: event.timestamp,
             });
             if (data.channelId) {
-              const room = `bd-account:${data.bdAccountId}:chat:${data.channelId}`;
-              io.to(room).emit('new-message', {
+              const chatRoom = `bd-account:${data.bdAccountId}:chat:${data.channelId}`;
+              io.to(chatRoom).emit('new-message', {
                 message: data,
                 timestamp: event.timestamp,
               });
-              console.log(`[WebSocket] new-message emitted to room ${room}`);
+              // Подписчики на аккаунт получают все новые сообщения (пуши по любому чату)
+              io.to(`bd-account:${data.bdAccountId}`).emit('new-message', {
+                message: data,
+                timestamp: event.timestamp,
+              });
             }
           }
         }

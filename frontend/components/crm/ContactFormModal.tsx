@@ -18,6 +18,8 @@ interface ContactFormModalProps {
 export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselectedCompanyId }: ContactFormModalProps) {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [companyId, setCompanyId] = useState('');
@@ -41,12 +43,16 @@ export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselected
     if (edit) {
       setFirstName(edit.first_name ?? '');
       setLastName(edit.last_name ?? '');
+      setDisplayName(edit.display_name ?? '');
+      setUsername(edit.username ?? '');
       setEmail(edit.email ?? '');
       setPhone(edit.phone ?? '');
       setCompanyId(edit.company_id ?? '');
     } else {
       setFirstName('');
       setLastName('');
+      setDisplayName('');
+      setUsername('');
       setEmail('');
       setPhone('');
       setCompanyId(preselectedCompanyId ?? '');
@@ -62,24 +68,28 @@ export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselected
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    if (!firstName.trim()) {
-      setError('Укажите имя контакта');
+    if (!firstName.trim() && !displayName.trim() && !edit?.telegram_id) {
+      setError('Укажите имя, отображаемое имя или откройте контакт из Messaging (Telegram)');
       return;
     }
     setLoading(true);
     try {
       if (isEdit) {
         await updateContact(edit!.id, {
-          firstName: firstName.trim(),
+          firstName: firstName.trim() || null,
           lastName: lastName.trim() || null,
+          displayName: displayName.trim() || null,
+          username: username.trim() || null,
           email: email.trim() || null,
           phone: phone.trim() || null,
           companyId: companyId || null,
         });
       } else {
         await createContact({
-          firstName: firstName.trim(),
+          firstName: firstName.trim() || undefined,
           lastName: lastName.trim() || undefined,
+          displayName: displayName.trim() || undefined,
+          username: username.trim() || undefined,
           email: email.trim() || undefined,
           phone: phone.trim() || undefined,
           companyId: companyId || null,
@@ -104,11 +114,16 @@ export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselected
       )}
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input
-          label="Имя *"
+          label="Отображаемое имя"
+          value={displayName}
+          onChange={(e) => setDisplayName(e.target.value)}
+          placeholder="Как показывать в CRM и Messaging"
+        />
+        <Input
+          label="Имя"
           value={firstName}
           onChange={(e) => setFirstName(e.target.value)}
           placeholder="Иван"
-          required
           autoFocus
         />
         <Input
@@ -116,6 +131,12 @@ export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselected
           value={lastName}
           onChange={(e) => setLastName(e.target.value)}
           placeholder="Иванов"
+        />
+        <Input
+          label="Username (Telegram)"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="username (без @)"
         />
         <Input
           label="Email"

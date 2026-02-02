@@ -108,6 +108,7 @@ export interface MessageReceivedEvent extends BaseEvent {
     contactId?: string;
     bdAccountId?: string;
     content: string;
+    direction?: 'inbound' | 'outbound';
   };
 }
 

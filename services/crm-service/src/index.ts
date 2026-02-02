@@ -388,6 +388,8 @@ app.post('/api/crm/contacts', async (req, res, next) => {
     const {
       firstName,
       lastName,
+      displayName,
+      username,
       email,
       phone,
       telegramId,
@@ -404,13 +406,15 @@ app.post('/api/crm/contacts', async (req, res, next) => {
       }
     }
     const result = await pool.query(
-      `INSERT INTO contacts (organization_id, company_id, first_name, last_name, email, phone, telegram_id, consent_flags)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      `INSERT INTO contacts (organization_id, company_id, first_name, last_name, display_name, username, email, phone, telegram_id, consent_flags)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
       [
         user.organizationId,
         companyId ?? null,
-        firstName,
-        lastName ?? null,
+        (firstName ?? '').trim() || null,
+        (lastName ?? '').trim() || null,
+        (displayName ?? '').trim() || null,
+        (username ?? '').trim() || null,
         email || null,
         phone ?? null,
         telegramId ?? null,

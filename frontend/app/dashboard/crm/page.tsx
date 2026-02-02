@@ -41,6 +41,20 @@ import { clsx } from 'clsx';
 
 type TabId = 'companies' | 'contacts' | 'deals';
 
+/** Имя контакта для отображения: display_name → имя+фамилия (не "Telegram %") → @username → telegram_id → заглушка */
+function getContactDisplayName(c: Contact): string {
+  const dn = (c.display_name ?? '').trim();
+  if (dn) return dn;
+  const fn = (c.first_name ?? '').trim();
+  const ln = (c.last_name ?? '').trim();
+  const full = [fn, ln].filter(Boolean).join(' ').trim();
+  if (full && !/^Telegram\s+\d+$/i.test(full)) return full;
+  const un = (c.username ?? '').trim();
+  if (un) return un.startsWith('@') ? un : `@${un}`;
+  if (c.telegram_id) return String(c.telegram_id);
+  return 'Без имени';
+}
+
 const TABS: { id: TabId; i18nKey: string; icon: typeof Building2 }[] = [
   { id: 'companies', i18nKey: 'companies', icon: Building2 },
   { id: 'contacts', i18nKey: 'contacts', icon: User },
@@ -392,7 +406,7 @@ export default function CRMPage() {
                             <User className="w-4 h-4" />
                           </div>
                           <span className="font-medium text-foreground">
-                            {[c.first_name, c.last_name].filter(Boolean).join(' ') || 'Без имени'}
+                            {getContactDisplayName(c)}
                           </span>
                         </div>
                       </td>
@@ -410,7 +424,7 @@ export default function CRMPage() {
                           </button>
                           <button
                             type="button"
-                            onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'contacts', id: c.id, name: [c.first_name, c.last_name].filter(Boolean).join(' ') || c.email || c.id }); }}
+                            onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'contacts', id: c.id, name: getContactDisplayName(c) || c.email || c.id }); }}
                             className="p-2 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                             aria-label={t('crm.deleteAction')}
                           >
@@ -559,7 +573,7 @@ export default function CRMPage() {
           <ContactDetail
             contact={detailData as Contact}
             onEdit={() => { setContactEdit(detailData as Contact); setContactModalOpen(true); setDetailId(null); }}
-            onDelete={() => setDeleteConfirm({ type: 'contacts', id: (detailData as Contact).id, name: [(detailData as Contact).first_name, (detailData as Contact).last_name].filter(Boolean).join(' ') || (detailData as Contact).email || '' })}
+            onDelete={() => setDeleteConfirm({ type: 'contacts', id: (detailData as Contact).id, name: getContactDisplayName(detailData as Contact) || (detailData as Contact).email || '' })}
             t={t}
           />
         )}
@@ -668,7 +682,7 @@ function ContactDetail({
   onDelete: () => void;
   t: (key: string) => string;
 }) {
-  const name = [contact.first_name, contact.last_name].filter(Boolean).join(' ') || '—';
+  const name = getContactDisplayName(contact);
   return (
     <div className="space-y-6">
       <div className="flex items-start gap-4">
@@ -696,6 +710,18 @@ function ContactDetail({
           <div className="flex items-center gap-2 text-sm">
             <Phone className="w-4 h-4 text-muted-foreground" />
             <a href={`tel:${contact.phone}`} className="text-primary hover:underline">{contact.phone}</a>
+          </div>
+        )}
+        {contact.telegram_id && (
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground">Telegram ID:</span>
+            <span className="text-foreground">{contact.telegram_id}</span>
+          </div>
+        )}
+        {contact.username && (
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground">@</span>
+            <span className="text-foreground">{contact.username.startsWith('@') ? contact.username : `@${contact.username}`}</span>
           </div>
         )}
       </div>
