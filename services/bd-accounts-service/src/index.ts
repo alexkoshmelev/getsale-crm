@@ -1208,7 +1208,7 @@ app.post('/api/bd-accounts/:id/enable', async (req, res) => {
     await telegramManager.connectAccount(
       id,
       row.organization_id,
-      row.created_by_user_id || user.userId,
+      row.created_by_user_id || user.id,
       row.phone_number || '',
       parseInt(row.api_id, 10),
       row.api_hash,

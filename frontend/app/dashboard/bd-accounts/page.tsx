@@ -1315,9 +1315,9 @@ export default function BDAccountsPage() {
                           </p>
                         )}
                       </div>
-                      {dialog.unreadCount > 0 && (
+                      {(dialog.unreadCount ?? 0) > 0 && (
                         <span className="bg-blue-600 text-white text-xs px-2 py-1 rounded-full">
-                          {dialog.unreadCount}
+                          {dialog.unreadCount ?? 0}
                         </span>
                       )}
                     </div>

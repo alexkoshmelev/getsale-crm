@@ -98,8 +98,8 @@ app.get('/api/messaging/messages', async (req, res) => {
               }
             );
             if (loadRes.ok) {
-              const data = await loadRes.json();
-              if (data.added > 0) {
+              const data = (await loadRes.json()) as { added?: number };
+              if ((data.added ?? 0) > 0) {
                 countResult = await pool.query(
                   'SELECT COUNT(*) FROM messages WHERE organization_id = $1 AND channel = $2 AND channel_id = $3 AND bd_account_id = $4',
                   [user.organizationId, channel || 'telegram', chId, bdId]
