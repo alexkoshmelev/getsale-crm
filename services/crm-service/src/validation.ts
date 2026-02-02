@@ -49,15 +49,24 @@ export const ContactUpdateSchema = z.object({
     .optional(),
 });
 
-export const DealCreateSchema = z.object({
-  companyId: z.string().uuid('Invalid company ID'),
-  contactId: z.string().uuid().optional().nullable(),
-  pipelineId: z.string().uuid('Invalid pipeline ID'),
-  stageId: z.string().uuid().optional().nullable(), // if omitted, first stage of pipeline is used
-  title: z.string().min(1, 'Title is required').max(255).trim(),
-  value: z.number().min(0).optional().nullable(),
-  currency: z.string().length(3).optional(),
-});
+export const DealCreateSchema = z
+  .object({
+    companyId: z.string().uuid('Invalid company ID').optional().nullable(),
+    contactId: z.string().uuid().optional().nullable(),
+    pipelineId: z.string().uuid('Invalid pipeline ID'),
+    stageId: z.string().uuid().optional().nullable(), // if omitted, first stage of pipeline is used
+    title: z.string().min(1, 'Title is required').max(255).trim(),
+    value: z.number().min(0).optional().nullable(),
+    currency: z.string().length(3).optional(),
+    // Сделка из чата: минимальная модель — чат + сумма
+    bdAccountId: z.string().uuid().optional().nullable(),
+    channel: z.string().max(50).optional().nullable(),
+    channelId: z.string().max(255).optional().nullable(),
+  })
+  .refine(
+    (data) => data.companyId != null || (data.bdAccountId != null && data.channel != null && data.channelId != null),
+    { message: 'Either companyId or (bdAccountId + channel + channelId) is required' }
+  );
 
 export const DealUpdateSchema = z.object({
   title: z.string().min(1).max(255).trim().optional(),

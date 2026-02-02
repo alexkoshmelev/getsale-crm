@@ -1,0 +1,2 @@
+# Shell scripts must use LF so Linux containers run them (no "no such file or directory")
+docker-entrypoint.sh text eol=lf

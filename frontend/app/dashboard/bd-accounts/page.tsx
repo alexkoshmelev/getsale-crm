@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { apiClient } from '@/lib/api/client';
 import { useWebSocketContext } from '@/lib/contexts/websocket-context';
-import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2 } from 'lucide-react';
+import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Search, FolderOpen, ChevronRight, ChevronDown } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
@@ -27,12 +27,26 @@ interface BDAccount {
 interface Dialog {
   id: string;
   name: string;
-  unreadCount: number;
-  lastMessage: string;
+  unreadCount?: number;
+  lastMessage?: string;
   lastMessageDate?: string;
   isUser: boolean;
   isGroup: boolean;
   isChannel: boolean;
+}
+
+interface FolderWithDialogs {
+  id: number;
+  title: string;
+  emoticon?: string;
+  dialogs: Dialog[];
+}
+
+interface SyncChatRow {
+  telegram_chat_id: string;
+  folder_id: number | null;
+  title?: string;
+  peer_type?: string;
 }
 
 export default function BDAccountsPage() {
@@ -44,6 +58,8 @@ export default function BDAccountsPage() {
   const [showConnectModal, setShowConnectModal] = useState(false);
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
   const [dialogs, setDialogs] = useState<Dialog[]>([]);
+  const [dialogsByFolders, setDialogsByFolders] = useState<FolderWithDialogs[]>([]);
+  const [syncChatsList, setSyncChatsList] = useState<SyncChatRow[]>([]);
   const [loadingDialogs, setLoadingDialogs] = useState(false);
   const [connectStep, setConnectStep] = useState<'credentials' | 'qr' | 'code' | 'password' | 'select-chats'>('credentials');
   const [loginMethod, setLoginMethod] = useState<'phone' | 'qr'>('phone');
@@ -55,12 +71,18 @@ export default function BDAccountsPage() {
   const [qrJustConnected, setQrJustConnected] = useState(false);
   const [startingQr, setStartingQr] = useState(false);
   const [selectedChatIds, setSelectedChatIds] = useState<Set<string>>(new Set());
+  const [selectChatsSearch, setSelectChatsSearch] = useState('');
+  const [expandedFolderId, setExpandedFolderId] = useState<number | null>(null);
+  const [chatTypeFilter, setChatTypeFilter] = useState<'all' | 'personal' | 'groups'>('all');
   const [syncProgress, setSyncProgress] = useState<{ done: number; total: number; currentTitle?: string } | null>(null);
+
+  const toggleFolderExpanded = useCallback((folderId: number) => {
+    const id = Number(folderId);
+    setExpandedFolderId((prev) => (prev === id ? null : id));
+  }, []);
   const [startingSync, setStartingSync] = useState(false);
   const [connectForm, setConnectForm] = useState({
     phoneNumber: '',
-    apiId: '',
-    apiHash: '',
     phoneCode: '',
     password: '',
   });
@@ -75,6 +97,7 @@ export default function BDAccountsPage() {
   }, []);
 
   // Открыть модалку «Выбор чатов» по ссылке с Мессенджера (?accountId=...&openSelectChats=1)
+  // Загружаем диалоги по папкам (Все чаты = folder 0, кастомные папки из Telegram) и ранее выбранные чаты с folder_id
   useEffect(() => {
     const accountId = searchParams.get('accountId');
     const openSelectChats = searchParams.get('openSelectChats');
@@ -84,20 +107,24 @@ export default function BDAccountsPage() {
     setConnectingAccountId(accountId);
     setSyncProgress(null);
     setError(null);
+    setSelectChatsSearch('');
     setLoadingDialogs(true);
     router.replace('/dashboard/bd-accounts'); // убрать query из URL
     Promise.all([
-      apiClient.get(`/api/bd-accounts/${accountId}/dialogs`).then((res) => Array.isArray(res.data) ? res.data : []),
-      apiClient.get(`/api/bd-accounts/${accountId}/sync-chats`).then((res) => (Array.isArray(res.data) ? res.data : []) as { telegram_chat_id: string }[]),
+      apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders`).then((res) => (res.data?.folders ?? []) as FolderWithDialogs[]),
+      apiClient.get(`/api/bd-accounts/${accountId}/sync-chats`).then((res) => (Array.isArray(res.data) ? res.data : []) as SyncChatRow[]),
     ])
-      .then(([dialogsList, syncChatsList]) => {
-        setDialogs(dialogsList);
-        const alreadySelected = new Set(syncChatsList.map((c) => String(c.telegram_chat_id)));
+      .then(([folders, syncList]) => {
+        setDialogsByFolders(folders);
+        setSyncChatsList(syncList);
+        setExpandedFolderId(null);
+        const alreadySelected = new Set(syncList.map((c) => String(c.telegram_chat_id)));
         setSelectedChatIds(alreadySelected);
       })
       .catch((e) => {
-        console.error('Failed to load dialogs or sync-chats:', e);
-        setDialogs([]);
+        console.error('Failed to load dialogs-by-folders or sync-chats:', e);
+        setDialogsByFolders([]);
+        setSyncChatsList([]);
         setSelectedChatIds(new Set());
         setError(e?.response?.data?.error || 'Ошибка загрузки');
       })
@@ -207,8 +234,8 @@ export default function BDAccountsPage() {
   };
 
   const handleSendCode = async () => {
-    if (!connectForm.phoneNumber || !connectForm.apiId || !connectForm.apiHash) {
-      setError('Заполните все обязательные поля');
+    if (!connectForm.phoneNumber) {
+      setError('Введите номер телефона');
       return;
     }
 
@@ -219,8 +246,6 @@ export default function BDAccountsPage() {
       const response = await apiClient.post('/api/bd-accounts/send-code', {
         platform: 'telegram',
         phoneNumber: connectForm.phoneNumber,
-        apiId: parseInt(connectForm.apiId),
-        apiHash: connectForm.apiHash,
       });
 
       setConnectingAccountId(response.data.accountId);
@@ -228,7 +253,7 @@ export default function BDAccountsPage() {
       setConnectStep('code');
     } catch (error: any) {
       console.error('Error sending code:', error);
-      setError(error.response?.data?.error || error.response?.data?.message || 'Ошибка отправки кода');
+      setError(error.response?.data?.message || error.response?.data?.error || 'Ошибка отправки кода');
     } finally {
       setSendingCode(false);
     }
@@ -295,8 +320,6 @@ export default function BDAccountsPage() {
     setLoginMethod('phone');
     setConnectForm({
       phoneNumber: '',
-      apiId: '',
-      apiHash: '',
       phoneCode: '',
       password: '',
     });
@@ -330,17 +353,10 @@ export default function BDAccountsPage() {
   };
 
   const handleStartQrLogin = async () => {
-    if (!connectForm.apiId || !connectForm.apiHash) {
-      setError('Введите API ID и API Hash (получите на my.telegram.org/apps)');
-      return;
-    }
     setStartingQr(true);
     setError(null);
     try {
-      const res = await apiClient.post('/api/bd-accounts/start-qr-login', {
-        apiId: parseInt(connectForm.apiId),
-        apiHash: connectForm.apiHash,
-      });
+      const res = await apiClient.post('/api/bd-accounts/start-qr-login', {});
       setQrSessionId(res.data.sessionId);
       setConnectStep('qr');
       setQrState({ status: 'pending' });
@@ -370,9 +386,13 @@ export default function BDAccountsPage() {
             setQrState(null);
             setConnectStep('select-chats');
             setLoadingDialogs(true);
-            apiClient.get(`/api/bd-accounts/${data.accountId}/dialogs`).then((dialogsRes) => {
-              setDialogs(Array.isArray(dialogsRes.data) ? dialogsRes.data : []);
-            }).catch(() => setDialogs([])).finally(() => setLoadingDialogs(false));
+            setSelectChatsSearch('');
+            apiClient.get(`/api/bd-accounts/${data.accountId}/dialogs-by-folders`).then((res) => {
+              setDialogsByFolders(res.data?.folders ?? []);
+              setSyncChatsList([]);
+              setExpandedFolderId(null);
+              setSelectedChatIds(new Set());
+            }).catch(() => { setDialogsByFolders([]); setSyncChatsList([]); setExpandedFolderId(null); setSelectedChatIds(new Set()); }).finally(() => setLoadingDialogs(false));
           }, 1800);
         }
         if (data.status === 'error') setQrPendingReason(null);
@@ -392,6 +412,38 @@ export default function BDAccountsPage() {
     });
   };
 
+  const toggleFolderSelection = useCallback((folder: FolderWithDialogs) => {
+    const ids = folder.dialogs.map((d) => String(d.id));
+    const allSelected = ids.every((id) => selectedChatIds.has(id));
+    setSelectedChatIds((prev) => {
+      const next = new Set(prev);
+      if (allSelected) ids.forEach((id) => next.delete(id));
+      else ids.forEach((id) => next.add(id));
+      return next;
+    });
+  }, [selectedChatIds]);
+
+  const getFolderCheckState = useCallback((folder: FolderWithDialogs) => {
+    const ids = folder.dialogs.map((d) => String(d.id));
+    const selected = ids.filter((id) => selectedChatIds.has(id)).length;
+    if (selected === 0) return { checked: false, indeterminate: false };
+    if (selected === ids.length) return { checked: true, indeterminate: false };
+    return { checked: false, indeterminate: true };
+  }, [selectedChatIds]);
+
+  const filterFoldersBySearch = useCallback((folders: FolderWithDialogs[], q: string) => {
+    const qq = q.trim().toLowerCase();
+    if (!qq) return folders;
+    return folders
+      .map((f) => ({
+        ...f,
+        dialogs: f.title?.toLowerCase().includes(qq)
+          ? f.dialogs
+          : f.dialogs.filter((d) => d.name?.toLowerCase().includes(qq)),
+      }))
+      .filter((f) => f.dialogs.length > 0);
+  }, []);
+
   const handleSaveAndSync = async () => {
     if (!connectingAccountId || selectedChatIds.size === 0) {
       setError('Выберите хотя бы один чат');
@@ -400,13 +452,28 @@ export default function BDAccountsPage() {
     setStartingSync(true);
     setError(null);
     try {
-      const chatsToSave = dialogs.filter((d) => selectedChatIds.has(String(d.id))).map((d) => ({
-        id: d.id,
-        name: d.name,
-        isUser: d.isUser,
-        isGroup: d.isGroup,
-        isChannel: d.isChannel,
-      }));
+      const allDialogsFromFolders: Dialog[] = dialogsByFolders.flatMap((f) => f.dialogs);
+      const idToDialog = new Map<string, Dialog>();
+      for (const d of allDialogsFromFolders) idToDialog.set(String(d.id), d);
+      const chatsToSave: { id: string; name: string; isUser: boolean; isGroup: boolean; isChannel: boolean }[] = [];
+      for (const id of selectedChatIds) {
+        const d = idToDialog.get(id);
+        if (d) {
+          chatsToSave.push({ id: d.id, name: d.name, isUser: d.isUser, isGroup: d.isGroup, isChannel: d.isChannel });
+        } else {
+          const row = syncChatsList.find((c) => String(c.telegram_chat_id) === id);
+          if (row) {
+            const pt = (row.peer_type ?? 'user').toLowerCase();
+            chatsToSave.push({
+              id: String(row.telegram_chat_id),
+              name: (row.title ?? '').trim() || id,
+              isUser: pt === 'user',
+              isGroup: pt === 'chat',
+              isChannel: pt === 'channel',
+            });
+          }
+        }
+      }
       await apiClient.post(`/api/bd-accounts/${connectingAccountId}/sync-chats`, { chats: chatsToSave });
       await apiClient.post(`/api/bd-accounts/${connectingAccountId}/sync-start`);
       setSyncProgress({ done: 0, total: chatsToSave.length });
@@ -540,15 +607,15 @@ export default function BDAccountsPage() {
 
       {/* Connect Modal */}
       {showConnectModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <Card className="w-full max-w-md p-6 m-4">
-            <div className="flex items-center justify-between mb-4">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <Card className={`w-full p-6 m-4 flex flex-col ${connectStep === 'select-chats' ? 'max-w-2xl max-h-[88vh]' : 'max-w-md'}`}>
+            <div className="flex items-center justify-between mb-4 shrink-0">
               <h2 className="text-xl font-bold text-gray-900 dark:text-white">
                 {connectStep === 'credentials' && 'Подключить Telegram аккаунт'}
                 {connectStep === 'qr' && 'Вход по QR-коду'}
                 {connectStep === 'code' && 'Введите код из SMS'}
                 {connectStep === 'password' && 'Введите пароль 2FA'}
-                {connectStep === 'select-chats' && 'Выберите чаты для синхронизации'}
+                {connectStep === 'select-chats' && 'Чаты для синхронизации'}
               </h2>
               <Button variant="outline" size="sm" onClick={handleCloseModal}>
                 ✕
@@ -556,12 +623,12 @@ export default function BDAccountsPage() {
             </div>
 
             {error && (
-              <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3 mb-4">
+              <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3 mb-4 shrink-0">
                 <p className="text-sm text-red-800 dark:text-red-200">{error}</p>
               </div>
             )}
 
-            <div className="space-y-4">
+            <div className={`flex flex-col ${connectStep === 'select-chats' ? 'flex-1 min-h-0 overflow-hidden' : ''} space-y-4`}>
               {/* Step 1: Credentials — выбор способа: по номеру или по QR */}
               {connectStep === 'credentials' && (
                 <>
@@ -605,41 +672,6 @@ export default function BDAccountsPage() {
                       />
                     </div>
                   )}
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                      API ID
-                    </label>
-                    <Input
-                      type="text"
-                      value={connectForm.apiId}
-                      onChange={(e) => setConnectForm({ ...connectForm, apiId: e.target.value })}
-                      placeholder="12345"
-                    />
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Получите на{' '}
-                      <a
-                        href="https://my.telegram.org/apps"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-blue-600 hover:underline"
-                      >
-                        my.telegram.org/apps
-                      </a>
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                      API Hash
-                    </label>
-                    <Input
-                      type="text"
-                      value={connectForm.apiHash}
-                      onChange={(e) => setConnectForm({ ...connectForm, apiHash: e.target.value })}
-                      placeholder="abcdef1234567890"
-                    />
-                  </div>
                 </>
               )}
 
@@ -768,66 +800,219 @@ export default function BDAccountsPage() {
                 </>
               )}
 
-              {/* Step 4: Select chats for sync */}
+              {/* Step 4: Select chats for sync — папки с галочкой «все в папке», поиск, удобный список */}
               {connectStep === 'select-chats' && (
-                <>
+                <div className="flex flex-col min-h-0 flex-1">
                   {connectingAccountId && (
-                    <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-3 mb-4">
+                    <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl p-4 mb-4 shrink-0">
                       <p className="text-sm text-green-800 dark:text-green-200 font-medium">Аккаунт подключён</p>
-                      <p className="text-xs text-green-700 dark:text-green-300 mt-0.5">
-                        Выберите чаты для синхронизации или пропустите и настройте позже в разделе «Мессенджер».
+                      <p className="text-xs text-green-700 dark:text-green-300 mt-1">
+                        Выберите папки или отдельные чаты — они будут отображаться в Мессенджере. Можно настроить позже.
                       </p>
                     </div>
                   )}
-                  <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
-                    Выберите папки или чаты для синхронизации. Только выбранные чаты будут отображаться в Мессенджере.
-                  </p>
                   {syncProgress !== null ? (
-                    <div className="space-y-2">
-                      <div className="flex justify-between text-sm">
-                        <span>Синхронизация… {syncProgress.currentTitle && `(${syncProgress.currentTitle})`}</span>
-                        <span>{syncProgress.done} / {syncProgress.total}</span>
-                      </div>
-                      <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-blue-600 transition-all duration-300"
-                          style={{ width: syncProgress.total ? `${(100 * syncProgress.done) / syncProgress.total}%` : '0%' }}
-                        />
+                    <div className="space-y-3 py-4 shrink-0">
+                      <p className="text-sm text-gray-700 dark:text-gray-300">
+                        Синхронизация… {syncProgress.currentTitle && <span className="text-muted-foreground">({syncProgress.currentTitle})</span>}
+                      </p>
+                      <div className="flex items-center gap-3">
+                        <div className="flex-1 h-2.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-primary transition-all duration-300 rounded-full"
+                            style={{ width: syncProgress.total ? `${(100 * syncProgress.done) / syncProgress.total}%` : '0%' }}
+                          />
+                        </div>
+                        <span className="text-sm font-medium tabular-nums">{syncProgress.done} / {syncProgress.total}</span>
                       </div>
                     </div>
                   ) : loadingDialogs ? (
-                    <div className="flex items-center justify-center py-8">
-                      <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+                    <div className="flex flex-col items-center justify-center py-12 flex-1">
+                      <Loader2 className="w-10 h-10 animate-spin text-primary mb-3" />
+                      <p className="text-sm text-muted-foreground">Загружаем папки и чаты…</p>
                     </div>
                   ) : (
-                    <div className="max-h-64 overflow-y-auto space-y-2 border border-gray-200 dark:border-gray-700 rounded-lg p-2">
-                      {dialogs.map((dialog) => (
-                        <label
-                          key={dialog.id}
-                          className="flex items-center gap-3 p-2 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={selectedChatIds.has(String(dialog.id))}
-                            onChange={() => toggleChatSelection(String(dialog.id))}
-                            className="rounded border-gray-300"
+                    <>
+                      <div className="mb-3 shrink-0">
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Поиск по чатам и папкам</label>
+                        <div className="relative">
+                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                          <Input
+                            type="text"
+                            placeholder="Введите название чата или папки…"
+                            value={selectChatsSearch}
+                            onChange={(e) => setSelectChatsSearch(e.target.value)}
+                            className="pl-9 rounded-lg border-gray-300 dark:border-gray-600"
                           />
-                          <span className="font-medium text-sm truncate">{dialog.name}</span>
-                          {dialog.isUser && <span className="text-xs text-blue-600">User</span>}
-                          {dialog.isGroup && <span className="text-xs text-green-600">Group</span>}
-                          {dialog.isChannel && <span className="text-xs text-purple-600">Channel</span>}
-                        </label>
-                      ))}
-                      {dialogs.length === 0 && (
-                        <p className="text-sm text-gray-500 py-4 text-center">Нет диалогов</p>
-                      )}
-                    </div>
+                          {selectChatsSearch.trim() && (
+                            <button
+                              type="button"
+                              onClick={() => setSelectChatsSearch('')}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-700"
+                              aria-label="Очистить поиск"
+                            >
+                              <XCircle className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 mb-2 shrink-0 flex-wrap">
+                        <span className="text-xs text-muted-foreground">Тип чатов:</span>
+                        <div className="flex rounded-lg border border-gray-200 dark:border-gray-700 p-0.5 bg-gray-100 dark:bg-gray-800">
+                          {(['all', 'personal', 'groups'] as const).map((key) => (
+                            <button
+                              key={key}
+                              type="button"
+                              onClick={() => setChatTypeFilter(key)}
+                              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                                chatTypeFilter === key
+                                  ? 'bg-card text-foreground shadow-sm'
+                                  : 'text-muted-foreground hover:text-foreground'
+                              }`}
+                            >
+                              {key === 'all' ? 'Все' : key === 'personal' ? 'Личные' : 'Группы'}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <p className="text-xs text-muted-foreground mb-2 shrink-0">
+                        Отметьте папку — выберутся все чаты в ней. Или отметьте только нужные чаты.
+                      </p>
+                      <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/30 p-3 space-y-4">
+                        {(() => {
+                          const filteredFolders = filterFoldersBySearch(dialogsByFolders, selectChatsSearch);
+                          return (
+                            <>
+                              {filteredFolders.map((folder) => {
+                                const folderState = getFolderCheckState(folder);
+                                const folderIdNum = Number(folder.id);
+                                const isExpanded = expandedFolderId === folderIdNum;
+                                const displayedDialogs =
+                                  chatTypeFilter === 'all'
+                                    ? folder.dialogs
+                                    : chatTypeFilter === 'personal'
+                                      ? folder.dialogs.filter((d) => d.isUser)
+                                      : folder.dialogs.filter((d) => d.isGroup);
+                                return (
+                                  <div key={folder.id} className="rounded-lg border border-gray-200 dark:border-gray-700 bg-card overflow-hidden">
+                                    <div className="flex items-center gap-2 p-3 hover:bg-gray-50 dark:hover:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800">
+                                      <label className="flex items-center shrink-0 cursor-pointer" onClick={(e) => e.stopPropagation()}>
+                                        <input
+                                          type="checkbox"
+                                          ref={(el) => { if (el) el.indeterminate = folderState.indeterminate; }}
+                                          checked={folderState.checked}
+                                          onChange={() => toggleFolderSelection(folder)}
+                                          className="rounded border-gray-300 w-4 h-4"
+                                        />
+                                      </label>
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleFolderExpanded(folderIdNum)}
+                                        className="flex items-center gap-2 flex-1 min-w-0 text-left cursor-pointer"
+                                      >
+                                        {folder.emoticon ? (
+                                          <span className="text-lg shrink-0 w-6 text-center leading-none" aria-hidden>{folder.emoticon}</span>
+                                        ) : (
+                                          <FolderOpen className="w-4 h-4 text-muted-foreground shrink-0" />
+                                        )}
+                                        <span className="font-semibold text-sm text-foreground truncate">{folder.title}</span>
+                                        <span className="text-xs text-muted-foreground shrink-0">{displayedDialogs.length}</span>
+                                        {isExpanded ? (
+                                          <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0 ml-auto" />
+                                        ) : (
+                                          <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0 ml-auto" />
+                                        )}
+                                      </button>
+                                    </div>
+                                    {isExpanded && (
+                                      <div className="max-h-48 overflow-y-auto">
+                                        {displayedDialogs.map((dialog) => (
+                                          <label
+                                            key={`${folder.id}-${dialog.id}`}
+                                            className="flex items-center gap-3 px-3 py-2 pl-10 hover:bg-gray-50 dark:hover:bg-gray-800/30 cursor-pointer border-t border-gray-100 dark:border-gray-800/50 first:border-t-0"
+                                          >
+                                            <input
+                                              type="checkbox"
+                                              checked={selectedChatIds.has(String(dialog.id))}
+                                              onChange={() => toggleChatSelection(String(dialog.id))}
+                                              className="rounded border-gray-300 w-4 h-4"
+                                            />
+                                            <span className="font-medium text-sm truncate flex-1">{dialog.name}</span>
+                                            {dialog.isUser && <span className="text-xs text-blue-600 dark:text-blue-400 shrink-0">Личный</span>}
+                                            {dialog.isGroup && <span className="text-xs text-green-600 dark:text-green-400 shrink-0">Группа</span>}
+                                            {dialog.isChannel && <span className="text-xs text-purple-600 dark:text-purple-400 shrink-0">Канал</span>}
+                                          </label>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              {filteredFolders.length === 0 && selectChatsSearch.trim() && (
+                                <p className="text-sm text-muted-foreground py-4 text-center">Ничего не найдено по запросу «{selectChatsSearch.trim()}»</p>
+                              )}
+                              {filteredFolders.length === 0 && !selectChatsSearch.trim() && dialogsByFolders.length === 0 && (
+                                <p className="text-sm text-muted-foreground py-6 text-center">Нет папок и чатов. Подождите загрузки или проверьте подключение.</p>
+                              )}
+                            </>
+                          );
+                        })()}
+                        {(() => {
+                          const idsInFolders = new Set(dialogsByFolders.flatMap((f) => f.dialogs.map((d) => String(d.id))));
+                          const otherSyncChats = syncChatsList.filter((c) => !idsInFolders.has(String(c.telegram_chat_id)));
+                          if (otherSyncChats.length === 0) return null;
+                          const q = selectChatsSearch.trim().toLowerCase();
+                          const filteredOther = q ? otherSyncChats.filter((r) => (r.title ?? r.telegram_chat_id).toLowerCase().includes(q)) : otherSyncChats;
+                          if (filteredOther.length === 0 && q) return null;
+                          const byFolder = new Map<number | null, SyncChatRow[]>();
+                          for (const row of filteredOther) {
+                            const fid = row.folder_id ?? null;
+                            if (!byFolder.has(fid)) byFolder.set(fid, []);
+                            byFolder.get(fid)!.push(row);
+                          }
+                          const folderTitles = new Map<number | null, string>();
+                          folderTitles.set(null, 'Без папки');
+                          for (const f of dialogsByFolders) folderTitles.set(f.id, f.title);
+                          return (
+                            <div className="rounded-lg border border-dashed border-gray-300 dark:border-gray-600 bg-card/50 p-3 mt-2">
+                              <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                                <MessageSquare className="w-3.5 h-3.5" /> Другие выбранные чаты
+                              </div>
+                              {Array.from(byFolder.entries()).map(([folderId, rows]) => (
+                                <div key={folderId ?? 'null'} className="space-y-0.5">
+                                  {folderId !== null && (
+                                    <div className="text-xs text-muted-foreground pl-6 mt-1.5">{folderTitles.get(folderId) ?? `Папка ${folderId}`}</div>
+                                  )}
+                                  {rows.map((row) => (
+                                    <label
+                                      key={row.telegram_chat_id}
+                                      className="flex items-center gap-3 pl-6 py-1.5 hover:bg-gray-50 dark:hover:bg-gray-800/30 rounded cursor-pointer"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedChatIds.has(String(row.telegram_chat_id))}
+                                        onChange={() => toggleChatSelection(String(row.telegram_chat_id))}
+                                        className="rounded border-gray-300 w-4 h-4"
+                                      />
+                                      <span className="font-medium text-sm truncate">{row.title || row.telegram_chat_id}</span>
+                                    </label>
+                                  ))}
+                                </div>
+                              ))}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-3 shrink-0">
+                        Выбрано чатов: <strong className="text-foreground">{selectedChatIds.size}</strong>
+                      </p>
+                    </>
                   )}
-                </>
+                </div>
               )}
             </div>
 
-            <div className="flex gap-2 mt-6">
+            <div className="flex gap-2 mt-6 shrink-0">
               {connectStep === 'credentials' && (
                 <>
                   <Button

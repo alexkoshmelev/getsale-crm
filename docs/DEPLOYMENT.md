@@ -38,6 +38,9 @@ docker-compose down -v
 ```env
 OPENAI_API_KEY=your_openai_key
 TELEGRAM_BOT_TOKEN=your_telegram_token
+# Для BD Accounts (подключение Telegram аккаунтов) — получить на https://my.telegram.org/apps
+TELEGRAM_API_ID=12345
+TELEGRAM_API_HASH=your_api_hash
 ```
 
 ## Продакшн (Kubernetes)

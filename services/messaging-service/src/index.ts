@@ -59,10 +59,60 @@ app.get('/api/messaging/inbox', async (req, res) => {
 });
 
 // Get messages for a contact/channel (optionally scoped to a BD account)
+// При bdAccountId + channelId: если запрошена страница, которой ещё нет в БД, догружаем из Telegram (load-older-history)
 app.get('/api/messaging/messages', async (req, res) => {
   try {
     const user = getUser(req);
     const { contactId, channel, channelId, bdAccountId, page = 1, limit = 50 } = req.query;
+
+    const pageNum = Math.max(1, parseInt(String(page), 10));
+    const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10)));
+    const bdId = bdAccountId && String(bdAccountId).trim() ? String(bdAccountId).trim() : null;
+    const chId = channelId && String(channelId).trim() ? String(channelId).trim() : null;
+
+    // Если нужна более старая страница и чат из Telegram — попробовать догрузить из Telegram
+    if (bdId && chId && channel === 'telegram' && pageNum > 1) {
+      let countResult = await pool.query(
+        'SELECT COUNT(*) FROM messages WHERE organization_id = $1 AND channel = $2 AND channel_id = $3 AND bd_account_id = $4',
+        [user.organizationId, channel || 'telegram', chId, bdId]
+      );
+      let total = parseInt(countResult.rows[0].count);
+      const needOffset = (pageNum - 1) * limitNum;
+      if (needOffset >= total) {
+        const exhaustedRow = await pool.query(
+          'SELECT history_exhausted FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+          [bdId, chId]
+        );
+        const exhausted = exhaustedRow.rows.length > 0 && (exhaustedRow.rows[0] as any).history_exhausted === true;
+        if (!exhausted) {
+          try {
+            const loadRes = await fetch(
+              `${BD_ACCOUNTS_SERVICE_URL}/api/bd-accounts/${bdId}/chats/${chId}/load-older-history`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-user-id': user.id || '',
+                  'x-organization-id': user.organizationId || '',
+                },
+              }
+            );
+            if (loadRes.ok) {
+              const data = await loadRes.json();
+              if (data.added > 0) {
+                countResult = await pool.query(
+                  'SELECT COUNT(*) FROM messages WHERE organization_id = $1 AND channel = $2 AND channel_id = $3 AND bd_account_id = $4',
+                  [user.organizationId, channel || 'telegram', chId, bdId]
+                );
+                total = parseInt(countResult.rows[0].count);
+              }
+            }
+          } catch (err) {
+            console.warn('Load older history request failed:', err);
+          }
+        }
+      }
+    }
 
     let query = 'SELECT * FROM messages WHERE organization_id = $1';
     const params: any[] = [user.organizationId];
@@ -77,46 +127,59 @@ app.get('/api/messaging/messages', async (req, res) => {
       params.push(channel, channelId);
     }
 
-    if (bdAccountId && String(bdAccountId).trim()) {
+    if (bdId) {
       query += ` AND bd_account_id = $${params.length + 1}`;
-      params.push(bdAccountId);
+      params.push(bdId);
     }
 
-    // Pagination: last N by time (DESC), then return in chronological order (oldest first — last message at bottom like Telegram)
-    const offset = (parseInt(String(page)) - 1) * parseInt(String(limit));
+    const offset = (pageNum - 1) * limitNum;
     query += ` ORDER BY COALESCE(telegram_date, created_at) DESC NULLS LAST LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-    params.push(parseInt(String(limit)), offset);
+    params.push(limitNum, offset);
 
     const result = await pool.query(query, params);
     const rows = (result.rows as any[]).slice().reverse();
 
-    // Get total count
     let countQuery = 'SELECT COUNT(*) FROM messages WHERE organization_id = $1';
     const countParams: any[] = [user.organizationId];
     if (contactId) {
-      countQuery += ` AND contact_id = $2`;
+      countQuery += ` AND contact_id = $${countParams.length + 1}`;
       countParams.push(contactId);
     }
     if (channel && channelId) {
       countQuery += ` AND channel = $${countParams.length + 1} AND channel_id = $${countParams.length + 2}`;
       countParams.push(channel, channelId);
     }
-    if (bdAccountId && String(bdAccountId).trim()) {
+    if (bdId) {
       countQuery += ` AND bd_account_id = $${countParams.length + 1}`;
-      countParams.push(bdAccountId);
+      countParams.push(bdId);
     }
-    const countResult = await pool.query(countQuery, countParams);
-    const total = parseInt(countResult.rows[0].count);
+    const countResult2 = await pool.query(countQuery, countParams);
+    const total = parseInt(countResult2.rows[0].count);
 
-    res.json({
+    let historyExhausted: boolean | undefined;
+    if (bdId && chId) {
+      const exRow = await pool.query(
+        'SELECT history_exhausted FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+        [bdId, chId]
+      );
+      historyExhausted = exRow.rows.length > 0 ? (exRow.rows[0] as any).history_exhausted === true : undefined;
+    }
+
+    const payload: {
+      messages: any[];
+      pagination: { page: number; limit: number; total: number; totalPages: number };
+      historyExhausted?: boolean;
+    } = {
       messages: rows,
       pagination: {
-        page: parseInt(String(page)),
-        limit: parseInt(String(limit)),
+        page: pageNum,
+        limit: limitNum,
         total,
-        totalPages: Math.ceil(total / parseInt(String(limit))),
+        totalPages: Math.ceil(total / limitNum),
       },
-    });
+    };
+    if (historyExhausted !== undefined) payload.historyExhausted = historyExhausted;
+    res.json(payload);
   } catch (error) {
     console.error('Error fetching messages:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -146,17 +209,73 @@ app.get('/api/messaging/messages/:id', async (req, res) => {
 });
 
 // Get all chats (from DB only; optionally filtered by bd_account_id so only allowed sync chats appear)
+// При bdAccountId: показываем все чаты из bd_account_sync_chats (в т.ч. без сообщений), а не только те, у кого есть сообщения в messages
 app.get('/api/messaging/chats', async (req, res) => {
   try {
     const user = getUser(req);
     const { channel, bdAccountId } = req.query;
 
+    const orgId = user.organizationId;
+    const params: any[] = [orgId];
+
+    // Если выбран аккаунт — список строим из sync_chats, чтобы показывать все выбранные чаты (даже без сообщений)
+    if (bdAccountId && String(bdAccountId).trim()) {
+      if (channel && String(channel) !== 'telegram') {
+        return res.json([]);
+      }
+      params.push(String(bdAccountId).trim());
+
+      const query = `
+        SELECT
+          'telegram' AS channel,
+          s.telegram_chat_id::text AS channel_id,
+          s.bd_account_id,
+          msg.contact_id,
+          s.peer_type,
+          c.first_name,
+          c.last_name,
+          c.email,
+          c.telegram_id,
+          c.display_name,
+          c.username,
+          COALESCE(
+            c.display_name,
+            CASE WHEN NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), '') IS NOT NULL
+                 AND TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) NOT LIKE 'Telegram %'
+                 THEN TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) ELSE NULL END,
+            c.username,
+            NULLIF(TRIM(COALESCE(s.title, '')), ''),
+            c.telegram_id::text,
+            s.telegram_chat_id::text
+          ) AS name,
+          COALESCE(msg.unread_count, 0)::int AS unread_count,
+          msg.last_message_at,
+          msg.last_message
+        FROM bd_account_sync_chats s
+        JOIN bd_accounts a ON a.id = s.bd_account_id AND a.organization_id = $1
+        LEFT JOIN LATERAL (
+          SELECT
+            (SELECT m0.contact_id FROM messages m0 WHERE m0.organization_id = a.organization_id AND m0.channel = 'telegram' AND m0.channel_id = s.telegram_chat_id::text AND m0.bd_account_id = s.bd_account_id LIMIT 1) AS contact_id,
+            (SELECT COUNT(*)::int FROM messages m WHERE m.organization_id = a.organization_id AND m.channel = 'telegram' AND m.channel_id = s.telegram_chat_id::text AND m.bd_account_id = s.bd_account_id AND m.unread = true) AS unread_count,
+            (SELECT MAX(COALESCE(m.telegram_date, m.created_at)) FROM messages m WHERE m.organization_id = a.organization_id AND m.channel = 'telegram' AND m.channel_id = s.telegram_chat_id::text AND m.bd_account_id = s.bd_account_id) AS last_message_at,
+            (SELECT m2.content FROM messages m2 WHERE m2.organization_id = a.organization_id AND m2.channel = 'telegram' AND m2.channel_id = s.telegram_chat_id::text AND m2.bd_account_id = s.bd_account_id ORDER BY COALESCE(m2.telegram_date, m2.created_at) DESC LIMIT 1) AS last_message
+        ) msg ON true
+        LEFT JOIN contacts c ON c.id = msg.contact_id
+        WHERE s.bd_account_id = $2 AND s.peer_type IN ('user', 'chat')
+        ORDER BY msg.last_message_at DESC NULLS LAST, s.telegram_chat_id
+      `;
+      const result = await pool.query(query, params);
+      return res.json(result.rows);
+    }
+
+    // Без bdAccountId — как раньше: чаты из messages (только те, у кого есть сообщения)
     let query = `
       SELECT 
         m.channel,
         m.channel_id,
         m.bd_account_id,
         m.contact_id,
+        s.peer_type,
         c.first_name,
         c.last_name,
         c.email,
@@ -181,24 +300,14 @@ app.get('/api/messaging/chats', async (req, res) => {
       LEFT JOIN bd_account_sync_chats s ON s.bd_account_id = m.bd_account_id AND s.telegram_chat_id = m.channel_id
       WHERE m.organization_id = $1
     `;
-    const params: any[] = [user.organizationId];
 
     if (channel) {
       query += ` AND m.channel = $${params.length + 1}`;
       params.push(channel);
     }
 
-    // If bdAccountId provided, only return chats that are in bd_account_sync_chats for this account
-    if (bdAccountId) {
-      query += ` AND m.bd_account_id = $${params.length + 1} AND EXISTS (
-        SELECT 1 FROM bd_account_sync_chats s
-        WHERE s.bd_account_id = m.bd_account_id AND s.telegram_chat_id = m.channel_id
-      )`;
-      params.push(bdAccountId);
-    }
-
     query += `
-      GROUP BY m.organization_id, m.channel, m.channel_id, m.bd_account_id, m.contact_id, c.first_name, c.last_name, c.email, c.telegram_id, c.display_name, c.username, s.title
+      GROUP BY m.organization_id, m.channel, m.channel_id, m.bd_account_id, m.contact_id, s.peer_type, c.first_name, c.last_name, c.email, c.telegram_id, c.display_name, c.username, s.title
       ORDER BY last_message_at DESC NULLS LAST
     `;
 

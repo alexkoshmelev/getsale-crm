@@ -1,17 +1,17 @@
-# Migrations Dockerfile. Build context: ./migrations (see deploy.yml).
-# Build: docker build -f docker/migrations/Dockerfile ./migrations
+# Migrations Dockerfile. Build context: repo root (works on Windows and in CI).
+# Build: docker build -f docker/migrations/Dockerfile .
 FROM node:18-alpine
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY migrations/package*.json ./
 RUN npm install
 
-COPY migrations/ ./migrations/
-COPY seeds/ ./seeds/
-COPY knexfile.ts ./
-COPY run-migrations.ts ./
-COPY tsconfig.json ./
+COPY migrations/migrations/ ./migrations/
+COPY migrations/seeds/ ./seeds/
+COPY migrations/knexfile.ts ./
+COPY migrations/run-migrations.ts ./
+COPY migrations/tsconfig.json ./
 
 # Clean up any old node-pg-migrate files (if they exist)
 RUN find ./migrations -name "001_*.ts" -type f -delete 2>/dev/null || true

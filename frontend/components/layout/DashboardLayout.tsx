@@ -38,10 +38,10 @@ interface DashboardLayoutProps {
 }
 
 const productItems: { href: string; i18nKey: string; icon: typeof LayoutDashboard }[] = [
+  { href: '/dashboard/messaging', i18nKey: 'messaging', icon: MessageSquare },
   { href: '/dashboard', i18nKey: 'home', icon: LayoutDashboard },
   { href: '/dashboard/crm', i18nKey: 'crm', icon: Building2 },
   { href: '/dashboard/pipeline', i18nKey: 'pipeline', icon: Workflow },
-  { href: '/dashboard/messaging', i18nKey: 'messaging', icon: MessageSquare },
   { href: '/dashboard/bd-accounts', i18nKey: 'bdAccounts', icon: Smartphone },
   { href: '/dashboard/analytics', i18nKey: 'analytics', icon: BarChart3 },
   { href: '/dashboard/team', i18nKey: 'team', icon: Users },

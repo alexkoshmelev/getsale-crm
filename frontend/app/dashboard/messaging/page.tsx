@@ -11,7 +11,7 @@ import {
   CheckCircle2, XCircle, Loader2, Settings, Trash2,
   Mic, Paperclip, FileText, Image, Video, File,
   Sparkles, Zap, History, FileCode, Bot, Workflow,
-  ChevronDown, X, Clock, UserCircle, Tag, BarChart3,
+  ChevronDown, ChevronRight, ChevronLeft, X, Clock, UserCircle, Tag, BarChart3,
   Music, Film
 } from 'lucide-react';
 import Button from '@/components/ui/Button';
@@ -43,6 +43,7 @@ interface Chat {
   display_name: string | null;  // кастомное имя контакта/лида
   username: string | null;       // Telegram @username
   name: string | null;
+  peer_type?: string | null;    // 'user' | 'chat' | 'channel' — для фильтра Личные/Группы
   unread_count: number;
   last_message_at: string;
   last_message: string | null;
@@ -259,10 +260,18 @@ export default function MessagingPage() {
   const [loading, setLoading] = useState(true);
   const [loadingChats, setLoadingChats] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
-  const [sendingMessage, setSendingMessage] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [messagesPage, setMessagesPage] = useState(1);
+  const [messagesTotal, setMessagesTotal] = useState(0);
+  const [historyExhausted, setHistoryExhausted] = useState(false);
   const [accountSearch, setAccountSearch] = useState('');
   const [chatSearch, setChatSearch] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesTopSentinelRef = useRef<HTMLDivElement>(null);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
+  const scrollRestoreRef = useRef<{ height: number; top: number } | null>(null);
+  const MESSAGES_PAGE_SIZE = 50;
+  const hasMoreMessages = messagesPage * MESSAGES_PAGE_SIZE < messagesTotal || !historyExhausted;
   const [showCommandsMenu, setShowCommandsMenu] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -276,6 +285,31 @@ export default function MessagingPage() {
   const [savingDisplayName, setSavingDisplayName] = useState(false);
   const [showChatHeaderMenu, setShowChatHeaderMenu] = useState(false);
   const chatHeaderMenuRef = useRef<HTMLDivElement>(null);
+  const STORAGE_KEYS = { accountsPanel: 'messaging.accountsPanelCollapsed', chatsPanel: 'messaging.chatsPanelCollapsed' };
+
+  const [accountsPanelCollapsed, setAccountsPanelCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return localStorage.getItem(STORAGE_KEYS.accountsPanel) === 'true';
+    } catch { return false; }
+  });
+  const [chatsPanelCollapsed, setChatsPanelCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return localStorage.getItem(STORAGE_KEYS.chatsPanel) === 'true';
+    } catch { return false; }
+  });
+
+  const setAccountsCollapsed = useCallback((v: boolean) => {
+    setAccountsPanelCollapsed(v);
+    try { localStorage.setItem(STORAGE_KEYS.accountsPanel, String(v)); } catch {}
+  }, []);
+  const setChatsCollapsed = useCallback((v: boolean) => {
+    setChatsPanelCollapsed(v);
+    try { localStorage.setItem(STORAGE_KEYS.chatsPanel, String(v)); } catch {}
+  }, []);
+
+  const [chatTypeFilter, setChatTypeFilter] = useState<'all' | 'personal' | 'groups'>('all');
 
   useEffect(() => {
     fetchAccounts();
@@ -539,6 +573,7 @@ export default function MessagingPage() {
         display_name: chat.display_name ?? null,
         username: chat.username ?? null,
         name: chat.name || null,
+        peer_type: chat.peer_type ?? null,
         unread_count: parseInt(chat.unread_count) || 0,
         last_message_at: chat.last_message_at || new Date().toISOString(),
         last_message: chat.last_message,
@@ -579,24 +614,86 @@ export default function MessagingPage() {
 
   const fetchMessages = async (accountId: string, chat: Chat) => {
     setLoadingMessages(true);
+    setMessagesPage(1);
+    setMessagesTotal(0);
+    setHistoryExhausted(false);
     try {
       const response = await apiClient.get('/api/messaging/messages', {
         params: {
           channel: chat.channel,
           channelId: chat.channel_id,
           bdAccountId: accountId,
-          limit: 100,
+          page: 1,
+          limit: MESSAGES_PAGE_SIZE,
         },
       });
       const list = response.data.messages || [];
       setMessages(list);
+      setMessagesTotal(response.data.pagination?.total ?? list.length);
+      setHistoryExhausted(response.data.historyExhausted === true);
     } catch (error: any) {
       console.error('Error fetching messages:', error);
       setMessages([]);
+      setMessagesTotal(0);
+      setHistoryExhausted(false);
     } finally {
       setLoadingMessages(false);
     }
   };
+
+  const loadOlderMessages = useCallback(async () => {
+    if (!selectedAccountId || !selectedChat || loadingOlder || !hasMoreMessages) return;
+    const scrollEl = messagesScrollRef.current;
+    if (scrollEl) scrollRestoreRef.current = { height: scrollEl.scrollHeight, top: scrollEl.scrollTop };
+    setLoadingOlder(true);
+    const nextPage = messagesPage + 1;
+    try {
+      const response = await apiClient.get('/api/messaging/messages', {
+        params: {
+          channel: selectedChat.channel,
+          channelId: selectedChat.channel_id,
+          bdAccountId: selectedAccountId,
+          page: nextPage,
+          limit: MESSAGES_PAGE_SIZE,
+        },
+      });
+      const list = response.data.messages || [];
+      setMessages((prev) => [...list, ...prev]);
+      setMessagesPage(nextPage);
+      setMessagesTotal(response.data.pagination?.total ?? messagesTotal + list.length);
+      setHistoryExhausted(response.data.historyExhausted === true);
+    } catch (error: any) {
+      console.error('Error loading older messages:', error);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [selectedAccountId, selectedChat, loadingOlder, hasMoreMessages, messagesPage, messagesTotal]);
+
+  // Восстановить позицию скролла после подгрузки старых сообщений (prepend)
+  useEffect(() => {
+    const restore = scrollRestoreRef.current;
+    if (!restore || !messagesScrollRef.current) return;
+    scrollRestoreRef.current = null;
+    const el = messagesScrollRef.current;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight - restore.height + restore.top;
+    });
+  }, [messages.length]);
+
+  // Подгрузка старых сообщений при скролле вверх (как в Telegram)
+  useEffect(() => {
+    const el = messagesTopSentinelRef.current;
+    if (!el || !selectedChat || !hasMoreMessages || loadingOlder) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const [e] = entries;
+        if (e?.isIntersecting && hasMoreMessages && !loadingOlder) loadOlderMessages();
+      },
+      { root: el.closest('.overflow-y-auto') || null, rootMargin: '100px', threshold: 0 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [selectedChat?.channel_id, hasMoreMessages, loadingOlder, loadOlderMessages]);
 
   const markAsRead = async () => {
     if (!selectedChat) return;
@@ -832,10 +929,18 @@ export default function MessagingPage() {
   const selectedAccount = selectedAccountId ? accounts.find((a) => a.id === selectedAccountId) : null;
   const isSelectedAccountMine = selectedAccount?.is_owner === true;
 
-  const filteredChats = chats.filter((chat) => {
-    const name = getChatName(chat).toLowerCase();
-    return name.includes(chatSearch.toLowerCase());
-  });
+  const filteredChats = chats
+    .filter((chat) => {
+      const name = getChatName(chat).toLowerCase();
+      return name.includes(chatSearch.toLowerCase());
+    })
+    .filter((chat) => {
+      if (chatTypeFilter === 'all') return true;
+      const pt = (chat.peer_type ?? '').toLowerCase();
+      if (chatTypeFilter === 'personal') return pt === 'user';
+      if (chatTypeFilter === 'groups') return pt === 'chat';
+      return true;
+    });
 
   if (loading) {
     return (
@@ -847,32 +952,61 @@ export default function MessagingPage() {
 
   return (
     <div className="relative flex h-[calc(100vh-6.5rem)] min-h-0 bg-card -m-6 rounded-lg border border-border overflow-hidden">
-      {/* BD Accounts Sidebar */}
-      <div className="w-64 min-h-0 bg-muted/50 border-r border-border flex flex-col">
-        <div className="p-4 border-b border-border">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="font-semibold text-foreground">{t('messaging.bdAccounts')}</h3>
-            <Button
-              size="sm"
-              onClick={() => window.location.href = '/dashboard/bd-accounts'}
-              className="p-1"
+      {/* BD Accounts Sidebar — collapse/expand: в свёрнутом виде узкая полоска с кнопкой «Развернуть» */}
+      <div
+        className={`min-h-0 bg-muted/50 border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${accountsPanelCollapsed ? 'w-12' : 'w-64'}`}
+        aria-expanded={!accountsPanelCollapsed}
+      >
+        {accountsPanelCollapsed ? (
+          <div className="flex flex-col items-center py-2 flex-1 min-h-0 justify-start border-b border-border">
+            <button
+              type="button"
+              onClick={() => setAccountsCollapsed(false)}
+              className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground flex flex-col items-center gap-0.5 w-full"
+              title={t('messaging.bdAccounts') + ' — развернуть'}
+              aria-label={t('messaging.bdAccounts') + ', развернуть панель'}
             >
-              <Plus className="w-4 h-4" />
-            </Button>
+              <UserCircle className="w-5 h-5 shrink-0" aria-hidden />
+              <ChevronRight className="w-4 h-4 shrink-0" aria-hidden />
+            </button>
           </div>
-          <div className="relative">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-muted-foreground" />
-            <Input
-              type="text"
-              placeholder={t('common.search')}
-              value={accountSearch}
-              onChange={(e) => setAccountSearch(e.target.value)}
-              className="pl-9 text-sm"
-            />
+        ) : (
+          <>
+        <div className="p-4 border-b border-border flex items-center justify-between shrink-0">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-foreground">{t('messaging.bdAccounts')}</h3>
+              <Button
+                size="sm"
+                onClick={() => window.location.href = '/dashboard/bd-accounts'}
+                className="p-1"
+              >
+                <Plus className="w-4 h-4" />
+              </Button>
+            </div>
+            <div className="relative">
+              <Search className="w-4 h-4 absolute left-3 top-2.5 text-muted-foreground" />
+              <Input
+                type="text"
+                placeholder={t('common.search')}
+                value={accountSearch}
+                onChange={(e) => setAccountSearch(e.target.value)}
+                className="pl-9 text-sm"
+              />
+            </div>
           </div>
+          <button
+            type="button"
+            onClick={() => setAccountsCollapsed(true)}
+            className="p-1.5 rounded-md text-muted-foreground hover:bg-accent shrink-0"
+            title="Свернуть панель аккаунтов"
+            aria-label="Свернуть панель аккаунтов"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto min-h-0">
           {filteredAccounts.length === 0 ? (
             <div className="p-4 text-center text-sm text-muted-foreground">
               {t('messaging.noAccounts')}
@@ -921,11 +1055,32 @@ export default function MessagingPage() {
             ))
           )}
         </div>
+        </>
+        )}
       </div>
 
-      {/* Chats List */}
-      <div className="w-80 min-h-0 bg-card border-r border-border flex flex-col">
-        <div className="p-4 border-b border-border space-y-2">
+      {/* Chats List — collapse/expand: в свёрнутом виде узкая полоска с кнопкой «Развернуть» */}
+      <div
+        className={`min-h-0 bg-card border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${chatsPanelCollapsed ? 'w-12' : 'w-80'}`}
+        aria-expanded={!chatsPanelCollapsed}
+      >
+        {chatsPanelCollapsed ? (
+          <div className="flex flex-col items-center py-2 flex-1 min-h-0 justify-start border-b border-border">
+            <button
+              type="button"
+              onClick={() => setChatsCollapsed(false)}
+              className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground flex flex-col items-center gap-0.5 w-full"
+              title="Чаты — развернуть"
+              aria-label="Развернуть панель чатов"
+            >
+              <MessageSquare className="w-5 h-5 shrink-0" aria-hidden />
+              <ChevronRight className="w-4 h-4 shrink-0" aria-hidden />
+            </button>
+          </div>
+        ) : (
+          <>
+        <div className="p-4 border-b border-border flex items-center justify-between gap-2 shrink-0">
+          <div className="flex-1 space-y-2 min-w-0">
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-2.5 text-muted-foreground" />
             <Input
@@ -935,6 +1090,25 @@ export default function MessagingPage() {
               onChange={(e) => setChatSearch(e.target.value)}
               className="pl-9 text-sm"
             />
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-muted-foreground">Тип:</span>
+            <div className="flex rounded-lg border border-border p-0.5 bg-muted/50">
+              {(['all', 'personal', 'groups'] as const).map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setChatTypeFilter(key)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                    chatTypeFilter === key
+                      ? 'bg-card text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {key === 'all' ? 'Все' : key === 'personal' ? 'Личные' : 'Группы'}
+                </button>
+              ))}
+            </div>
           </div>
 
           {!accountSyncReady && (
@@ -980,9 +1154,19 @@ export default function MessagingPage() {
               </Button>
             </div>
           )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setChatsCollapsed(true)}
+            className="p-1.5 rounded-md text-muted-foreground hover:bg-accent shrink-0"
+            title="Свернуть панель чатов"
+            aria-label="Свернуть панель чатов"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto min-h-0">
           {loadingChats ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
@@ -1042,6 +1226,8 @@ export default function MessagingPage() {
             ))
           )}
         </div>
+        </>
+        )}
       </div>
 
       {/* Chat Messages */}
@@ -1107,7 +1293,7 @@ export default function MessagingPage() {
               </div>
             )}
 
-            <div className="flex-1 overflow-y-auto p-4 bg-muted/30">
+            <div ref={messagesScrollRef} className="flex-1 min-h-0 overflow-y-auto p-4 bg-muted/30">
               {loadingMessages ? (
                 <div className="flex items-center justify-center h-full">
                   <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
@@ -1120,6 +1306,12 @@ export default function MessagingPage() {
                 </div>
               ) : (
                 <div className="space-y-3">
+                  <div ref={messagesTopSentinelRef} className="h-2 flex-shrink-0" aria-hidden />
+                  {loadingOlder && (
+                    <div className="flex justify-center py-2">
+                      <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+                    </div>
+                  )}
                   {messages.map((msg, index) => {
                     const isOutbound = msg.direction === 'outbound';
                     const msgTime = msg.telegram_date ?? msg.created_at;

@@ -226,6 +226,8 @@ services:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

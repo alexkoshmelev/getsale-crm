@@ -401,12 +401,53 @@ export class TelegramManager {
         const phoneNumber = (me as any).phone ?? `qr-${telegramId}`;
         const sessionString = client.session.save() as string;
 
-        const insertResult = await this.pool.query(
-          `INSERT INTO bd_accounts (organization_id, telegram_id, phone_number, api_id, api_hash, session_string, is_active, created_by_user_id)
-           VALUES ($1, $2, $3, $4, $5, $6, true, $7) RETURNING id`,
-          [organizationId, telegramId, phoneNumber, String(apiId), apiHash, sessionString, userId]
+        // Проверка: аккаунт уже подключён в другой организации
+        const otherOrg = await this.pool.query(
+          `SELECT id FROM bd_accounts
+           WHERE organization_id != $1 AND is_active = true
+             AND (telegram_id = $2 OR phone_number = $3)`,
+          [organizationId, telegramId, phoneNumber]
         );
-        const accountId = insertResult.rows[0].id;
+        if (otherOrg.rows.length > 0) {
+          await client.disconnect();
+          state.status = 'error';
+          state.error = 'Этот аккаунт уже подключён в другой организации. Один Telegram-аккаунт можно использовать только в одной организации.';
+          this.qrSessions.set(sessionId, state);
+          this.persistQrState(sessionId);
+          return;
+        }
+
+        // Проверка: аккаунт с этим telegram_id или номером уже есть в этой организации
+        const existing = await this.pool.query(
+          `SELECT id, is_active FROM bd_accounts
+           WHERE organization_id = $1 AND (telegram_id = $2 OR phone_number = $3)`,
+          [organizationId, telegramId, phoneNumber]
+        );
+
+        let accountId: string;
+        if (existing.rows.length > 0) {
+          const row = existing.rows[0];
+          accountId = row.id;
+          if (row.is_active) {
+            await client.disconnect();
+            state.status = 'error';
+            state.error = 'Этот аккаунт уже подключён в вашей организации. Выберите его в списке или отключите перед повторным подключением.';
+            this.qrSessions.set(sessionId, state);
+            this.persistQrState(sessionId);
+            return;
+          }
+          await this.pool.query(
+            `UPDATE bd_accounts SET telegram_id = $1, phone_number = $2, api_id = $3, api_hash = $4, session_string = $5, is_active = true, created_by_user_id = COALESCE(created_by_user_id, $6) WHERE id = $7`,
+            [telegramId, phoneNumber, String(apiId), apiHash, sessionString, userId, accountId]
+          );
+        } else {
+          const insertResult = await this.pool.query(
+            `INSERT INTO bd_accounts (organization_id, telegram_id, phone_number, api_id, api_hash, session_string, is_active, created_by_user_id)
+             VALUES ($1, $2, $3, $4, $5, $6, true, $7) RETURNING id`,
+            [organizationId, telegramId, phoneNumber, String(apiId), apiHash, sessionString, userId]
+          );
+          accountId = insertResult.rows[0].id;
+        }
 
         await client.disconnect();
 
@@ -929,10 +970,18 @@ export class TelegramManager {
 
       if (!chatId) return;
 
-      const allowed = await this.isChatAllowedForAccount(accountId, chatId);
+      let allowed = await this.isChatAllowedForAccount(accountId, chatId);
       if (!allowed) {
-        console.log(`[TelegramManager] Short: chat not in sync list, skipping, accountId=${accountId}, chatId=${chatId}`);
-        return;
+        const added = await this.tryAddChatFromSelectedFolders(accountId, chatId);
+        if (added) {
+          allowed = true;
+          this.syncHistoryForChat(accountId, organizationId, chatId).catch((e) =>
+            console.warn('[TelegramManager] Background syncHistoryForChat failed:', e?.message)
+          );
+        } else {
+          console.log(`[TelegramManager] Short: chat not in sync list, skipping, accountId=${accountId}, chatId=${chatId}`);
+          return;
+        }
       }
 
       const contactId = await this.ensureContactForTelegramId(organizationId, senderId || chatId);
@@ -1018,11 +1067,19 @@ export class TelegramManager {
         }
       }
 
-      // Только чаты из bd_account_sync_chats — иначе сообщение не сохраняется и не уходит на фронт.
-      const allowed = await this.isChatAllowedForAccount(accountId, chatId);
+      // Только чаты из bd_account_sync_chats; если чат в выбранной папке — авто-добавляем и подгружаем историю.
+      let allowed = await this.isChatAllowedForAccount(accountId, chatId);
       if (!allowed) {
-        console.log(`[TelegramManager] Chat not in sync list (add chat to sync in UI), skipping message, accountId=${accountId}, chatId=${chatId}`);
-        return;
+        const added = await this.tryAddChatFromSelectedFolders(accountId, chatId);
+        if (added) {
+          allowed = true;
+          this.syncHistoryForChat(accountId, organizationId, chatId).catch((e) =>
+            console.warn('[TelegramManager] Background syncHistoryForChat failed:', e?.message)
+          );
+        } else {
+          console.log(`[TelegramManager] Chat not in sync list (add chat to sync in UI), skipping message, accountId=${accountId}, chatId=${chatId}`);
+          return;
+        }
       }
 
       const contactId = await this.ensureContactForTelegramId(organizationId, senderId || chatId);
@@ -1076,8 +1133,10 @@ export class TelegramManager {
 
   /** Delay between Telegram API calls to respect rate limits (ms) */
   private readonly SYNC_DELAY_MS = 1100;
-  /** Max messages to fetch per chat in initial sync */
-  private readonly SYNC_MESSAGES_PER_CHAT = 100;
+  /** Initial sync: depth in days (hybrid: 1 month; older messages load on scroll via load-older-history). */
+  private readonly SYNC_MESSAGES_MAX_AGE_DAYS = parseInt(process.env.SYNC_MESSAGES_MAX_AGE_DAYS || '30', 10) || 30;
+  /** Safety cap: max messages per chat in one sync run (to avoid runaway in huge groups). */
+  private readonly SYNC_MESSAGES_PER_CHAT_CAP = parseInt(process.env.SYNC_MESSAGES_PER_CHAT_CAP || '50000', 10) || 50000;
 
   /**
    * Run initial history sync for selected chats: fetch messages from Telegram, save to DB, emit progress.
@@ -1136,13 +1195,14 @@ export class TelegramManager {
         const peer = await client.getInputEntity(peerInput);
         let offsetId = 0;
         let hasMore = true;
+        const cutoffDate = Math.floor(Date.now() / 1000) - this.SYNC_MESSAGES_MAX_AGE_DAYS * 24 * 3600;
 
         while (hasMore) {
           try {
             const result = await client.invoke(
               new Api.messages.GetHistory({
                 peer,
-                limit: Math.min(50, this.SYNC_MESSAGES_PER_CHAT - fetched),
+                limit: Math.min(100, this.SYNC_MESSAGES_PER_CHAT_CAP - fetched),
                 offsetId,
                 offsetDate: 0,
                 maxId: 0,
@@ -1192,8 +1252,12 @@ export class TelegramManager {
             }
 
             if (list.length === 0) hasMore = false;
-            else offsetId = Number((list[list.length - 1] as any).id) || 0;
-            if (fetched >= this.SYNC_MESSAGES_PER_CHAT) hasMore = false;
+            else {
+              offsetId = Number((list[list.length - 1] as any).id) || 0;
+              const oldestMsgDate = (list[list.length - 1] as any).date;
+              if (typeof oldestMsgDate === 'number' && oldestMsgDate < cutoffDate) hasMore = false;
+            }
+            if (fetched >= this.SYNC_MESSAGES_PER_CHAT_CAP) hasMore = false;
           } catch (err: any) {
             if (err?.seconds != null && typeof err.seconds === 'number') {
               await sleep(err.seconds * 1000);
@@ -1260,17 +1324,22 @@ export class TelegramManager {
   }
 
   /**
-   * Get all dialogs for an account
+   * Get all dialogs for an account (optionally filtered by folder).
+   * @param folderId - Telegram folder id (0 = main list, 1 = archive, 2+ = custom filter id). Omit for all.
    */
-  async getDialogs(accountId: string): Promise<any[]> {
+  async getDialogs(accountId: string, folderId?: number): Promise<any[]> {
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo || !clientInfo.isConnected) {
       throw new Error(`Account ${accountId} is not connected`);
     }
 
     try {
-      const dialogs = await clientInfo.client.getDialogs({ limit: 100 });
-      return dialogs.map((dialog: any) => ({
+      const opts: { limit: number; folderId?: number } = { limit: 100 };
+      if (folderId !== undefined && folderId !== null) {
+        opts.folderId = folderId;
+      }
+      const dialogs = await clientInfo.client.getDialogs(opts);
+      const mapped = dialogs.map((dialog: any) => ({
         id: String(dialog.id),
         name: dialog.name || dialog.title || 'Unknown',
         unreadCount: dialog.unreadCount || 0,
@@ -1280,9 +1349,378 @@ export class TelegramManager {
         isGroup: dialog.isGroup,
         isChannel: dialog.isChannel,
       }));
+      // Показываем только личные переписки и групповые чаты (где пользователь может писать); каналы исключаем
+      return mapped.filter((d: any) => d.isUser || d.isGroup);
     } catch (error) {
       console.error(`[TelegramManager] Error getting dialogs for ${accountId}:`, error);
       throw error;
+    }
+  }
+
+  /**
+   * Добавляет в Set все возможные строковые представления peer id для сопоставления с dialog.id из getDialogs.
+   * GramJS может использовать entity.id (положительные) или getPeerId (user: +, chat: -id, channel: -1000000000-id).
+   */
+  private static inputPeerToDialogIds(peer: any, out: Set<string>): void {
+    if (!peer) return;
+    const c = String(peer.className ?? peer.constructor?.className ?? '').toLowerCase();
+    const userId = peer.userId ?? peer.user_id;
+    const chatId = peer.chatId ?? peer.chat_id;
+    const channelId = peer.channelId ?? peer.channel_id;
+    if ((c === 'inputpeeruser') && userId != null) {
+      out.add(String(userId));
+      return;
+    }
+    if ((c === 'inputpeerchat') && chatId != null) {
+      const n = Number(chatId);
+      out.add(String(n));
+      out.add(String(-n));
+      return;
+    }
+    if ((c === 'inputpeerchannel') && channelId != null) {
+      const n = Number(channelId);
+      out.add(String(n));
+      out.add(String(-n));
+      out.add(String(-1000000000 - n));
+      out.add(String(-1000000000000 - n)); // альтернативный префикс (12 нулей)
+      return;
+    }
+  }
+
+  /**
+   * Возвращает множество строковых id диалогов (peer id), входящих в кастомный фильтр по include_peers и pinned_peers.
+   * Для folder_id 0/1 не используется. Для фильтра без include_peers/pinned_peers (только по критериям) вернёт пустой Set.
+   */
+  async getDialogFilterPeerIds(accountId: string, filterId: number): Promise<Set<string>> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const result = await clientInfo.client.invoke(new Api.messages.GetDialogFilters({}));
+    const filters = (result as any).filters ?? [];
+    const f = filters.find((x: any) => (x.id ?? -1) === filterId);
+    if (!f) return new Set();
+    const ids = new Set<string>();
+    const pinned = f.pinned_peers ?? f.pinnedPeers ?? [];
+    const included = f.include_peers ?? f.includePeers ?? [];
+    const peers = [...pinned, ...included];
+    for (const p of peers) {
+      TelegramManager.inputPeerToDialogIds(p, ids);
+    }
+    return ids;
+  }
+
+  /**
+   * Get dialog filters (folders) from Telegram — кастомные папки пользователя.
+   * Если у пользователя нет папок, API вернёт пустой массив или один элемент (дефолт «Все чаты», id 0).
+   * Папку «Все чаты» (id 0) для списка диалогов вызывающая сторона добавляет сама через getDialogsByFolder(accountId, 0).
+   * emoticon — иконка папки из Telegram (эмодзи, например 📁).
+   */
+  async getDialogFilters(accountId: string): Promise<{ id: number; title: string; isCustom: boolean; emoticon?: string }[]> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+
+    try {
+      const result = await clientInfo.client.invoke(new Api.messages.GetDialogFilters({}));
+      const filters = (result as any).filters ?? [];
+      const list: { id: number; title: string; isCustom: boolean; emoticon?: string }[] = [];
+      for (let i = 0; i < filters.length; i++) {
+        const f = filters[i];
+        const id = f.id ?? i;
+        const rawTitle = typeof f.title === 'string' ? f.title : (f.title?.text ?? '');
+        const title = (typeof rawTitle === 'string' ? rawTitle : String(rawTitle)).trim() || (id === 0 ? 'Все чаты' : id === 1 ? 'Архив' : `Папка ${id}`);
+        const emoticon = typeof f.emoticon === 'string' && f.emoticon.trim() ? f.emoticon.trim() : undefined;
+        list.push({ id, title, isCustom: id >= 2, emoticon });
+      }
+      return list;
+    } catch (error: any) {
+      console.error(`[TelegramManager] Error getting dialog filters for ${accountId}:`, error?.message || error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get dialogs for a specific folder (for populating sync_chats from selected folders).
+   * В Telegram API folder_id в getDialogs поддерживает только 0 (основной список) и 1 (архив).
+   * Кастомные папки (id >= 2) — это Dialog Filter с include_peers/pinned_peers: берём все диалоги из 0 и фильтруем по списку пиров фильтра.
+   */
+  async getDialogsByFolder(accountId: string, folderId: number): Promise<any[]> {
+    if (folderId === 0 || folderId === 1) {
+      return this.getDialogs(accountId, folderId);
+    }
+    const allDialogs = await this.getDialogs(accountId, 0);
+    const peerIds = await this.getDialogFilterPeerIds(accountId, folderId);
+    if (peerIds.size === 0) return [];
+    return allDialogs.filter((d: any) => peerIds.has(String(d.id)));
+  }
+
+  /**
+   * Если чат не в sync_chats, но есть выбранные папки — проверить, входит ли чат в одну из папок.
+   * Если да: добавить чат в bd_account_sync_chats и вернуть true (далее сообщение обработается и можно подгрузить историю).
+   */
+  async tryAddChatFromSelectedFolders(accountId: string, chatId: string): Promise<boolean> {
+    const foldersRows = await this.pool.query(
+      'SELECT folder_id, folder_title FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index',
+      [accountId]
+    );
+    if (foldersRows.rows.length === 0) return false;
+
+    for (const row of foldersRows.rows) {
+      const folderId = Number(row.folder_id);
+      try {
+        const dialogs = await this.getDialogsByFolder(accountId, folderId);
+        const found = dialogs.find((d: any) => String(d.id ?? '').trim() === chatId);
+        if (found) {
+          let peerType = 'user';
+          if (found.isChannel) peerType = 'channel';
+          else if (found.isGroup) peerType = 'chat';
+          const title = (found.name ?? '').trim() || chatId;
+          await this.pool.query(
+            `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
+             VALUES ($1, $2, $3, $4, false, $5)
+             ON CONFLICT (bd_account_id, telegram_chat_id) DO UPDATE SET
+               title = EXCLUDED.title,
+               peer_type = EXCLUDED.peer_type,
+               folder_id = EXCLUDED.folder_id`,
+            [accountId, chatId, title, peerType, folderId]
+          );
+          console.log(`[TelegramManager] Auto-added chat ${chatId} from folder ${folderId} for account ${accountId}`);
+          return true;
+        }
+      } catch (err: any) {
+        if (err?.message !== 'TIMEOUT' && !err?.message?.includes('builder.resolve')) {
+          console.warn(`[TelegramManager] tryAddChatFromSelectedFolders folder ${folderId} failed:`, err?.message);
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Синхронизировать историю переписки для одного чата (после авто-добавления контакта из папки).
+   */
+  async syncHistoryForChat(
+    accountId: string,
+    organizationId: string,
+    chatId: string
+  ): Promise<{ messagesCount: number }> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) return { messagesCount: 0 };
+
+    const row = await this.pool.query(
+      'SELECT telegram_chat_id, title FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+      [accountId, chatId]
+    );
+    if (row.rows.length === 0) return { messagesCount: 0 };
+
+    const client = clientInfo.client;
+    const { telegram_chat_id: telegramChatId, title } = row.rows[0];
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let fetched = 0;
+
+    try {
+      const peerIdNum = Number(telegramChatId);
+      const peerInput = Number.isNaN(peerIdNum) ? telegramChatId : peerIdNum;
+      const peer = await client.getInputEntity(peerInput);
+      let offsetId = 0;
+      let hasMore = true;
+      const cutoffDate = Math.floor(Date.now() / 1000) - this.SYNC_MESSAGES_MAX_AGE_DAYS * 24 * 3600;
+
+      while (hasMore) {
+        try {
+          const result = await client.invoke(
+            new Api.messages.GetHistory({
+              peer,
+              limit: Math.min(100, this.SYNC_MESSAGES_PER_CHAT_CAP - fetched),
+              offsetId,
+              offsetDate: 0,
+              maxId: 0,
+              minId: 0,
+              addOffset: 0,
+              hash: BigInt(0),
+            })
+          );
+          const rawMessages = (result as any).messages;
+          if (!Array.isArray(rawMessages)) break;
+
+          const list: Api.Message[] = rawMessages.filter((m: any) => m && typeof m === 'object' && (m.className === 'Message' || m instanceof Api.Message));
+          for (const msg of list) {
+            const hasText = !!getMessageText(msg).trim();
+            if (!hasText && !msg.media) continue;
+            let cid = telegramChatId;
+            let senderId = '';
+            if (msg.peerId) {
+              if (msg.peerId instanceof Api.PeerUser) cid = String(msg.peerId.userId);
+              else if (msg.peerId instanceof Api.PeerChat) cid = String(msg.peerId.chatId);
+              else if (msg.peerId instanceof Api.PeerChannel) cid = String(msg.peerId.channelId);
+            }
+            if (msg.fromId instanceof Api.PeerUser) senderId = String(msg.fromId.userId);
+
+            const contactId = await this.ensureContactForTelegramId(organizationId, senderId || cid);
+            const direction = (msg as any).out === true ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
+            const serialized = serializeMessage(msg);
+            await this.saveMessageToDb({
+              organizationId,
+              bdAccountId: accountId,
+              contactId,
+              channel: MessageChannel.TELEGRAM,
+              channelId: cid,
+              direction,
+              status: MessageStatus.DELIVERED,
+              unread: false,
+              serialized,
+              metadata: { senderId, hasMedia: !!msg.media },
+            });
+            fetched++;
+          }
+          if (list.length === 0) break;
+          offsetId = Number((list[list.length - 1] as any).id) || 0;
+          const oldestMsgDate = (list[list.length - 1] as any).date;
+          if (typeof oldestMsgDate === 'number' && oldestMsgDate < cutoffDate) break;
+          if (fetched >= this.SYNC_MESSAGES_PER_CHAT_CAP) break;
+        } catch (err: any) {
+          if (err?.seconds != null && typeof err.seconds === 'number') {
+            await sleep(err.seconds * 1000);
+            continue;
+          }
+          throw err;
+        }
+        await sleep(this.SYNC_DELAY_MS);
+      }
+      if (fetched > 0) {
+        console.log(`[TelegramManager] syncHistoryForChat: ${fetched} messages for chat ${chatId}, account ${accountId}`);
+      }
+    } catch (err: any) {
+      console.warn(`[TelegramManager] syncHistoryForChat failed for ${accountId}/${chatId}:`, err?.message);
+    }
+    return { messagesCount: fetched };
+  }
+
+  /**
+   * Догрузить одну страницу более старых сообщений из Telegram для чата (при скролле вверх).
+   * Возвращает { added, exhausted }. Если exhausted — в Telegram больше нет сообщений для этого чата.
+   */
+  async fetchOlderMessagesFromTelegram(
+    accountId: string,
+    organizationId: string,
+    chatId: string
+  ): Promise<{ added: number; exhausted: boolean }> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+
+    const exhaustedRow = await this.pool.query(
+      'SELECT history_exhausted FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+      [accountId, chatId]
+    );
+    if (exhaustedRow.rows.length === 0) {
+      return { added: 0, exhausted: true };
+    }
+    if ((exhaustedRow.rows[0] as any).history_exhausted === true) {
+      return { added: 0, exhausted: true };
+    }
+
+    const oldestRow = await this.pool.query(
+      `SELECT telegram_message_id, telegram_date, created_at FROM messages
+       WHERE bd_account_id = $1 AND channel_id = $2
+       ORDER BY COALESCE(telegram_date, created_at) ASC NULLS LAST
+       LIMIT 1`,
+      [accountId, chatId]
+    );
+
+    if (oldestRow.rows.length === 0) {
+      return { added: 0, exhausted: true };
+    }
+
+    const client = clientInfo.client;
+    const peerIdNum = Number(chatId);
+    const peerInput = Number.isNaN(peerIdNum) ? chatId : peerIdNum;
+    const peer = await client.getInputEntity(peerInput);
+
+    const row = oldestRow.rows[0] as any;
+    let offsetId = 0;
+    let offsetDate = 0;
+    if (row.telegram_message_id != null) offsetId = parseInt(String(row.telegram_message_id), 10) || 0;
+    if (row.telegram_date) offsetDate = row.telegram_date;
+    else if (row.created_at) offsetDate = Math.floor(new Date(row.created_at).getTime() / 1000);
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const limit = 100;
+
+    try {
+      const result = await client.invoke(
+        new Api.messages.GetHistory({
+          peer,
+          limit,
+          offsetId,
+          offsetDate,
+          maxId: 0,
+          minId: 0,
+          addOffset: 0,
+          hash: BigInt(0),
+        })
+      );
+
+      const rawMessages = (result as any).messages;
+      if (!Array.isArray(rawMessages)) {
+        await this.pool.query(
+          'UPDATE bd_account_sync_chats SET history_exhausted = true WHERE bd_account_id = $1 AND telegram_chat_id = $2',
+          [accountId, chatId]
+        );
+        return { added: 0, exhausted: true };
+      }
+
+      const list: Api.Message[] = rawMessages.filter((m: any) => m && typeof m === 'object' && (m.className === 'Message' || m instanceof Api.Message));
+      let added = 0;
+
+      for (const msg of list) {
+        const hasText = !!getMessageText(msg).trim();
+        if (!hasText && !msg.media) continue;
+        let cid = chatId;
+        let senderId = '';
+        if (msg.peerId) {
+          if (msg.peerId instanceof Api.PeerUser) cid = String(msg.peerId.userId);
+          else if (msg.peerId instanceof Api.PeerChat) cid = String(msg.peerId.chatId);
+          else if (msg.peerId instanceof Api.PeerChannel) cid = String(msg.peerId.channelId);
+        }
+        if (msg.fromId instanceof Api.PeerUser) senderId = String(msg.fromId.userId);
+
+        const contactId = await this.ensureContactForTelegramId(organizationId, senderId || cid);
+        const direction = (msg as any).out === true ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
+        const serialized = serializeMessage(msg);
+        await this.saveMessageToDb({
+          organizationId,
+          bdAccountId: accountId,
+          contactId,
+          channel: MessageChannel.TELEGRAM,
+          channelId: cid,
+          direction,
+          status: MessageStatus.DELIVERED,
+          unread: false,
+          serialized,
+          metadata: { senderId, hasMedia: !!msg.media },
+        });
+        added++;
+      }
+
+      const exhausted = list.length === 0 || list.length < limit;
+      if (exhausted) {
+        await this.pool.query(
+          'UPDATE bd_account_sync_chats SET history_exhausted = true WHERE bd_account_id = $1 AND telegram_chat_id = $2',
+          [accountId, chatId]
+        );
+      }
+
+      if (added > 0) {
+        console.log(`[TelegramManager] fetchOlderMessagesFromTelegram: +${added} for chat ${chatId}, account ${accountId}, exhausted=${exhausted}`);
+      }
+      return { added, exhausted };
+    } catch (err: any) {
+      console.warn(`[TelegramManager] fetchOlderMessagesFromTelegram failed for ${accountId}/${chatId}:`, err?.message);
+      throw err;
     }
   }
 

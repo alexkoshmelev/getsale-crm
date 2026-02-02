@@ -664,14 +664,35 @@ app.post('/api/crm/deals', async (req, res, next) => {
         ErrorCodes.VALIDATION
       );
     }
-    const { companyId, contactId, pipelineId, stageId: bodyStageId, title, value, currency } = parsed.data;
+    const {
+      companyId,
+      contactId,
+      pipelineId,
+      stageId: bodyStageId,
+      title,
+      value,
+      currency,
+      bdAccountId,
+      channel,
+      channelId,
+    } = parsed.data;
 
-    const companyCheck = await pool.query(
-      'SELECT 1 FROM companies WHERE id = $1 AND organization_id = $2',
-      [companyId, user.organizationId]
-    );
-    if (companyCheck.rows.length === 0) {
-      throw new AppError(400, 'Company not found or access denied', ErrorCodes.VALIDATION);
+    const fromChat = bdAccountId != null && channel != null && channelId != null;
+    if (!fromChat && (companyId == null || companyId === '')) {
+      throw new AppError(
+        400,
+        'Either companyId or (bdAccountId + channel + channelId) for deal-from-chat is required',
+        ErrorCodes.VALIDATION
+      );
+    }
+    if (!fromChat) {
+      const companyCheck = await pool.query(
+        'SELECT 1 FROM companies WHERE id = $1 AND organization_id = $2',
+        [companyId, user.organizationId]
+      );
+      if (companyCheck.rows.length === 0) {
+        throw new AppError(400, 'Company not found or access denied', ErrorCodes.VALIDATION);
+      }
     }
     const pipelineCheck = await pool.query(
       'SELECT 1 FROM pipelines WHERE id = $1 AND organization_id = $2',
@@ -706,11 +727,11 @@ app.post('/api/crm/deals', async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO deals (organization_id, company_id, contact_id, pipeline_id, stage_id, owner_id, title, value, currency, history)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      `INSERT INTO deals (organization_id, company_id, contact_id, pipeline_id, stage_id, owner_id, title, value, currency, history, bd_account_id, channel, channel_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
       [
         user.organizationId,
-        companyId,
+        companyId ?? null,
         contactId ?? null,
         pipelineId,
         stageId,
@@ -727,6 +748,9 @@ app.post('/api/crm/deals', async (req, res, next) => {
             timestamp: new Date(),
           },
         ]),
+        bdAccountId ?? null,
+        channel ?? null,
+        channelId ?? null,
       ]
     );
     await rabbitmq.publishEvent({

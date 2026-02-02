@@ -26,9 +26,9 @@ RUN npm run build --workspace=shared/types && \
 # Copy service source code
 COPY ${SERVICE_PATH}/ ./${SERVICE_PATH}/
 
-# Copy entrypoint script (from repo root)
+# Copy entrypoint script (from repo root); normalize line endings (CRLF -> LF) for Linux
 COPY docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+RUN sed 's/\r$//' /usr/local/bin/docker-entrypoint.sh > /tmp/ep && mv /tmp/ep /usr/local/bin/docker-entrypoint.sh && chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Set working directory to service
 WORKDIR /app/${SERVICE_PATH}
