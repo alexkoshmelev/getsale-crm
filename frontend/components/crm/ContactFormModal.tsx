@@ -76,13 +76,13 @@ export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselected
     try {
       if (isEdit) {
         await updateContact(edit!.id, {
-          firstName: firstName.trim() || null,
-          lastName: lastName.trim() || null,
-          displayName: displayName.trim() || null,
-          username: username.trim() || null,
-          email: email.trim() || null,
-          phone: phone.trim() || null,
-          companyId: companyId || null,
+          firstName: firstName.trim() || undefined,
+          lastName: lastName.trim() || undefined,
+          displayName: displayName.trim() || undefined,
+          username: username.trim() || undefined,
+          email: email.trim() || undefined,
+          phone: phone.trim() || undefined,
+          companyId: companyId || undefined,
         });
       } else {
         await createContact({
