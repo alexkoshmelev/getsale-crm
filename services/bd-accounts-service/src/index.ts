@@ -97,7 +97,11 @@ function getTelegramApiCredentials(): { apiId: number; apiHash: string } {
   const apiId = process.env.TELEGRAM_API_ID;
   const apiHash = process.env.TELEGRAM_API_HASH;
   if (!apiId || !apiHash) {
-    throw new Error('TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in environment');
+    throw new Error(
+      'TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in environment. ' +
+        'On the server: add them to .env in the same directory as docker-compose.server.yml (e.g. /docker/getsale-crm/.env), ' +
+        'then run: docker compose -f docker-compose.server.yml up -d --force-recreate bd-accounts-service'
+    );
   }
   return { apiId: parseInt(String(apiId), 10), apiHash };
 }
@@ -146,6 +150,28 @@ app.get('/api/bd-accounts', async (req, res) => {
   } catch (error: any) {
     console.error('Error fetching BD accounts:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Poll QR login status — must be before /:id so "qr-login-status" is not matched as id
+app.get('/api/bd-accounts/qr-login-status', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { sessionId } = req.query;
+
+    if (!sessionId || typeof sessionId !== 'string') {
+      return res.status(400).json({ error: 'sessionId query parameter required' });
+    }
+
+    const state = await telegramManager.getQrLoginStatus(sessionId);
+    if (!state) {
+      return res.status(404).json({ error: 'Session not found or expired' });
+    }
+
+    res.json(state);
+  } catch (error: any) {
+    console.error('Error getting QR login status:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -282,28 +308,6 @@ app.post('/api/bd-accounts/start-qr-login', async (req, res) => {
       error: 'Internal server error',
       message: error.message || 'Failed to start QR login',
     });
-  }
-});
-
-// Poll QR login status (loginTokenUrl for QR code, need_password, then success/error)
-app.get('/api/bd-accounts/qr-login-status', async (req, res) => {
-  try {
-    const user = getUser(req);
-    const { sessionId } = req.query;
-
-    if (!sessionId || typeof sessionId !== 'string') {
-      return res.status(400).json({ error: 'sessionId query parameter required' });
-    }
-
-    const state = await telegramManager.getQrLoginStatus(sessionId);
-    if (!state) {
-      return res.status(404).json({ error: 'Session not found or expired' });
-    }
-
-    res.json(state);
-  } catch (error: any) {
-    console.error('Error getting QR login status:', error);
-    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
