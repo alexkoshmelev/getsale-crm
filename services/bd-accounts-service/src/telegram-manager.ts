@@ -1166,8 +1166,8 @@ export class TelegramManager {
 
   /** Delay between Telegram API calls to respect rate limits (ms) */
   private readonly SYNC_DELAY_MS = 1100;
-  /** Initial sync: depth in days (hybrid: 1 month; older messages load on scroll via load-older-history). */
-  private readonly SYNC_MESSAGES_MAX_AGE_DAYS = parseInt(process.env.SYNC_MESSAGES_MAX_AGE_DAYS || '30', 10) || 30;
+  /** Initial sync: depth in days (hybrid: 1 year; older messages load on scroll via load-older-history). */
+  private readonly SYNC_MESSAGES_MAX_AGE_DAYS = parseInt(process.env.SYNC_MESSAGES_MAX_AGE_DAYS || '365', 10) || 365;
   /** Safety cap: max messages per chat in one sync run (to avoid runaway in huge groups). */
   private readonly SYNC_MESSAGES_PER_CHAT_CAP = parseInt(process.env.SYNC_MESSAGES_PER_CHAT_CAP || '50000', 10) || 50000;
 

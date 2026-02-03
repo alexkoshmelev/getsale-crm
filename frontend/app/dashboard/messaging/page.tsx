@@ -609,6 +609,29 @@ export default function MessagingPage() {
     const handler = (payload: { message?: any; timestamp?: string }) => {
       const msg = payload?.message;
       if (!msg?.bdAccountId) return;
+      const ts = payload?.timestamp ?? new Date().toISOString();
+      const contentPreview = (msg?.content && String(msg.content).trim()) ? String(msg.content).trim().slice(0, 200) : null;
+      // Поднять чат с новым сообщением вверх списка (сортировка по last_message_at) и обновить превью/счётчик
+      if (msg.bdAccountId === selectedAccountId && msg.channelId) {
+        const isCurrentChat = selectedChat?.channel_id === String(msg.channelId);
+        setChats((prev) => {
+          const chatId = String(msg.channelId);
+          const idx = prev.findIndex((c) => c.channel_id === chatId);
+          if (idx < 0) return prev;
+          const updated = prev.map((c, i) => {
+            if (i !== idx) return c;
+            const unread = isCurrentChat ? 0 : (c.unread_count || 0) + 1;
+            return { ...c, last_message_at: ts, last_message: contentPreview ?? c.last_message, unread_count: unread };
+          });
+          return [...updated].sort((a, b) => {
+            const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+            const tb = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+            if (Number.isNaN(ta)) return 1;
+            if (Number.isNaN(tb)) return -1;
+            return tb - ta;
+          });
+        });
+      }
       if (msg.bdAccountId === selectedAccountId) fetchChats();
       if (msg.bdAccountId === selectedAccountId && selectedChat && msg.channelId === selectedChat.channel_id) {
         setMessages((prev) => {
@@ -620,14 +643,14 @@ export default function MessagingPage() {
               id: msg.messageId ?? '',
               content: msg.content ?? '',
               direction: (msg.direction === 'outbound' ? 'outbound' : 'inbound') as 'inbound' | 'outbound',
-              created_at: payload?.timestamp ?? new Date().toISOString(),
+              created_at: ts,
               status: 'delivered',
               contact_id: msg.contactId ?? null,
               channel: selectedChat.channel,
               channel_id: selectedChat.channel_id,
               telegram_message_id: msg.telegramMessageId ?? null,
               telegram_media: msg.telegramMedia ?? null,
-              telegram_date: payload?.timestamp ?? null,
+              telegram_date: ts,
             },
           ];
         });
@@ -715,7 +738,7 @@ export default function MessagingPage() {
         name: chat.name || null,
         peer_type: chat.peer_type ?? null,
         unread_count: parseInt(chat.unread_count) || 0,
-        last_message_at: chat.last_message_at || new Date().toISOString(),
+        last_message_at: chat.last_message_at && String(chat.last_message_at).trim() ? chat.last_message_at : '',
         last_message: chat.last_message,
       }));
       // Deduplicate by channel_id (API can return same chat multiple times when GROUP BY contact_id)
@@ -738,9 +761,14 @@ export default function MessagingPage() {
           existing.unread_count = (existing.unread_count || 0) + (chat.unread_count || 0);
         }
       }
-      const formattedChats = Array.from(byChannelId.values()).sort(
-        (a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime()
-      );
+      // Сверху самые новые чаты (по времени последнего сообщения)
+      const formattedChats = Array.from(byChannelId.values()).sort((a, b) => {
+        const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+        const tb = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+        if (Number.isNaN(ta)) return 1;
+        if (Number.isNaN(tb)) return -1;
+        return tb - ta;
+      });
 
       setChats(formattedChats);
     } catch (error: any) {
@@ -788,6 +816,16 @@ export default function MessagingPage() {
     setLoadingOlder(true);
     const nextPage = messagesPage + 1;
     try {
+      // Гибрид: сначала догружаем историю из Telegram в БД, затем читаем страницу из БД
+      if (selectedChat.channel === 'telegram' && !historyExhausted) {
+        try {
+          await apiClient.post(
+            `/api/bd-accounts/${selectedAccountId}/chats/${selectedChat.channel_id}/load-older-history`
+          );
+        } catch (_) {
+          // не блокируем: дальше возьмём из БД что есть
+        }
+      }
       const response = await apiClient.get('/api/messaging/messages', {
         params: {
           channel: selectedChat.channel,
@@ -807,7 +845,7 @@ export default function MessagingPage() {
     } finally {
       setLoadingOlder(false);
     }
-  }, [selectedAccountId, selectedChat, loadingOlder, hasMoreMessages, messagesPage, messagesTotal]);
+  }, [selectedAccountId, selectedChat, loadingOlder, hasMoreMessages, messagesPage, messagesTotal, historyExhausted]);
 
   // Восстановить позицию скролла после подгрузки старых сообщений (prepend)
   useEffect(() => {
@@ -836,10 +874,11 @@ export default function MessagingPage() {
     return () => container.removeEventListener('scroll', onScroll);
   }, []);
 
-  // Подгрузка старых сообщений при скролле вверх (как в Telegram)
+  // Подгрузка старых сообщений при скролле вверх (как в Telegram): sentinel вверху списка, root — контейнер скролла
   useEffect(() => {
-    const el = messagesTopSentinelRef.current;
-    if (!el || !selectedChat || !hasMoreMessages || loadingOlder) return;
+    const sentinel = messagesTopSentinelRef.current;
+    const scrollRoot = messagesScrollRef.current;
+    if (!sentinel || !scrollRoot || !selectedChat || !hasMoreMessages || loadingOlder) return;
     const observer = new IntersectionObserver(
       (entries) => {
         const [e] = entries;
@@ -850,9 +889,9 @@ export default function MessagingPage() {
         loadOlderLastCallRef.current = now;
         loadOlderMessages();
       },
-      { root: el.closest('.overflow-y-auto') || null, rootMargin: '80px', threshold: 0 }
+      { root: scrollRoot, rootMargin: '100px 0px 0px 0px', threshold: 0 }
     );
-    observer.observe(el);
+    observer.observe(sentinel);
     return () => observer.disconnect();
   }, [selectedChat?.channel_id, hasMoreMessages, loadingOlder, loadOlderMessages]);
 
@@ -1056,6 +1095,7 @@ export default function MessagingPage() {
   };
 
   const formatTime = (dateString: string) => {
+    if (!dateString || !dateString.trim() || isNaN(new Date(dateString).getTime())) return '—';
     const date = new Date(dateString);
     const now = new Date();
     const diff = now.getTime() - date.getTime();
