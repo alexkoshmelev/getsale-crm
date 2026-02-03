@@ -736,12 +736,11 @@ app.get('/api/bd-accounts/:id/dialogs-by-folders', async (req, res) => {
     }
     for (const f of filters) {
       if (f.id === 0 || f.id === 1) continue;
-      const peerIds = await telegramManager.getDialogFilterPeerIds(id, f.id);
-      if (peerIds.size === 0) {
-        folderList.push({ id: f.id, title: f.title, emoticon: f.emoticon, dialogs: [] });
-        continue;
-      }
-      const dialogs = merged.filter((d: any) => peerIds.has(String(d.id)));
+      const filterRaw = await telegramManager.getDialogFilterRaw(id, f.id);
+      const { include: includePeerIds, exclude: excludePeerIds } = require('./telegram-manager').TelegramManager.getFilterIncludeExcludePeerIds(filterRaw);
+      const dialogs = merged.filter((d: any) =>
+        require('./telegram-manager').TelegramManager.dialogMatchesFilter(d, filterRaw, includePeerIds, excludePeerIds)
+      );
       folderList.push({ id: f.id, title: f.title, emoticon: f.emoticon, dialogs: excludeSelf(dialogs) });
     }
     res.json({ folders: folderList });

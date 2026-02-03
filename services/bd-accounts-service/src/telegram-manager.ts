@@ -704,13 +704,14 @@ export class TelegramManager {
         return;
       }
 
-      // Лог сырых апдейтов (для отладки). Важно: второй аргумент должен быть EventBuilder (Raw), иначе gram.js ломает цикл обработки.
+      // Лог только апдейтов с сообщениями (без шума UpdateUserStatus/UpdateConnectionState). Важно: второй аргумент — Raw, иначе gram.js ломает цикл.
       try {
         client.addEventHandler(
           (update: any) => {
-            const name = update?.className ?? update?.constructor?.name ?? (update && typeof update === 'object' ? 'Object' : String(update));
             const hasMessage = update?.message != null;
-            console.log(`[TelegramManager] Raw update: ${name}, accountId=${accountId}, hasMessage=${hasMessage}`);
+            if (!hasMessage) return;
+            const name = update?.className ?? update?.constructor?.name ?? (update && typeof update === 'object' ? 'Object' : String(update));
+            console.log(`[TelegramManager] Raw update: ${name}, accountId=${accountId}`);
           },
           new Raw({ func: () => true })
         );
@@ -1371,7 +1372,7 @@ export class TelegramManager {
 
   /**
    * Fetch all dialogs for a folder using iterDialogs (paginated by GramJS) with delay between batches to reduce flood wait.
-   * Returns only users and groups (no channels). Use for initial sync when account has many chats.
+   * Returns only users and groups (no channels) — for client communication (DMs and group chats), channels don't affect deals.
    */
   async getDialogsAll(
     accountId: string,
@@ -1490,6 +1491,88 @@ export class TelegramManager {
   }
 
   /**
+   * Возвращает сырой объект DialogFilter для папки (id >= 2). Нужен для фильтрации по критериям (contacts, groups и т.д.).
+   */
+  async getDialogFilterRaw(accountId: string, filterId: number): Promise<any | null> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const result = await clientInfo.client.invoke(new Api.messages.GetDialogFilters({}));
+    const filters = (result as any).filters ?? [];
+    return filters.find((x: any) => (x.id ?? -1) === filterId) ?? null;
+  }
+
+  /**
+   * Все строковые варианты peer id для диалога (dialog.id из GramJS может быть в разных форматах).
+   */
+  private static dialogIdToVariants(dialogId: string | number): Set<string> {
+    const s = String(dialogId).trim();
+    const n = Number(s);
+    const out = new Set<string>([s]);
+    if (!Number.isNaN(n)) {
+      out.add(String(n));
+      out.add(String(-n));
+      if (n > 0 && n < 1000000000) {
+        out.add(String(-1000000000 - n));
+        out.add(String(-1000000000000 - n));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Проверяет, входит ли диалог в кастомную папку по правилам Telegram (include_peers, pinned_peers, критерии, exclude_peers).
+   * См. https://core.telegram.org/constructor/dialogFilter
+   */
+  static dialogMatchesFilter(
+    dialog: { id: string; isUser?: boolean; isGroup?: boolean; isChannel?: boolean },
+    filterRaw: any,
+    includePeerIds: Set<string>,
+    excludePeerIds: Set<string>
+  ): boolean {
+    if (!filterRaw) return false;
+    const variants = TelegramManager.dialogIdToVariants(dialog.id);
+    for (const v of variants) {
+      if (excludePeerIds.has(v)) return false;
+    }
+    for (const v of variants) {
+      if (includePeerIds.has(v)) return true;
+    }
+    const contacts = !!(filterRaw.contacts === true);
+    const non_contacts = !!(filterRaw.non_contacts === true);
+    const groups = !!(filterRaw.groups === true);
+    const broadcasts = !!(filterRaw.broadcasts === true);
+    const bots = !!(filterRaw.bots === true);
+    const isUser = !!dialog.isUser;
+    const isGroup = !!dialog.isGroup;
+    const isChannel = !!dialog.isChannel;
+    if ((contacts || non_contacts || bots) && isUser) return true;
+    if (groups && isGroup) return true;
+    if (broadcasts && isChannel) return true;
+    return false;
+  }
+
+  /**
+   * Строит множества include и exclude из сырого фильтра (для передачи в dialogMatchesFilter).
+   */
+  static getFilterIncludeExcludePeerIds(filterRaw: any): { include: Set<string>; exclude: Set<string> } {
+    const include = new Set<string>();
+    const exclude = new Set<string>();
+    if (!filterRaw) return { include, exclude };
+    const pinned = filterRaw.pinned_peers ?? filterRaw.pinnedPeers ?? [];
+    const included = filterRaw.include_peers ?? filterRaw.includePeers ?? [];
+    const excluded = filterRaw.exclude_peers ?? filterRaw.excludePeers ?? [];
+    for (const p of [...pinned, ...included]) {
+      TelegramManager.inputPeerToDialogIds(p, include);
+    }
+    for (const p of excluded) {
+      TelegramManager.inputPeerToDialogIds(p, exclude);
+    }
+    return { include, exclude };
+  }
+
+  /**
    * Get dialog filters (folders) from Telegram — кастомные папки пользователя.
    * Если у пользователя нет папок, API вернёт пустой массив или один элемент (дефолт «Все чаты», id 0).
    * Папку «Все чаты» (id 0) для списка диалогов вызывающая сторона добавляет сама через getDialogsByFolder(accountId, 0).
@@ -1522,17 +1605,29 @@ export class TelegramManager {
 
   /**
    * Get dialogs for a specific folder (for populating sync_chats from selected folders).
-   * В Telegram API folder_id в getDialogs поддерживает только 0 (основной список) и 1 (архив).
-   * Кастомные папки (id >= 2) — это Dialog Filter с include_peers/pinned_peers: берём все диалоги из 0 и фильтруем по списку пиров фильтра.
+   * Папки 0 и 1: через getDialogsAll (полный список). Кастомные (id >= 2): все диалоги 0+1 и фильтр по DialogFilter (include_peers + критерии).
    */
   async getDialogsByFolder(accountId: string, folderId: number): Promise<any[]> {
-    if (folderId === 0 || folderId === 1) {
-      return this.getDialogs(accountId, folderId);
+    if (folderId === 0) {
+      return this.getDialogsAll(accountId, 0, { maxDialogs: 3000, delayEveryN: 100, delayMs: 600 });
     }
-    const allDialogs = await this.getDialogs(accountId, 0);
-    const peerIds = await this.getDialogFilterPeerIds(accountId, folderId);
-    if (peerIds.size === 0) return [];
-    return allDialogs.filter((d: any) => peerIds.has(String(d.id)));
+    if (folderId === 1) {
+      return this.getDialogsAll(accountId, 1, { maxDialogs: 2000, delayEveryN: 100, delayMs: 600 }).catch(() => []);
+    }
+    const [all0, all1] = await Promise.all([
+      this.getDialogsAll(accountId, 0, { maxDialogs: 3000, delayEveryN: 100, delayMs: 600 }),
+      this.getDialogsAll(accountId, 1, { maxDialogs: 2000, delayEveryN: 100, delayMs: 600 }).catch(() => []),
+    ]);
+    const mergedById = new Map<string, any>();
+    for (const d of [...all0, ...all1]) {
+      if (!mergedById.has(String(d.id))) mergedById.set(String(d.id), d);
+    }
+    const merged = Array.from(mergedById.values());
+    const filterRaw = await this.getDialogFilterRaw(accountId, folderId);
+    const { include: includePeerIds, exclude: excludePeerIds } = TelegramManager.getFilterIncludeExcludePeerIds(filterRaw);
+    return merged.filter((d: any) =>
+      TelegramManager.dialogMatchesFilter(d, filterRaw, includePeerIds, excludePeerIds)
+    );
   }
 
   /**
