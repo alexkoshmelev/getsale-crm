@@ -29,7 +29,67 @@ interface BDAccount {
   created_at: string;
   sync_status?: string;
   owner_id?: string | null;
-  is_owner?: boolean; // текущий пользователь — владелец (может управлять аккаунтом)
+  is_owner?: boolean;
+  first_name?: string | null;
+  last_name?: string | null;
+  username?: string | null;
+  display_name?: string | null;
+}
+
+function getAccountDisplayName(account: BDAccount): string {
+  if (account.display_name?.trim()) return account.display_name.trim();
+  const first = (account.first_name ?? '').trim();
+  const last = (account.last_name ?? '').trim();
+  if (first || last) return [first, last].filter(Boolean).join(' ');
+  if (account.username?.trim()) return account.username.trim();
+  if (account.phone_number?.trim()) return account.phone_number.trim();
+  return account.telegram_id || account.id;
+}
+
+function getAccountInitials(account: BDAccount): string {
+  const name = getAccountDisplayName(account);
+  const parts = name.replace(/@/g, '').trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase().slice(0, 2);
+  if (name.length >= 2) return name.slice(0, 2).toUpperCase();
+  return name.slice(0, 1).toUpperCase() || '?';
+}
+
+function BDAccountAvatar({ accountId, account, className = 'w-10 h-10' }: { accountId: string; account: BDAccount; className?: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const mounted = useRef(true);
+  const blobUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    apiClient
+      .get(`/api/bd-accounts/${accountId}/avatar`, { responseType: 'blob' })
+      .then((res) => {
+        if (mounted.current && res.data instanceof Blob && res.data.size > 0) {
+          const u = URL.createObjectURL(res.data);
+          blobUrlRef.current = u;
+          setSrc(u);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted.current = false;
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+      setSrc(null);
+    };
+  }, [accountId]);
+
+  const initials = getAccountInitials(account);
+  if (src) {
+    return <img src={src} alt="" className={`rounded-full object-cover bg-muted shrink-0 ${className}`} />;
+  }
+  return (
+    <div className={`rounded-full bg-primary/15 flex items-center justify-center text-primary font-semibold text-sm shrink-0 ${className}`}>
+      {initials}
+    </div>
+  );
 }
 
 interface Chat {
@@ -1023,10 +1083,15 @@ export default function MessagingPage() {
     }
   };
 
-  const filteredAccounts = accounts.filter((account) =>
-    account.phone_number?.toLowerCase().includes(accountSearch.toLowerCase()) ||
-    account.telegram_id?.toLowerCase().includes(accountSearch.toLowerCase())
-  );
+  const filteredAccounts = accounts.filter((account) => {
+    const q = accountSearch.toLowerCase().trim();
+    if (!q) return true;
+    const name = getAccountDisplayName(account).toLowerCase();
+    const phone = (account.phone_number ?? '').toLowerCase();
+    const username = (account.username ?? '').toLowerCase();
+    const tgId = (account.telegram_id ?? '').toLowerCase();
+    return name.includes(q) || phone.includes(q) || username.includes(q) || tgId.includes(q);
+  });
   const selectedAccount = selectedAccountId ? accounts.find((a) => a.id === selectedAccountId) : null;
   const isSelectedAccountMine = selectedAccount?.is_owner === true;
 
@@ -1121,37 +1186,38 @@ export default function MessagingPage() {
                   setSelectedChat(null);
                   setMessages([]);
                 }}
-                className={`p-3 cursor-pointer border-b border-border hover:bg-accent ${
+                className={`p-3 cursor-pointer border-b border-border hover:bg-accent flex gap-3 ${
                   selectedAccountId === account.id
                     ? 'bg-primary/10 border-l-4 border-l-primary'
                     : ''
                 }`}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium text-sm truncate">
-                      {account.phone_number || account.telegram_id || 'Unknown'}
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                      <span className="text-xs text-muted-foreground">Telegram</span>
-                      {account.is_owner ? (
-                        <span className="text-xs text-primary font-medium">{t('messaging.yourAccount')}</span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">{t('messaging.colleague')}</span>
-                      )}
-                      {account.sync_status === 'completed' ? (
-                        <span className="text-xs text-green-600 dark:text-green-400 font-medium">{t('messaging.ready')}</span>
-                      ) : (
-                        <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">{t('messaging.syncing')}</span>
-                      )}
-                    </div>
+                <BDAccountAvatar accountId={account.id} account={account} className="w-10 h-10 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium text-sm truncate">
+                    {getAccountDisplayName(account)}
                   </div>
-                  {account.is_active ? (
-                    <CheckCircle2 className="w-4 h-4 text-green-500 dark:text-green-400 flex-shrink-0" />
-                  ) : (
-                    <XCircle className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-                  )}
+                  <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                    <span className="text-xs text-muted-foreground truncate">
+                      {account.username ? `@${account.username}` : account.phone_number || 'Telegram'}
+                    </span>
+                    {account.is_owner ? (
+                      <span className="text-xs text-primary font-medium shrink-0">{t('messaging.yourAccount')}</span>
+                    ) : (
+                      <span className="text-xs text-muted-foreground shrink-0">{t('messaging.colleague')}</span>
+                    )}
+                    {account.sync_status === 'completed' ? (
+                      <span className="text-xs text-green-600 dark:text-green-400 font-medium shrink-0">{t('messaging.ready')}</span>
+                    ) : (
+                      <span className="text-xs text-amber-600 dark:text-amber-400 font-medium shrink-0">{t('messaging.syncing')}</span>
+                    )}
+                  </div>
                 </div>
+                {account.is_active ? (
+                  <CheckCircle2 className="w-4 h-4 text-green-500 dark:text-green-400 flex-shrink-0" />
+                ) : (
+                  <XCircle className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                )}
               </div>
             ))
           )}
