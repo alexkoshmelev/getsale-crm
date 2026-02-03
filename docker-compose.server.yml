@@ -3,6 +3,10 @@
 # All app images are pulled from the DigitalOcean registry
 # Set REGISTRY in .env to override (default: registry.digitalocean.com/regestry-getsale-ai)
 #
+# Required in .env (copy from env.server.example): POSTGRES_PASSWORD, REDIS_PASSWORD,
+# RABBITMQ_PASSWORD, JWT_SECRET, JWT_REFRESH_SECRET. Services use RABBITMQ_URL built from
+# RABBITMQ_PASSWORD (amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672).
+#
 # name: fixes project name so "compose down" never touches Traefik (run from /docker/getsale-crm)
 name: getsale-crm
 
@@ -50,7 +54,8 @@ services:
     restart: unless-stopped
     environment:
       RABBITMQ_DEFAULT_USER: getsale
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      # Set RABBITMQ_PASSWORD in .env (see env.server.example); default only avoids compose warning
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-set_me_in_env}
     volumes:
       - ./.data/rabbitmq:/var/lib/rabbitmq
     healthcheck:
@@ -71,7 +76,7 @@ services:
       - NODE_ENV=production
       - PORT=8000
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
       - AUTH_SERVICE_URL=http://auth-service:3001
       - CRM_SERVICE_URL=http://crm-service:3002
       - MESSAGING_SERVICE_URL=http://messaging-service:3003
@@ -110,7 +115,7 @@ services:
       - PORT=3001
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
       - JWT_SECRET=${JWT_SECRET}
       - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
     depends_on:
@@ -129,7 +134,7 @@ services:
       - PORT=3002
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -146,7 +151,7 @@ services:
       - PORT=3003
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
       - WEBSOCKET_SERVICE_URL=http://websocket-service:3004
       - BD_ACCOUNTS_SERVICE_URL=http://bd-accounts-service:3007
     depends_on:
@@ -164,7 +169,7 @@ services:
       - NODE_ENV=production
       - PORT=3004
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
       - AUTH_SERVICE_URL=http://auth-service:3001
       - CORS_ORIGIN=${CORS_ORIGIN:-https://app.getsale.ai}
       - MAX_CONNECTIONS_PER_ORG=100
@@ -190,7 +195,7 @@ services:
       - NODE_ENV=production
       - PORT=3005
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
       redis: { condition: service_healthy }
@@ -207,7 +212,7 @@ services:
       - PORT=3006
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
     depends_on:
       postgres: { condition: service_healthy }
@@ -226,7 +231,7 @@ services:
       - PORT=3007
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
       - TELEGRAM_API_ID=${TELEGRAM_API_ID}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
     depends_on:
@@ -245,7 +250,7 @@ services:
       - PORT=3008
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -262,7 +267,7 @@ services:
       - PORT=3009
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
       - PIPELINE_SERVICE_URL=http://pipeline-service:3008
     depends_on:
       postgres: { condition: service_healthy }
@@ -280,7 +285,7 @@ services:
       - PORT=3010
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -297,7 +302,7 @@ services:
       - PORT=3011
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

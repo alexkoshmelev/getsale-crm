@@ -190,7 +190,7 @@ Workflow `.github/workflows/deploy.yml` при пуше в `main` (или по �
 
 1. Создать каталог: `mkdir -p /docker/getsale-crm && cd /docker/getsale-crm`
 2. Скопировать туда `docker-compose.server.yml` из репозитория.
-3. Создать `.env` с продакшн-переменными: `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `RABBITMQ_PASSWORD`, `JWT_SECRET`, `JWT_REFRESH_SECRET`, `OPENAI_API_KEY`, `CORS_ORIGIN` и др. (см. комментарии в `docker-compose.server.yml`).
+3. Создать `.env`: `cp env.server.example .env` и заполнить значения. Обязательно: `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `RABBITMQ_PASSWORD`, `JWT_SECRET`, `JWT_REFRESH_SECRET`. На сервере задаётся только `RABBITMQ_PASSWORD`; `RABBITMQ_URL` в контейнерах собирается из него. Остальные переменные — см. `env.server.example`.
 4. При первом деплое образы подтянутся через `docker compose pull`; далее workflow сам делает `down` → `pull` → `up -d` и запуск миграций.
 
 Путь на сервере по умолчанию: `/docker/getsale-crm`. Его можно поменять в шаге «Deploy to Prod Server» в workflow.

@@ -42,7 +42,7 @@ cp env.server.example .env
 # отредактируйте .env: пароли, JWT_SECRET, JWT_REFRESH_SECRET, OPENAI_API_KEY и т.д.
 ```
 
-Обязательные переменные: `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `RABBITMQ_PASSWORD`, `JWT_SECRET`, `JWT_REFRESH_SECRET`. Остальные — см. `env.server.example`.
+Обязательные переменные в `.env`: `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `RABBITMQ_PASSWORD`, `JWT_SECRET`, `JWT_REFRESH_SECRET`. Остальные — см. `env.server.example`. На сервере используется только `RABBITMQ_PASSWORD`; `RABBITMQ_URL` в контейнерах собирается из него (`amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672`). Если при `docker compose` видите предупреждение *The "RABBITMQ_PASSWORD" variable is not set* — создайте `.env` из `env.server.example` и задайте все переменные.
 
 **TELEGRAM_API_ID / TELEGRAM_API_HASH (ошибка «must be set in environment»):** (1) **Деплой через GitHub Actions:** добавьте в настройках репозитория (Settings → Secrets) секреты `TELEGRAM_API_ID` и `TELEGRAM_API_HASH` — при каждом деплое они записываются в `.env` на сервере. (2) **Ручной запуск на сервере:** создайте/отредактируйте `.env` в каталоге с `docker-compose.server.yml` (например `/docker/getsale-crm/.env`), затем `docker compose -f docker-compose.server.yml up -d --force-recreate bd-accounts-service`.
 
