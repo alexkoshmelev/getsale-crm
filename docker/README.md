@@ -44,7 +44,7 @@ cp env.server.example .env
 
 Обязательные переменные: `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `RABBITMQ_PASSWORD`, `JWT_SECRET`, `JWT_REFRESH_SECRET`. Остальные — см. `env.server.example`.
 
-**TELEGRAM_API_ID / TELEGRAM_API_HASH (ошибка на фронте «must be set in environment»):** переменные должны быть в файле **.env на сервере** в том же каталоге, откуда запускается `docker compose` (например `/docker/getsale-crm/.env`). Файл `.env` не коммитится в git — его нужно создать или отредактировать прямо на сервере. После добавления или изменения переменных пересоздайте контейнер: `docker compose -f docker-compose.server.yml up -d --force-recreate bd-accounts-service`. Проверка: `docker exec getsale-crm-bd-accounts-service printenv | grep TELEGRAM` — должны вывестись обе переменные.
+**TELEGRAM_API_ID / TELEGRAM_API_HASH (ошибка «must be set in environment»):** (1) **Деплой через GitHub Actions:** добавьте в настройках репозитория (Settings → Secrets) секреты `TELEGRAM_API_ID` и `TELEGRAM_API_HASH` — при каждом деплое они записываются в `.env` на сервере. (2) **Ручной запуск на сервере:** создайте/отредактируйте `.env` в каталоге с `docker-compose.server.yml` (например `/docker/getsale-crm/.env`), затем `docker compose -f docker-compose.server.yml up -d --force-recreate bd-accounts-service`.
 
 **Реестр DigitalOcean:** на сервере один раз выполните вход в registry, иначе `docker compose pull` выдаст `unauthorized`:
 

@@ -220,6 +220,7 @@ services:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:bd-accounts-service
     container_name: getsale-crm-bd-accounts-service
     restart: unless-stopped
+    env_file: .env
     environment:
       - NODE_ENV=production
       - PORT=3007

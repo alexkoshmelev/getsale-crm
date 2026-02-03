@@ -92,14 +92,14 @@ function getUser(req: express.Request) {
   };
 }
 
-/** Telegram API credentials from env — одни на всё приложение. */
+/** Telegram API credentials from env. */
 function getTelegramApiCredentials(): { apiId: number; apiHash: string } {
   const apiId = process.env.TELEGRAM_API_ID;
   const apiHash = process.env.TELEGRAM_API_HASH;
   if (!apiId || !apiHash) {
     throw new Error(
       'TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in environment. ' +
-        'On the server: add them to .env in the same directory as docker-compose.server.yml (e.g. /docker/getsale-crm/.env), ' +
+        'On the server: set GitHub Secrets TELEGRAM_API_ID and TELEGRAM_API_HASH, or add them to .env in the same directory as docker-compose.server.yml, ' +
         'then run: docker compose -f docker-compose.server.yml up -d --force-recreate bd-accounts-service'
     );
   }
