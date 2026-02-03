@@ -175,7 +175,7 @@ export default function BDAccountsPage() {
     setLoadingDialogs(true);
     router.replace('/dashboard/bd-accounts'); // убрать query из URL
     Promise.all([
-      apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders`).then((res) => (res.data?.folders ?? []) as FolderWithDialogs[]),
+      apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders`, { timeout: 120000 }).then((res) => (res.data?.folders ?? []) as FolderWithDialogs[]),
       apiClient.get(`/api/bd-accounts/${accountId}/sync-chats`).then((res) => (Array.isArray(res.data) ? res.data : []) as SyncChatRow[]),
     ])
       .then(([folders, syncList]) => {
@@ -451,7 +451,7 @@ export default function BDAccountsPage() {
             setConnectStep('select-chats');
             setLoadingDialogs(true);
             setSelectChatsSearch('');
-            apiClient.get(`/api/bd-accounts/${data.accountId}/dialogs-by-folders`).then((res) => {
+            apiClient.get(`/api/bd-accounts/${data.accountId}/dialogs-by-folders`, { timeout: 120000 }).then((res) => {
               setDialogsByFolders(res.data?.folders ?? []);
               setSyncChatsList([]);
               setExpandedFolderId(null);
@@ -941,6 +941,7 @@ export default function BDAccountsPage() {
                     <div className="flex flex-col items-center justify-center py-12 flex-1">
                       <Loader2 className="w-10 h-10 animate-spin text-primary mb-3" />
                       <p className="text-sm text-muted-foreground">Загружаем папки и чаты…</p>
+                      <p className="text-xs text-muted-foreground mt-1">При большом числе чатов загрузка может занять 1–2 минуты</p>
                     </div>
                   ) : (
                     <>

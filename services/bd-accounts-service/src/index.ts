@@ -700,10 +700,8 @@ app.get('/api/bd-accounts/:id/folders', async (req, res) => {
   }
 });
 
-// Get dialogs grouped by folders — для UI выбора контактов по папкам (один контакт может быть в нескольких папках).
-// Если у пользователя нет кастомных папок в Telegram, getDialogFilters вернёт пустой массив или только дефолт (id 0).
-// Мы всегда первым добавляем папку «Все чаты» (id 0) с getDialogsByFolder(id, 0), чтобы у пользователя без папок
-// был один список «Все чаты» со всеми чатами. Фильтры из API с id === 0 пропускаем, чтобы не дублировать.
+// Get dialogs grouped by folders — для UI выбора контактов по папкам.
+// Один запрос getDialogsAll на папку 0 и 1, кастомные папки фильтруются в памяти — меньше flood wait и таймаутов.
 app.get('/api/bd-accounts/:id/dialogs-by-folders', async (req, res) => {
   try {
     const user = getUser(req);
@@ -720,13 +718,30 @@ app.get('/api/bd-accounts/:id/dialogs-by-folders', async (req, res) => {
       accountTelegramId ? dialogs.filter((d: any) => !(d.isUser && String(d.id).trim() === accountTelegramId)) : dialogs;
 
     const filters = await telegramManager.getDialogFilters(id);
-    const allDialogs = await telegramManager.getDialogsByFolder(id, 0);
+    const [allDialogs0, allDialogs1] = await Promise.all([
+      telegramManager.getDialogsAll(id, 0, { maxDialogs: 3000, delayEveryN: 100, delayMs: 600 }),
+      telegramManager.getDialogsAll(id, 1, { maxDialogs: 2000, delayEveryN: 100, delayMs: 600 }).catch(() => []),
+    ]);
+    const mergedById = new Map<string, any>();
+    for (const d of [...allDialogs0, ...allDialogs1]) {
+      if (!mergedById.has(String(d.id))) mergedById.set(String(d.id), d);
+    }
+    const merged = Array.from(mergedById.values());
+
     const folderList: { id: number; title: string; emoticon?: string; dialogs: any[] }[] = [
-      { id: 0, title: 'Все чаты', emoticon: '💬', dialogs: excludeSelf(allDialogs) },
+      { id: 0, title: 'Все чаты', emoticon: '💬', dialogs: excludeSelf(allDialogs0) },
     ];
+    if (allDialogs1.length > 0) {
+      folderList.push({ id: 1, title: 'Архив', emoticon: '📁', dialogs: excludeSelf(allDialogs1) });
+    }
     for (const f of filters) {
-      if (f.id === 0) continue;
-      const dialogs = await telegramManager.getDialogsByFolder(id, f.id);
+      if (f.id === 0 || f.id === 1) continue;
+      const peerIds = await telegramManager.getDialogFilterPeerIds(id, f.id);
+      if (peerIds.size === 0) {
+        folderList.push({ id: f.id, title: f.title, emoticon: f.emoticon, dialogs: [] });
+        continue;
+      }
+      const dialogs = merged.filter((d: any) => peerIds.has(String(d.id)));
       folderList.push({ id: f.id, title: f.title, emoticon: f.emoticon, dialogs: excludeSelf(dialogs) });
     }
     res.json({ folders: folderList });
@@ -856,11 +871,41 @@ async function refreshChatsFromFolders(
   );
   if (foldersRows.rows.length === 0) return;
 
+  let allDialogs0: any[] = [];
+  let allDialogs1: any[] = [];
+  const hasFolder0 = foldersRows.rows.some((r: any) => Number(r.folder_id) === 0);
+  const hasFolder1 = foldersRows.rows.some((r: any) => Number(r.folder_id) === 1);
+  if (hasFolder0 || foldersRows.rows.some((r: any) => Number(r.folder_id) >= 2)) {
+    try {
+      allDialogs0 = await telegramManager.getDialogsAll(accountId, 0, { maxDialogs: 3000, delayEveryN: 100, delayMs: 600 });
+    } catch (err: any) {
+      console.warn(`[BD Accounts] refreshChatsFromFolders getDialogsAll(0) failed:`, err?.message);
+    }
+  }
+  if (hasFolder1) {
+    try {
+      allDialogs1 = await telegramManager.getDialogsAll(accountId, 1, { maxDialogs: 2000, delayEveryN: 100, delayMs: 600 });
+    } catch (err: any) {
+      console.warn(`[BD Accounts] refreshChatsFromFolders getDialogsAll(1) failed:`, err?.message);
+    }
+  }
+  const mergedById = new Map<string, any>();
+  for (const d of [...allDialogs0, ...allDialogs1]) {
+    if (!mergedById.has(String(d.id))) mergedById.set(String(d.id), d);
+  }
+  const merged = Array.from(mergedById.values());
+
   const seenChatIds = new Set<string>();
   for (const row of foldersRows.rows) {
     const folderId = Number(row.folder_id);
+    let dialogs: any[] = [];
     try {
-      const dialogs = await telegramManager.getDialogsByFolder(accountId, folderId);
+      if (folderId === 0) dialogs = allDialogs0;
+      else if (folderId === 1) dialogs = allDialogs1;
+      else {
+        const peerIds = await telegramManager.getDialogFilterPeerIds(accountId, folderId);
+        if (peerIds.size > 0) dialogs = merged.filter((d: any) => peerIds.has(String(d.id)));
+      }
       for (const d of dialogs) {
         const chatId = String(d.id ?? '').trim();
         if (!chatId || seenChatIds.has(chatId)) continue;

@@ -1356,9 +1356,65 @@ export class TelegramManager {
     return { totalChats, totalMessages };
   }
 
+  private static mapDialogToItem(dialog: any): any {
+    return {
+      id: String(dialog.id),
+      name: dialog.name || dialog.title || 'Unknown',
+      unreadCount: dialog.unreadCount || 0,
+      lastMessage: dialog.message?.text || '',
+      lastMessageDate: dialog.message?.date,
+      isUser: dialog.isUser,
+      isGroup: dialog.isGroup,
+      isChannel: dialog.isChannel,
+    };
+  }
+
   /**
-   * Get all dialogs for an account (optionally filtered by folder).
-   * @param folderId - Telegram folder id (0 = main list, 1 = archive, 2+ = custom filter id). Omit for all.
+   * Fetch all dialogs for a folder using iterDialogs (paginated by GramJS) with delay between batches to reduce flood wait.
+   * Returns only users and groups (no channels). Use for initial sync when account has many chats.
+   */
+  async getDialogsAll(
+    accountId: string,
+    folderId: number,
+    options?: { maxDialogs?: number; delayEveryN?: number; delayMs?: number }
+  ): Promise<any[]> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const maxDialogs = options?.maxDialogs ?? 3000;
+    const delayEveryN = options?.delayEveryN ?? 100;
+    const delayMs = options?.delayMs ?? 600;
+    const result: any[] = [];
+    let count = 0;
+    const client = clientInfo.client as any;
+    if (typeof client.iterDialogs !== 'function') {
+      return this.getDialogs(accountId, folderId);
+    }
+    try {
+      const iter = client.iterDialogs({ folder: folderId, limit: maxDialogs });
+      for await (const dialog of iter) {
+        if (dialog.isUser || dialog.isGroup) {
+          result.push(TelegramManager.mapDialogToItem(dialog));
+          count++;
+          if (count % delayEveryN === 0 && count < maxDialogs) {
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
+        }
+        if (count >= maxDialogs) break;
+      }
+      console.log(`[TelegramManager] getDialogsAll folder=${folderId} fetched ${result.length} dialogs`);
+      return result;
+    } catch (error: any) {
+      if (error?.message === 'TIMEOUT' || error?.message?.includes('TIMEOUT')) throw error;
+      console.error(`[TelegramManager] Error getDialogsAll for ${accountId} folder ${folderId}:`, error?.message || error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get dialogs for an account (optionally filtered by folder). Single batch, max 100 — for lightweight calls.
+   * For full list use getDialogsAll.
    */
   async getDialogs(accountId: string, folderId?: number): Promise<any[]> {
     const clientInfo = this.clients.get(accountId);
@@ -1372,17 +1428,7 @@ export class TelegramManager {
         opts.folderId = folderId;
       }
       const dialogs = await clientInfo.client.getDialogs(opts);
-      const mapped = dialogs.map((dialog: any) => ({
-        id: String(dialog.id),
-        name: dialog.name || dialog.title || 'Unknown',
-        unreadCount: dialog.unreadCount || 0,
-        lastMessage: dialog.message?.text || '',
-        lastMessageDate: dialog.message?.date,
-        isUser: dialog.isUser,
-        isGroup: dialog.isGroup,
-        isChannel: dialog.isChannel,
-      }));
-      // Показываем только личные переписки и групповые чаты (где пользователь может писать); каналы исключаем
+      const mapped = dialogs.map((dialog: any) => TelegramManager.mapDialogToItem(dialog));
       return mapped.filter((d: any) => d.isUser || d.isGroup);
     } catch (error) {
       console.error(`[TelegramManager] Error getting dialogs for ${accountId}:`, error);

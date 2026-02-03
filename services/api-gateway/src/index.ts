@@ -266,8 +266,8 @@ const bdAccountsProxy = createProxyMiddleware({
   target: BD_ACCOUNTS_SERVICE,
   changeOrigin: true,
   pathRewrite: { '^/api/bd-accounts': '/api/bd-accounts' },
-  timeout: 30000, // 30 seconds timeout
-  proxyTimeout: 30000,
+  timeout: 120000, // 2 min — dialogs-by-folders can take 60–120s for accounts with many chats
+  proxyTimeout: 120000,
   logLevel: 'debug',
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;
