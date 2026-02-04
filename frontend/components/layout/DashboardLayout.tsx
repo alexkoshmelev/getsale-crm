@@ -214,16 +214,19 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
         </div>
       </aside>
 
-      {/* Main Content — header h-14 to align with sidebar top border */}
-      <div className={clsx('flex flex-col min-h-screen transition-[margin] duration-200 ease-in-out', mainMargin)}>
-        <header className="shrink-0 z-10 bg-card/95 backdrop-blur-sm border-b border-border min-h-[3.5rem] px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2 shadow-soft">
+      {/* Main Content — на messaging фиксируем высоту (h-screen), чтобы не было общего скролла страницы */}
+      <div
+        className={clsx(
+          'flex flex-col transition-[margin] duration-200 ease-in-out',
+          mainMargin,
+          pathname === '/dashboard/messaging' ? 'h-screen overflow-hidden' : 'min-h-screen'
+        )}
+      >
+        <header className="shrink-0 z-10 bg-card/95 backdrop-blur-sm border-b border-border h-14 min-h-[3.5rem] px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2 shadow-soft">
           <div className="flex items-center gap-3 min-w-0 flex-1">
             <GlobalSearch />
             <div className="hidden sm:block flex-1 min-w-0">
               <Breadcrumbs />
-              <h2 className="font-heading text-lg sm:text-xl font-semibold text-foreground truncate tracking-tight">
-                {pageTitle}
-              </h2>
             </div>
             <div className="sm:hidden flex-1 min-w-0">
               <h2 className="font-heading text-lg font-semibold text-foreground truncate tracking-tight">
@@ -289,9 +292,23 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
           </div>
         </header>
 
-        <main className="flex-1 min-h-0 p-4 sm:p-6 overflow-auto animate-in fade-in duration-200">
-          <div className="sm:hidden mb-2"><Breadcrumbs /></div>
-          {children}
+        <main
+          className={clsx(
+            'flex-1 min-h-0 flex flex-col animate-in fade-in duration-200',
+            pathname === '/dashboard/messaging' ? 'p-0 overflow-hidden' : 'p-4 sm:p-6 overflow-auto'
+          )}
+        >
+          <div className="sm:hidden mb-2 shrink-0"><Breadcrumbs /></div>
+          <div
+            className={clsx(
+              'min-w-0',
+              pathname === '/dashboard/messaging'
+                ? 'flex-1 min-h-0 flex flex-col overflow-hidden'
+                : 'flex-1 min-h-0 overflow-auto'
+            )}
+          >
+            {children}
+          </div>
         </main>
       </div>
       <KeyboardShortcutsModal isOpen={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />

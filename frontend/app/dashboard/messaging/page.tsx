@@ -16,8 +16,6 @@ import {
 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import AIAssistantWidget from '@/components/ai/AIAssistantWidget';
-import AIAssistantWindow from '@/components/ai/AIAssistantWindow';
 
 interface BDAccount {
   id: string;
@@ -413,7 +411,6 @@ export default function MessagingPage() {
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [showAIAssistant, setShowAIAssistant] = useState(false);
   const [accountSyncReady, setAccountSyncReady] = useState<boolean>(true);
   const [accountSyncProgress, setAccountSyncProgress] = useState<{ done: number; total: number } | null>(null);
   const [accountSyncError, setAccountSyncError] = useState<string | null>(null);
@@ -422,7 +419,11 @@ export default function MessagingPage() {
   const [savingDisplayName, setSavingDisplayName] = useState(false);
   const [showChatHeaderMenu, setShowChatHeaderMenu] = useState(false);
   const chatHeaderMenuRef = useRef<HTMLDivElement>(null);
-  const STORAGE_KEYS = { accountsPanel: 'messaging.accountsPanelCollapsed', chatsPanel: 'messaging.chatsPanelCollapsed' };
+  const STORAGE_KEYS = {
+    accountsPanel: 'messaging.accountsPanelCollapsed',
+    chatsPanel: 'messaging.chatsPanelCollapsed',
+    aiPanel: 'messaging.aiPanelExpanded',
+  };
 
   const [accountsPanelCollapsed, setAccountsPanelCollapsed] = useState(() => {
     if (typeof window === 'undefined') return false;
@@ -437,6 +438,13 @@ export default function MessagingPage() {
     } catch { return false; }
   });
 
+  const [aiPanelExpanded, setAiPanelExpanded] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return localStorage.getItem(STORAGE_KEYS.aiPanel) === 'true';
+    } catch { return false; }
+  });
+
   const setAccountsCollapsed = useCallback((v: boolean) => {
     setAccountsPanelCollapsed(v);
     try { localStorage.setItem(STORAGE_KEYS.accountsPanel, String(v)); } catch {}
@@ -444,6 +452,11 @@ export default function MessagingPage() {
   const setChatsCollapsed = useCallback((v: boolean) => {
     setChatsPanelCollapsed(v);
     try { localStorage.setItem(STORAGE_KEYS.chatsPanel, String(v)); } catch {}
+  }, []);
+
+  const setAiPanelExpandedStored = useCallback((v: boolean) => {
+    setAiPanelExpanded(v);
+    try { localStorage.setItem(STORAGE_KEYS.aiPanel, String(v)); } catch {}
   }, []);
 
   const [chatTypeFilter, setChatTypeFilter] = useState<'all' | 'personal' | 'groups'>('all');
@@ -816,12 +829,13 @@ export default function MessagingPage() {
     setLoadingOlder(true);
     const nextPage = messagesPage + 1;
     try {
-      // Гибрид: сначала догружаем историю из Telegram в БД, затем читаем страницу из БД
+      // Гибрид: догружаем одну страницу старых сообщений из Telegram в БД, затем читаем страницу из БД
       if (selectedChat.channel === 'telegram' && !historyExhausted) {
         try {
-          await apiClient.post(
+          const loadRes = await apiClient.post<{ added?: number; exhausted?: boolean }>(
             `/api/bd-accounts/${selectedAccountId}/chats/${selectedChat.channel_id}/load-older-history`
           );
+          if (loadRes.data?.exhausted === true) setHistoryExhausted(true);
         } catch (_) {
           // не блокируем: дальше возьмём из БД что есть
         }
@@ -874,7 +888,7 @@ export default function MessagingPage() {
     return () => container.removeEventListener('scroll', onScroll);
   }, []);
 
-  // Подгрузка старых сообщений при скролле вверх (как в Telegram): sentinel вверху списка, root — контейнер скролла
+  // Подгрузка старых сообщений при скролле вверх: когда sentinel в зоне видимости (пользователь доскроллил до верха) — запрашиваем следующую страницу
   useEffect(() => {
     const sentinel = messagesTopSentinelRef.current;
     const scrollRoot = messagesScrollRef.current;
@@ -883,13 +897,12 @@ export default function MessagingPage() {
       (entries) => {
         const [e] = entries;
         if (!e?.isIntersecting || !hasMoreMessages || loadingOlder) return;
-        if (!hasUserScrolledUpRef.current) return;
         const now = Date.now();
         if (now - loadOlderLastCallRef.current < LOAD_OLDER_COOLDOWN_MS) return;
         loadOlderLastCallRef.current = now;
         loadOlderMessages();
       },
-      { root: scrollRoot, rootMargin: '100px 0px 0px 0px', threshold: 0 }
+      { root: scrollRoot, rootMargin: '80px 0px 0px 0px', threshold: 0 }
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
@@ -1150,17 +1163,18 @@ export default function MessagingPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-[calc(100vh-6.5rem)] min-h-0">
+      <div className="flex items-center justify-center h-full min-h-0 w-full rounded-lg border border-border bg-card">
         <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
       </div>
     );
   }
 
+  // Заполняем контейнер из layout; панели всегда на всю высоту (h-full), списки внутри — flex-1 min-h-0.
   return (
-    <div className="relative flex h-[calc(100vh-6.5rem)] min-h-0 bg-card -m-6 rounded-lg border border-border overflow-hidden">
-      {/* BD Accounts Sidebar — collapse/expand: в свёрнутом виде узкая полоска с кнопкой «Развернуть» */}
+    <div className="relative flex flex-1 items-stretch h-full min-h-full w-full min-w-0 bg-card rounded-lg border border-border overflow-hidden isolate">
+      {/* BD Accounts — на всю высоту; список flex-1 min-h-0 */}
       <div
-        className={`min-h-0 bg-muted/50 border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${accountsPanelCollapsed ? 'w-12' : 'w-64'}`}
+        className={`h-full min-h-0 self-stretch bg-muted/40 dark:bg-muted/20 border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${accountsPanelCollapsed ? 'w-12' : 'w-64'}`}
         aria-expanded={!accountsPanelCollapsed}
       >
         {accountsPanelCollapsed ? (
@@ -1212,9 +1226,9 @@ export default function MessagingPage() {
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto min-h-0">
+        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
           {filteredAccounts.length === 0 ? (
-            <div className="p-4 text-center text-sm text-muted-foreground">
+            <div className="p-4 text-center text-sm text-muted-foreground flex-1 min-h-0 flex items-center justify-center">
               {t('messaging.noAccounts')}
             </div>
           ) : (
@@ -1266,9 +1280,9 @@ export default function MessagingPage() {
         )}
       </div>
 
-      {/* Chats List — collapse/expand: в свёрнутом виде узкая полоска с кнопкой «Развернуть» */}
+      {/* Список чатов — на всю высоту; область списка flex-1 min-h-0 */}
       <div
-        className={`min-h-0 bg-card border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${chatsPanelCollapsed ? 'w-12' : 'w-80'}`}
+        className={`h-full min-h-0 self-stretch bg-card border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${chatsPanelCollapsed ? 'w-12' : 'w-80'}`}
         aria-expanded={!chatsPanelCollapsed}
       >
         {chatsPanelCollapsed ? (
@@ -1286,100 +1300,95 @@ export default function MessagingPage() {
           </div>
         ) : (
           <>
-        <div className="p-4 border-b border-border flex items-center justify-between gap-2 shrink-0">
-          <div className="flex-1 space-y-2 min-w-0">
-          <div className="relative">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-muted-foreground" />
+        {/* Шапка панели чатов: заголовок «Чаты», поиск, тип + иконка настроек списка; без скролла */}
+        <div className="p-3 border-b border-border flex flex-col gap-3 shrink-0 overflow-hidden">
+          <div className="flex items-center justify-between gap-2 min-h-[2rem]">
+            <h3 className="font-semibold text-foreground text-sm truncate">Чаты</h3>
+            <button
+              type="button"
+              onClick={() => setChatsCollapsed(true)}
+              className="p-1.5 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground shrink-0"
+              title="Свернуть панель чатов"
+              aria-label="Свернуть панель чатов"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="relative min-w-0">
+            <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
             <Input
               type="text"
               placeholder={t('messaging.searchChats')}
               value={chatSearch}
               onChange={(e) => setChatSearch(e.target.value)}
-              className="pl-9 text-sm"
+              className="pl-8 h-9 text-sm"
             />
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs text-muted-foreground">Тип:</span>
-            <div className="flex rounded-lg border border-border p-0.5 bg-muted/50">
-              {(['all', 'personal', 'groups'] as const).map((key) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setChatTypeFilter(key)}
-                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                    chatTypeFilter === key
-                      ? 'bg-card text-foreground shadow-sm'
-                      : 'text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  {key === 'all' ? 'Все' : key === 'personal' ? 'Личные' : 'Группы'}
-                </button>
-              ))}
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-xs text-muted-foreground shrink-0">Тип:</span>
+              <div className="flex rounded-md border border-border p-0.5 bg-muted/50">
+                {(['all', 'personal', 'groups'] as const).map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setChatTypeFilter(key)}
+                    className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
+                      chatTypeFilter === key
+                        ? 'bg-card text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {key === 'all' ? 'Все' : key === 'personal' ? 'Личные' : 'Группы'}
+                  </button>
+                ))}
+              </div>
             </div>
+            {selectedAccountId && (
+              <button
+                type="button"
+                onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
+                className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors shrink-0"
+                title="Изменить список чатов / догрузить историю"
+                aria-label="Изменить список чатов"
+              >
+                <Settings className="w-4 h-4" />
+              </button>
+            )}
           </div>
-
           {!accountSyncReady && (
-            <div className="text-xs text-muted-foreground bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/30 dark:border-amber-500/40 rounded-md px-3 py-2 space-y-2">
+            <div className="text-xs text-muted-foreground bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/30 rounded-md px-2.5 py-1.5 flex items-center gap-2 overflow-hidden">
               {accountSyncProgress ? (
-                `Идёт начальная синхронизация аккаунта (${accountSyncProgress.done} / ${accountSyncProgress.total} чатов)…`
+                <span className="truncate">
+                  Синхронизация: {accountSyncProgress.done} / {accountSyncProgress.total}
+                </span>
               ) : isSelectedAccountMine ? (
                 <>
-                  <p className="font-medium text-foreground">Чтобы начать работу с этим аккаунтом:</p>
-                  <p className="text-muted-foreground">{t('messaging.selectChatsSync')}</p>
-                  {accountSyncError && <div className="text-destructive">{accountSyncError}</div>}
-                  <div className="flex gap-2 flex-wrap">
-                    <Button
-                      size="sm"
-                      onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
-                    >
-                      Выбрать чаты и начать синхронизацию
-                    </Button>
-                    {accountSyncError && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => window.location.href = '/dashboard/bd-accounts'}
-                      >
-                        Настроить в BD Аккаунтах
-                      </Button>
-                    )}
-                  </div>
+                  <span className="truncate flex-1 min-w-0">{t('messaging.selectChatsSync')}</span>
+                  <button
+                    type="button"
+                    onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
+                    className="text-primary font-medium shrink-0 hover:underline"
+                  >
+                    Настроить
+                  </button>
                 </>
               ) : (
-                <p className="text-muted-foreground">{t('messaging.colleagueAccountHint')}</p>
+                <span className="truncate">{t('messaging.colleagueAccountHint')}</span>
               )}
             </div>
           )}
-          {accountSyncReady && isSelectedAccountMine && selectedAccountId && (
-            <div className="text-xs">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
-              >
-                Изменить список чатов / догрузить историю
-              </Button>
-            </div>
-          )}
-          </div>
-          <button
-            type="button"
-            onClick={() => setChatsCollapsed(true)}
-            className="p-1.5 rounded-md text-muted-foreground hover:bg-accent shrink-0"
-            title="Свернуть панель чатов"
-            aria-label="Свернуть панель чатов"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto min-h-0">
+        {/* Область списка чатов / загрузки: flex-1 min-h-0 — одна высота; лоадер в центре без дёргания при смене аккаунта */}
+        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col relative">
           {loadingChats ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <Loader2 className="w-6 h-6 animate-spin text-blue-600 shrink-0" aria-hidden />
             </div>
-          ) : !accountSyncReady ? (
-            <div className="p-4 flex flex-col items-center justify-center text-center text-sm text-muted-foreground">
+          ) : null}
+          {!loadingChats && !accountSyncReady ? (
+            <div className="p-4 flex flex-1 min-h-0 flex-col items-center justify-center text-center text-sm text-muted-foreground">
               {accountSyncProgress ? (
                 <span>Ожидание завершения начальной синхронизации аккаунта…</span>
               ) : isSelectedAccountMine ? (
@@ -1396,11 +1405,11 @@ export default function MessagingPage() {
                 <p>Аккаунт коллеги. Настройку синхронизации выполняет владелец.</p>
               )}
             </div>
-          ) : filteredChats.length === 0 ? (
-            <div className="p-4 text-center text-sm text-muted-foreground">
+          ) : !loadingChats && filteredChats.length === 0 ? (
+            <div className="p-4 text-center text-sm text-muted-foreground flex-1 min-h-0 flex items-center justify-center">
               {t('messaging.noChats')}
             </div>
-          ) : (
+          ) : !loadingChats ? (
             filteredChats.map((chat) => (
               <div
                 key={`${chat.channel}-${chat.channel_id}`}
@@ -1439,23 +1448,23 @@ export default function MessagingPage() {
                 </div>
               </div>
             ))
-          )}
+          ) : null}
         </div>
         </>
         )}
       </div>
 
-      {/* Chat Messages */}
-      <div className="flex-1 min-h-0 flex flex-col">
+      {/* Chat Messages — центр на всю высоту; скролл только внутри панели сообщений */}
+      <div className="flex-1 min-h-0 min-w-0 self-stretch h-full flex flex-col bg-background overflow-hidden">
         {selectedChat ? (
           <>
-            <div className="p-4 border-b border-border bg-card">
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="font-semibold">{getChatName(selectedChat)}</div>
-                  <div className="text-sm text-muted-foreground">
-                    {selectedChat.telegram_id && `Telegram ID: ${selectedChat.telegram_id}`}
-                  </div>
+            <div className="px-4 py-3 border-b border-border bg-card/95 backdrop-blur-sm shrink-0">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="font-semibold truncate">{getChatName(selectedChat)}</div>
+                  {selectedChat.telegram_id && (
+                    <div className="text-xs text-muted-foreground truncate">ID: {selectedChat.telegram_id}</div>
+                  )}
                 </div>
                 <div className="relative" ref={chatHeaderMenuRef}>
                   <button
@@ -1508,7 +1517,7 @@ export default function MessagingPage() {
               </div>
             )}
 
-            <div ref={messagesScrollRef} className="flex-1 min-h-0 overflow-y-auto p-4 bg-muted/30">
+            <div ref={messagesScrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 bg-muted/20 flex flex-col">
               {loadingMessages ? (
                 <div className="flex items-center justify-center h-full">
                   <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
@@ -1520,7 +1529,7 @@ export default function MessagingPage() {
                   <p className="text-xs mt-1 text-muted-foreground">{t('messaging.startConversation')}</p>
                 </div>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-3 w-full max-w-3xl mx-auto">
                   <div ref={messagesTopSentinelRef} className="h-2 flex-shrink-0" aria-hidden />
                   {loadingOlder && (
                     <div className="flex justify-center py-2">
@@ -1796,13 +1805,13 @@ export default function MessagingPage() {
             </div>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center bg-muted/30">
-            <div className="text-center">
+          <div className="flex-1 min-h-0 flex items-center justify-center bg-muted/20">
+            <div className="text-center px-4">
               <MessageSquare className="w-16 h-16 text-muted-foreground mx-auto mb-4" />
               <h3 className="text-lg font-semibold text-foreground mb-2">
                 Выберите чат
               </h3>
-              <p className="text-muted-foreground">
+              <p className="text-muted-foreground text-sm">
                 Выберите чат из списка, чтобы начать переписку
               </p>
             </div>
@@ -1810,20 +1819,84 @@ export default function MessagingPage() {
         )}
       </div>
 
-      {/* AI Assistant Widget */}
-      <AIAssistantWidget onOpen={() => setShowAIAssistant(true)} />
-
-      {/* AI Assistant Window */}
-      <AIAssistantWindow
-        isOpen={showAIAssistant}
-        onClose={() => setShowAIAssistant(false)}
-        selectedChat={selectedChat ? {
-          name: selectedChat.name,
-          channel_id: selectedChat.channel_id,
-          first_name: selectedChat.first_name,
-          last_name: selectedChat.last_name,
-        } : null}
-      />
+      {/* Панель ИИ-помощника справа — на всю высоту */}
+      <div
+        className={`h-full min-h-0 self-stretch border-l border-border flex flex-col transition-[width] duration-200 ease-out shrink-0 bg-card ${aiPanelExpanded ? 'w-[min(24rem,90vw)]' : 'w-12'}`}
+        aria-expanded={aiPanelExpanded}
+      >
+        {aiPanelExpanded ? (
+          <>
+            <div className="p-3 border-b border-border flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                  <Sparkles className="w-4 h-4 text-primary" />
+                </div>
+                <span className="font-semibold text-sm truncate">ИИ-помощник</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAiPanelExpandedStored(false)}
+                className="p-1.5 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground shrink-0"
+                title="Свернуть панель"
+                aria-label="Свернуть панель ИИ-помощника"
+              >
+                <ChevronRight className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col p-3">
+              <p className="text-xs text-muted-foreground mb-3">
+                Команды для текущего чата (заглушка, бэкенд позже):
+              </p>
+              <div className="space-y-2">
+                {[
+                  { icon: FileText, label: 'Саммаризация чата', desc: 'Краткое содержание переписки' },
+                  { icon: Send, label: 'Придумать сообщение', desc: 'ИИ предложит текст ответа' },
+                  { icon: Bot, label: 'Ответить за меня', desc: 'Автоответ пока вас нет' },
+                  { icon: MessageSquare, label: 'Идеи для ответа', desc: 'Несколько вариантов ответа' },
+                  { icon: Zap, label: 'Тон сообщения', desc: 'Сделать текст вежливее / короче' },
+                ].map(({ icon: Icon, label, desc }) => (
+                  <button
+                    key={label}
+                    type="button"
+                    className="w-full text-left p-3 rounded-lg border border-border bg-muted/30 hover:bg-muted/50 transition-colors flex gap-3 items-start"
+                  >
+                    <Icon className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium text-sm">{label}</div>
+                      <div className="text-xs text-muted-foreground mt-0.5">{desc}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <div className="mt-4 pt-4 border-t border-border">
+                <p className="text-xs text-muted-foreground mb-2">Чат с помощником (заглушка):</p>
+                <div className="rounded-lg border border-border bg-muted/20 p-3 min-h-[8rem] text-sm text-muted-foreground">
+                  Здесь будет диалог в стиле ChatGPT/Claude — ввод запроса и ответы ИИ. Пока без бэкенда.
+                </div>
+                <Input
+                  placeholder="Спросить помощника..."
+                  className="mt-2 text-sm"
+                  disabled
+                  readOnly
+                />
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="flex flex-col items-center py-3 flex-1 min-h-0 justify-start border-b border-transparent">
+            <button
+              type="button"
+              onClick={() => setAiPanelExpandedStored(true)}
+              className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground flex flex-col items-center gap-0.5 w-full"
+              title="ИИ-помощник — развернуть"
+              aria-label="Развернуть панель ИИ-помощника"
+            >
+              <Sparkles className="w-5 h-5 shrink-0" aria-hidden />
+              <ChevronLeft className="w-4 h-4 shrink-0" aria-hidden />
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

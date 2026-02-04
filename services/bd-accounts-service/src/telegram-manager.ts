@@ -1167,14 +1167,16 @@ export class TelegramManager {
 
   /** Delay between Telegram API calls to respect rate limits (ms) */
   private readonly SYNC_DELAY_MS = 1100;
-  /** Initial sync: depth in days (hybrid: 1 year; older messages load on scroll via load-older-history). */
+  /** Initial sync: only this many messages per chat (one page); older messages load on scroll via load-older-history. */
+  private readonly SYNC_INITIAL_MESSAGES_PER_CHAT = parseInt(process.env.SYNC_INITIAL_MESSAGES_PER_CHAT || '100', 10) || 100;
+  /** Legacy: depth in days for syncHistoryForChat / other paths; initial sync uses SYNC_INITIAL_MESSAGES_PER_CHAT only. */
   private readonly SYNC_MESSAGES_MAX_AGE_DAYS = parseInt(process.env.SYNC_MESSAGES_MAX_AGE_DAYS || '365', 10) || 365;
-  /** Safety cap: max messages per chat in one sync run (to avoid runaway in huge groups). */
+  /** Safety cap: max messages per chat when loading older on demand (load-older-history). */
   private readonly SYNC_MESSAGES_PER_CHAT_CAP = parseInt(process.env.SYNC_MESSAGES_PER_CHAT_CAP || '50000', 10) || 50000;
 
   /**
-   * Run initial history sync for selected chats: fetch messages from Telegram, save to DB, emit progress.
-   * Respects rate limits (delay + FLOOD_WAIT handling).
+   * Run initial history sync for selected chats: one page of messages per chat (SYNC_INITIAL_MESSAGES_PER_CHAT).
+   * Older history loads on demand when user scrolls up (load-older-history). Fast sync, then lazy load per chat.
    */
   async syncHistory(
     accountId: string,
@@ -1228,15 +1230,15 @@ export class TelegramManager {
         const peerInput = Number.isNaN(peerIdNum) ? telegramChatId : peerIdNum;
         const peer = await client.getInputEntity(peerInput);
         let offsetId = 0;
-        let hasMore = true;
-        const cutoffDate = Math.floor(Date.now() / 1000) - this.SYNC_MESSAGES_MAX_AGE_DAYS * 24 * 3600;
+        const cap = this.SYNC_INITIAL_MESSAGES_PER_CHAT;
+        const batchSize = Math.min(100, cap);
 
-        while (hasMore) {
+        while (fetched < cap) {
           try {
             const result = await client.invoke(
               new Api.messages.GetHistory({
                 peer,
-                limit: Math.min(100, this.SYNC_MESSAGES_PER_CHAT_CAP - fetched),
+                limit: Math.min(batchSize, cap - fetched),
                 offsetId,
                 offsetDate: 0,
                 maxId: 0,
@@ -1247,13 +1249,11 @@ export class TelegramManager {
             );
 
             const rawMessages = (result as any).messages;
-            if (!Array.isArray(rawMessages)) {
-              hasMore = false;
-              break;
-            }
+            if (!Array.isArray(rawMessages)) break;
 
             const list: Api.Message[] = rawMessages.filter((m: any) => m && typeof m === 'object' && (m.className === 'Message' || m instanceof Api.Message));
             for (const msg of list) {
+              if (fetched >= cap) break;
               const hasText = !!getMessageText(msg).trim();
               if (!hasText && !msg.media) continue;
               let chatId = telegramChatId;
@@ -1285,13 +1285,8 @@ export class TelegramManager {
               totalMessages++;
             }
 
-            if (list.length === 0) hasMore = false;
-            else {
-              offsetId = Number((list[list.length - 1] as any).id) || 0;
-              const oldestMsgDate = (list[list.length - 1] as any).date;
-              if (typeof oldestMsgDate === 'number' && oldestMsgDate < cutoffDate) hasMore = false;
-            }
-            if (fetched >= this.SYNC_MESSAGES_PER_CHAT_CAP) hasMore = false;
+            if (list.length === 0) break;
+            offsetId = Number((list[list.length - 1] as any).id) || 0;
           } catch (err: any) {
             if (err?.seconds != null && typeof err.seconds === 'number') {
               await sleep(err.seconds * 1000);
