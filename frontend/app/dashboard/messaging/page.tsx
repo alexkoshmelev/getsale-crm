@@ -624,7 +624,7 @@ export default function MessagingPage() {
       if (!msg?.bdAccountId) return;
       const ts = payload?.timestamp ?? new Date().toISOString();
       const contentPreview = (msg?.content && String(msg.content).trim()) ? String(msg.content).trim().slice(0, 200) : null;
-      // Поднять чат с новым сообщением вверх списка (сортировка по last_message_at) и обновить превью/счётчик
+      // Обновить только нужный чат в списке: превью, время, счётчик непрочитанных. Не перезагружать весь список.
       if (msg.bdAccountId === selectedAccountId && msg.channelId) {
         const isCurrentChat = selectedChat?.channel_id === String(msg.channelId);
         setChats((prev) => {
@@ -645,7 +645,6 @@ export default function MessagingPage() {
           });
         });
       }
-      if (msg.bdAccountId === selectedAccountId) fetchChats();
       if (msg.bdAccountId === selectedAccountId && selectedChat && msg.channelId === selectedChat.channel_id) {
         setMessages((prev) => {
           const existing = prev.find((m) => m.id === msg.messageId);
