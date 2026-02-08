@@ -577,7 +577,8 @@ app.patch('/api/auth/organization', async (req, res) => {
       );
       role = memberRow.rows[0]?.role ?? '';
     }
-    const canUpdate = await canPermission(pool, role, 'workspace', 'update');
+    const roleStr = role ?? '';
+    const canUpdate = await canPermission(pool, roleStr, 'workspace', 'update');
     if (!canUpdate) {
       return res.status(403).json({ error: 'Only owner or admin can update workspace settings' });
     }
@@ -701,7 +702,8 @@ app.get('/api/auth/audit-logs', async (req, res) => {
       );
       role = memberRow.rows[0]?.role ?? '';
     }
-    const allowed = await canPermission(pool, role, 'audit', 'read');
+    const roleStr = role ?? '';
+    const allowed = await canPermission(pool, roleStr, 'audit', 'read');
     if (!allowed) {
       return res.status(403).json({ error: 'Only owner or admin can view audit logs' });
     }

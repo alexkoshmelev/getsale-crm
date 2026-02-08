@@ -1258,7 +1258,7 @@ export default function MessagingPage() {
 
     try {
       const body: Record<string, string> = {
-        contactId: selectedChat.contact_id,
+        contactId: selectedChat.contact_id ?? '',
         channel: selectedChat.channel,
         channelId: selectedChat.channel_id,
         content: messageText,
