@@ -1518,7 +1518,7 @@ export default function MessagingPage() {
                 isOutbound={isOutbound}
                 bdAccountId={selectedAccountId ?? ''}
                 channelId={selectedChat?.channel_id ?? ''}
-                onOpenMedia={setMediaViewer}
+                onOpenMedia={(url, type) => setMediaViewer({ url, type })}
               />
               <div
                 className={`text-xs mt-1 flex items-center gap-1 ${
