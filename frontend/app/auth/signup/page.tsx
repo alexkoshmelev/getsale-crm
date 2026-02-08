@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, useMemo } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import Link from 'next/link';
@@ -11,12 +11,24 @@ import Button from '@/components/ui/Button';
 export default function SignupPage() {
   const { t } = useTranslation();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const inviteToken = useMemo(() => searchParams.get('invite') ?? undefined, [searchParams]);
   const signup = useAuthStore((state) => state.signup);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [organizationName, setOrganizationName] = useState('');
+  const [inviteInfo, setInviteInfo] = useState<{ organizationName: string } | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!inviteToken) return;
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+    fetch(`${apiUrl}/api/invite/${inviteToken}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => data && setInviteInfo({ organizationName: data.organizationName }))
+      .catch(() => {});
+  }, [inviteToken]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,7 +36,7 @@ export default function SignupPage() {
     setLoading(true);
 
     try {
-      await signup(email, password, organizationName);
+      await signup(email, password, inviteToken ? undefined : organizationName, inviteToken);
       router.push('/dashboard');
     } catch (err: unknown) {
       setError((err as { message?: string })?.message || t('auth.signupError'));
@@ -51,16 +63,23 @@ export default function SignupPage() {
         )}
 
         <form onSubmit={handleSubmit} className="space-y-5">
-          <Input
-            id="organizationName"
-            type="text"
-            label={t('auth.organizationName')}
-            value={organizationName}
-            onChange={(e) => setOrganizationName(e.target.value)}
-            required
-            placeholder="My Company"
-            autoComplete="organization"
-          />
+          {inviteToken && inviteInfo && (
+            <p className="text-sm text-muted-foreground rounded-lg bg-muted/50 px-3 py-2">
+              {t('auth.signupInviteJoin', { name: inviteInfo.organizationName })}
+            </p>
+          )}
+          {!inviteToken && (
+            <Input
+              id="organizationName"
+              type="text"
+              label={t('auth.organizationName')}
+              value={organizationName}
+              onChange={(e) => setOrganizationName(e.target.value)}
+              required
+              placeholder="My Company"
+              autoComplete="organization"
+            />
+          )}
           <Input
             id="email"
             type="email"

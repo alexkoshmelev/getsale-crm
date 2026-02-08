@@ -518,12 +518,20 @@ export default function BDAccountsPage() {
     try {
       const allDialogsFromFolders: Dialog[] = dialogsByFolders.flatMap((f) => f.dialogs);
       const idToDialog = new Map<string, Dialog>();
-      for (const d of allDialogsFromFolders) idToDialog.set(String(d.id), d);
-      const chatsToSave: { id: string; name: string; isUser: boolean; isGroup: boolean; isChannel: boolean }[] = [];
+      const idToFolderId = new Map<string, number>();
+      for (const folder of dialogsByFolders) {
+        for (const d of folder.dialogs) {
+          const sid = String(d.id);
+          idToDialog.set(sid, d);
+          idToFolderId.set(sid, folder.id);
+        }
+      }
+      const chatsToSave: { id: string; name: string; isUser: boolean; isGroup: boolean; isChannel: boolean; folderId?: number }[] = [];
       for (const id of selectedChatIds) {
         const d = idToDialog.get(id);
+        const folderId = idToFolderId.get(id);
         if (d) {
-          chatsToSave.push({ id: d.id, name: d.name, isUser: d.isUser, isGroup: d.isGroup, isChannel: d.isChannel });
+          chatsToSave.push({ id: d.id, name: d.name, isUser: d.isUser, isGroup: d.isGroup, isChannel: d.isChannel, folderId });
         } else {
           const row = syncChatsList.find((c) => String(c.telegram_chat_id) === id);
           if (row) {
@@ -534,6 +542,7 @@ export default function BDAccountsPage() {
               isUser: pt === 'user',
               isGroup: pt === 'chat',
               isChannel: pt === 'channel',
+              folderId: row.folder_id != null ? row.folder_id : folderId,
             });
           }
         }

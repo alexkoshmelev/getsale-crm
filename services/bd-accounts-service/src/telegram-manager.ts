@@ -1,6 +1,6 @@
 // @ts-nocheck — telegram (GramJS) types are incomplete; remove when @types/telegram or package types are used
 import { TelegramClient, Api } from 'telegram';
-import { NewMessage, Raw } from 'telegram/events';
+import { NewMessage, Raw, EditedMessage } from 'telegram/events';
 import { StringSession } from 'telegram/sessions';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
@@ -9,6 +9,8 @@ import {
   EventType,
   Event,
   MessageReceivedEvent,
+  MessageDeletedEvent,
+  MessageEditedEvent,
   BDAccountSyncStartedEvent,
   BDAccountSyncProgressEvent,
   BDAccountSyncCompletedEvent,
@@ -59,6 +61,10 @@ export class TelegramManager {
   /** Интервалы вызова updates.GetState() для поддержания потока апдейтов (Telegram перестаёт слать, если нет активности). */
   private updateKeepaliveIntervals: Map<string, NodeJS.Timeout> = new Map();
   private readonly UPDATE_KEEPALIVE_MS = 2 * 60 * 1000; // 2 минуты — чаще пинг, меньше TIMEOUT в update loop
+
+  /** Кэш GetDialogFilters по аккаунту (один запрос на getDialogFilters/getDialogFilterRaw/getDialogFilterPeerIds). */
+  private dialogFiltersCache: Map<string, { ts: number; filters: any[] }> = new Map();
+  private readonly DIALOG_FILTERS_CACHE_TTL_MS = 90 * 1000; // 90 сек
 
   /** Сессии QR-логина: sessionId -> состояние + резолвер для пароля 2FA */
   private qrSessions: Map<string, QrLoginState & {
@@ -853,6 +859,137 @@ export class TelegramManager {
         }
       }
 
+      // UpdateDeleteMessages — удаление сообщений в личных чатах/группах (не канал)
+      try {
+        client.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!client.connected) return;
+              const ids = event?.messages ?? [];
+              if (!Array.isArray(ids) || ids.length === 0) return;
+              const rows = await this.pool.query(
+                'SELECT id, organization_id, channel_id, telegram_message_id FROM messages WHERE bd_account_id = $1 AND telegram_message_id = ANY($2::bigint[])',
+                [accountId, ids]
+              );
+              for (const row of rows.rows) {
+                await this.pool.query('DELETE FROM messages WHERE id = $1', [row.id]);
+                const ev: MessageDeletedEvent = {
+                  id: randomUUID(),
+                  type: EventType.MESSAGE_DELETED,
+                  timestamp: new Date(),
+                  organizationId: row.organization_id,
+                  data: { messageId: row.id, bdAccountId: accountId, channelId: row.channel_id, telegramMessageId: row.telegram_message_id },
+                };
+                await this.rabbitmq.publishEvent(ev);
+              }
+            } catch (err: any) {
+              if (err?.message?.includes('builder.resolve')) return;
+              console.error(`[TelegramManager] UpdateDeleteMessages handler error for ${accountId}:`, err?.message);
+            }
+          },
+          new Raw({
+            types: [Api.UpdateDeleteMessages],
+            func: () => true,
+          })
+        );
+      } catch (err: any) {
+        if (err?.message?.includes('builder.resolve')) {
+          console.warn(`[TelegramManager] Could not set up UpdateDeleteMessages for ${accountId}`);
+        }
+      }
+
+      // UpdateDeleteChannelMessages — удаление сообщений в каналах/супергруппах
+      try {
+        const UpdateDeleteChannelMessages = (Api as any).UpdateDeleteChannelMessages;
+        if (UpdateDeleteChannelMessages) {
+          client.addEventHandler(
+            async (event: any) => {
+              try {
+                if (!client.connected) return;
+                const channelIdRaw = event?.channelId;
+                const ids = event?.messages ?? [];
+                if (channelIdRaw == null || !Array.isArray(ids) || ids.length === 0) return;
+                const channelIdStr = String(channelIdRaw);
+                const rows = await this.pool.query(
+                  'SELECT id, organization_id, channel_id, telegram_message_id FROM messages WHERE bd_account_id = $1 AND channel_id = $2 AND telegram_message_id = ANY($3::bigint[])',
+                  [accountId, channelIdStr, ids]
+                );
+                for (const row of rows.rows) {
+                  await this.pool.query('DELETE FROM messages WHERE id = $1', [row.id]);
+                  const ev: MessageDeletedEvent = {
+                    id: randomUUID(),
+                    type: EventType.MESSAGE_DELETED,
+                    timestamp: new Date(),
+                    organizationId: row.organization_id,
+                    data: { messageId: row.id, bdAccountId: accountId, channelId: row.channel_id, telegramMessageId: row.telegram_message_id },
+                  };
+                  await this.rabbitmq.publishEvent(ev);
+                }
+              } catch (err: any) {
+                if (err?.message?.includes('builder.resolve')) return;
+                console.error(`[TelegramManager] UpdateDeleteChannelMessages handler error for ${accountId}:`, err?.message);
+              }
+            },
+            new Raw({
+              types: [UpdateDeleteChannelMessages],
+              func: () => true,
+            })
+          );
+        }
+      } catch (err: any) {
+        // UpdateDeleteChannelMessages may not exist in some GramJS versions
+      }
+
+      // EditedMessage — редактирование сообщения
+      try {
+        client.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!client.connected) return;
+              const message = event?.message;
+              if (!message?.id) return;
+              let channelId = '';
+              if (message.peerId) {
+                if (message.peerId instanceof Api.PeerUser) channelId = String(message.peerId.userId);
+                else if (message.peerId instanceof Api.PeerChat) channelId = String(message.peerId.chatId);
+                else if (message.peerId instanceof Api.PeerChannel) channelId = String(message.peerId.channelId);
+              }
+              const content = getMessageText(message) || '';
+              const res = await this.pool.query(
+                `UPDATE messages SET content = $1, updated_at = NOW(), telegram_entities = $2, telegram_media = $3
+                 WHERE bd_account_id = $4 AND channel_id = $5 AND telegram_message_id = $6
+                 RETURNING id, organization_id`,
+                [
+                  content,
+                  message.entities ? JSON.stringify(message.entities) : null,
+                  message.media ? JSON.stringify((message.media as any).toJSON?.() ?? message.media) : null,
+                  accountId,
+                  channelId,
+                  message.id,
+                ]
+              );
+              if (res.rows.length > 0) {
+                const row = res.rows[0];
+                const ev: MessageEditedEvent = {
+                  id: randomUUID(),
+                  type: EventType.MESSAGE_EDITED,
+                  timestamp: new Date(),
+                  organizationId: row.organization_id,
+                  data: { messageId: row.id, bdAccountId: accountId, channelId, content, telegramMessageId: message.id },
+                };
+                await this.rabbitmq.publishEvent(ev);
+              }
+            } catch (err: any) {
+              if (err?.message?.includes('builder.resolve')) return;
+              console.error(`[TelegramManager] EditedMessage handler error for ${accountId}:`, err?.message);
+            }
+          },
+          new EditedMessage({})
+        );
+      } catch (err: any) {
+        console.warn(`[TelegramManager] Could not set up EditedMessage for ${accountId}:`, err?.message);
+      }
+
       // Reconnection and account cleanup are handled in scheduleReconnect, cleanupInactiveClients, and on TIMEOUT.
     } catch (error: any) {
       console.error(`[TelegramManager] Error setting up event handlers:`, error.message);
@@ -861,7 +998,23 @@ export class TelegramManager {
   }
 
   /**
-   * Check if chat is in allowed sync list for this account
+   * Удалить сообщение в Telegram через client.deleteMessages (подходит для личных чатов, групп и каналов).
+   */
+  async deleteMessageInTelegram(accountId: string, channelId: string, telegramMessageId: number): Promise<void> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo?.client) throw new Error('Account not connected');
+    const client = clientInfo.client;
+    const peerInput = (() => {
+      const n = Number(channelId);
+      if (!Number.isNaN(n)) return n;
+      return channelId;
+    })();
+    const peer = await client.getInputEntity(peerInput);
+    await (client as any).deleteMessages(peer, [telegramMessageId], { revoke: true });
+  }
+
+  /**
+   * Чат в списке выбранных при синхронизации (bd_account_sync_chats). Только по таким чатам публикуем MessageReceivedEvent на фронт.
    */
   private async isChatAllowedForAccount(accountId: string, telegramChatId: string): Promise<boolean> {
     const result = await this.pool.query(
@@ -999,11 +1152,14 @@ export class TelegramManager {
 
       if (!chatId) return;
 
+      // Только чаты из sync; при авто-добавлении уведомление на фронт не шлём
       let allowed = await this.isChatAllowedForAccount(accountId, chatId);
+      let justAddedToSync = false;
       if (!allowed) {
         const added = await this.tryAddChatFromSelectedFolders(accountId, chatId);
         if (added) {
           allowed = true;
+          justAddedToSync = true;
           this.syncHistoryForChat(accountId, organizationId, chatId).catch((e) =>
             console.warn('[TelegramManager] Background syncHistoryForChat failed:', e?.message)
           );
@@ -1045,30 +1201,33 @@ export class TelegramManager {
         await this.pool.query('UPDATE bd_accounts SET last_activity = NOW() WHERE id = $1', [accountId]);
       }
 
-      const event: MessageReceivedEvent = {
-        id: randomUUID(),
-        type: EventType.MESSAGE_RECEIVED,
-        timestamp: new Date(),
-        organizationId,
-        data: {
-          messageId: savedMessage.id,
-          channel: MessageChannel.TELEGRAM,
-          channelId: chatId,
-          contactId: contactId || undefined,
-          bdAccountId: accountId,
-          content: serialized.content,
-          direction: isOut ? 'outbound' : 'inbound',
-        },
-      };
-      await this.rabbitmq.publishEvent(event);
-      console.log(`[TelegramManager] Short message saved and event published, messageId=${savedMessage.id}, channelId=${chatId}`);
+      if (!justAddedToSync) {
+        const event: MessageReceivedEvent = {
+          id: randomUUID(),
+          type: EventType.MESSAGE_RECEIVED,
+          timestamp: new Date(),
+          organizationId,
+          data: {
+            messageId: savedMessage.id,
+            channel: MessageChannel.TELEGRAM,
+            channelId: chatId,
+            contactId: contactId || undefined,
+            bdAccountId: accountId,
+            content: serialized.content,
+            direction: isOut ? 'outbound' : 'inbound',
+          },
+        };
+        await this.rabbitmq.publishEvent(event);
+        console.log(`[TelegramManager] Short message saved and event published, messageId=${savedMessage.id}, channelId=${chatId}`);
+      }
     } catch (error) {
       console.error(`[TelegramManager] Error handling short message:`, error);
     }
   }
 
   /**
-   * Handle new message (incoming or outgoing from another device). Only for allowed chats; save to DB + emit event for WS.
+   * Handle new message (incoming or outgoing from another device). Only for allowed chats (bd_account_sync_chats);
+   * save to DB + emit event for WS. Сообщения по чатам, которые пользователь не выбирал при синхронизации, не публикуются.
    */
   private async handleNewMessage(
     message: Api.Message,
@@ -1099,12 +1258,14 @@ export class TelegramManager {
         }
       }
 
-      // Только чаты из bd_account_sync_chats; если чат в выбранной папке — авто-добавляем и подгружаем историю.
+      // Только чаты из bd_account_sync_chats; если чат в выбранной папке — авто-добавляем и подгружаем историю (но уведомление на фронт не шлём — только по явно выбранным).
       let allowed = await this.isChatAllowedForAccount(accountId, chatId);
+      let justAddedToSync = false;
       if (!allowed) {
         const added = await this.tryAddChatFromSelectedFolders(accountId, chatId);
         if (added) {
           allowed = true;
+          justAddedToSync = true;
           this.syncHistoryForChat(accountId, organizationId, chatId).catch((e) =>
             console.warn('[TelegramManager] Background syncHistoryForChat failed:', e?.message)
           );
@@ -1141,25 +1302,26 @@ export class TelegramManager {
         );
       }
 
-      // Publish event (channelId for WebSocket room targeting)
-      const event: MessageReceivedEvent = {
-        id: randomUUID(),
-        type: EventType.MESSAGE_RECEIVED,
-        timestamp: new Date(),
-        organizationId,
-        data: {
-          messageId: savedMessage.id,
-          channel: MessageChannel.TELEGRAM,
-          channelId: chatId,
-          contactId: contactId || undefined,
-          bdAccountId: accountId,
-          content: serialized.content,
-          direction: isOut ? 'outbound' : 'inbound',
-        },
-      };
-
-      await this.rabbitmq.publishEvent(event);
-      console.log(`[TelegramManager] MessageReceivedEvent published, messageId=${savedMessage.id}, channelId=${chatId}`);
+      // Уведомление на фронт только если чат был уже в sync (не авто-добавлен в этом запросе). Редакт/удаление — отдельные события, звук по ним не играем.
+      if (!justAddedToSync) {
+        const event: MessageReceivedEvent = {
+          id: randomUUID(),
+          type: EventType.MESSAGE_RECEIVED,
+          timestamp: new Date(),
+          organizationId,
+          data: {
+            messageId: savedMessage.id,
+            channel: MessageChannel.TELEGRAM,
+            channelId: chatId,
+            contactId: contactId || undefined,
+            bdAccountId: accountId,
+            content: serialized.content,
+            direction: isOut ? 'outbound' : 'inbound',
+          },
+        };
+        await this.rabbitmq.publishEvent(event);
+        console.log(`[TelegramManager] MessageReceivedEvent published, messageId=${savedMessage.id}, channelId=${chatId}`);
+      }
     } catch (error) {
       console.error(`[TelegramManager] Error handling new message:`, error);
     }
@@ -1466,13 +1628,27 @@ export class TelegramManager {
    * Возвращает множество строковых id диалогов (peer id), входящих в кастомный фильтр по include_peers и pinned_peers.
    * Для folder_id 0/1 не используется. Для фильтра без include_peers/pinned_peers (только по критериям) вернёт пустой Set.
    */
-  async getDialogFilterPeerIds(accountId: string, filterId: number): Promise<Set<string>> {
+  /**
+   * Сырой ответ GetDialogFilters с кэшем (TTL 90s). Один запрос к Telegram на несколько вызовов getDialogFilters / getDialogFilterRaw / getDialogFilterPeerIds.
+   */
+  private async getDialogFiltersRaw(accountId: string): Promise<any[]> {
+    const now = Date.now();
+    const cached = this.dialogFiltersCache.get(accountId);
+    if (cached && now - cached.ts < this.DIALOG_FILTERS_CACHE_TTL_MS) {
+      return cached.filters;
+    }
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo || !clientInfo.isConnected) {
       throw new Error(`Account ${accountId} is not connected`);
     }
     const result = await clientInfo.client.invoke(new Api.messages.GetDialogFilters({}));
     const filters = (result as any).filters ?? [];
+    this.dialogFiltersCache.set(accountId, { ts: now, filters });
+    return filters;
+  }
+
+  async getDialogFilterPeerIds(accountId: string, filterId: number): Promise<Set<string>> {
+    const filters = await this.getDialogFiltersRaw(accountId);
     const f = filters.find((x: any) => (x.id ?? -1) === filterId);
     if (!f) return new Set();
     const ids = new Set<string>();
@@ -1486,15 +1662,10 @@ export class TelegramManager {
   }
 
   /**
-   * Возвращает сырой объект DialogFilter для папки (id >= 2). Нужен для фильтрации по критериям (contacts, groups и т.д.).
+   * Возвращает сырой объект DialogFilter для папки (id >= 2). Нужен для фильтрации по критериям (contacts, groups и т.д.). Использует кэш GetDialogFilters.
    */
   async getDialogFilterRaw(accountId: string, filterId: number): Promise<any | null> {
-    const clientInfo = this.clients.get(accountId);
-    if (!clientInfo || !clientInfo.isConnected) {
-      throw new Error(`Account ${accountId} is not connected`);
-    }
-    const result = await clientInfo.client.invoke(new Api.messages.GetDialogFilters({}));
-    const filters = (result as any).filters ?? [];
+    const filters = await this.getDialogFiltersRaw(accountId);
     return filters.find((x: any) => (x.id ?? -1) === filterId) ?? null;
   }
 
@@ -1568,20 +1739,13 @@ export class TelegramManager {
   }
 
   /**
-   * Get dialog filters (folders) from Telegram — кастомные папки пользователя.
-   * Если у пользователя нет папок, API вернёт пустой массив или один элемент (дефолт «Все чаты», id 0).
+   * Get dialog filters (folders) from Telegram — кастомные папки пользователя. Использует кэш GetDialogFilters (TTL 90s).
    * Папку «Все чаты» (id 0) для списка диалогов вызывающая сторона добавляет сама через getDialogsByFolder(accountId, 0).
    * emoticon — иконка папки из Telegram (эмодзи, например 📁).
    */
   async getDialogFilters(accountId: string): Promise<{ id: number; title: string; isCustom: boolean; emoticon?: string }[]> {
-    const clientInfo = this.clients.get(accountId);
-    if (!clientInfo || !clientInfo.isConnected) {
-      throw new Error(`Account ${accountId} is not connected`);
-    }
-
     try {
-      const result = await clientInfo.client.invoke(new Api.messages.GetDialogFilters({}));
-      const filters = (result as any).filters ?? [];
+      const filters = await this.getDialogFiltersRaw(accountId);
       const list: { id: number; title: string; isCustom: boolean; emoticon?: string }[] = [];
       for (let i = 0; i < filters.length; i++) {
         const f = filters[i];
@@ -1596,6 +1760,98 @@ export class TelegramManager {
       console.error(`[TelegramManager] Error getting dialog filters for ${accountId}:`, error?.message || error);
       throw error;
     }
+  }
+
+  /**
+   * Обратная синхронизация: отправить папки из CRM в Telegram (обновить фильтры по названию и списку чатов).
+   * Папки 0 и 1 не трогаем (системные в Telegram). Берём только folder_id >= 2 из bd_account_sync_folders.
+   * Для каждой папки — чаты из sync_chats с этим folder_id; UpdateDialogFilter создаёт фильтр в TG, если его ещё нет (id 2, 3, …).
+   */
+  async pushFoldersToTelegram(accountId: string): Promise<{ updated: number; errors: string[] }> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const client = clientInfo.client;
+    const errors: string[] = [];
+    let updated = 0;
+
+    const foldersRows = await this.pool.query(
+      'SELECT id, folder_id, folder_title, icon FROM bd_account_sync_folders WHERE bd_account_id = $1 AND folder_id >= 2 ORDER BY order_index',
+      [accountId]
+    );
+    if (foldersRows.rows.length === 0) {
+      return { updated: 0, errors: [] };
+    }
+
+    for (const row of foldersRows.rows) {
+      const folderId = Number(row.folder_id);
+      const title = String(row.folder_title || '').trim() || `Folder ${folderId}`;
+      const emoticon = row.icon && String(row.icon).trim() ? String(row.icon).trim().slice(0, 4) : undefined;
+
+      const chatsRows = await this.pool.query(
+        'SELECT telegram_chat_id FROM bd_account_sync_chat_folders WHERE bd_account_id = $1 AND folder_id = $2',
+        [accountId, folderId]
+      );
+      const includePeers: any[] = [];
+      for (const c of chatsRows.rows) {
+        const tid = String(c.telegram_chat_id || '').trim();
+        if (!tid) continue;
+        try {
+          const peerIdNum = Number(tid);
+          const peerInput = Number.isNaN(peerIdNum) ? tid : peerIdNum;
+          const peer = await client.getInputEntity(peerInput);
+          includePeers.push(new Api.InputDialogPeer({ peer }));
+        } catch (e: any) {
+          errors.push(`Chat ${tid}: ${e?.message || 'Failed to resolve'}`);
+        }
+      }
+
+      try {
+        const filter = new Api.DialogFilter({
+          id: folderId,
+          title,
+          emoticon: emoticon || '',
+          pinnedPeers: [],
+          includePeers: includePeers,
+          excludePeers: [],
+          contacts: false,
+          nonContacts: false,
+          groups: false,
+          broadcasts: false,
+          bots: false,
+        });
+        await client.invoke(new Api.messages.UpdateDialogFilter({ id: folderId, filter }));
+        updated += 1;
+      } catch (e: any) {
+        // GramJS may use snake_case in TL types
+        if (e?.message?.includes('includePeers') || e?.message?.includes('include_peers')) {
+          try {
+            const filterAlt = new (Api as any).DialogFilter({
+              id: folderId,
+              title,
+              emoticon: emoticon || '',
+              pinned_peers: [],
+              include_peers: includePeers,
+              exclude_peers: [],
+              contacts: false,
+              non_contacts: false,
+              groups: false,
+              broadcasts: false,
+              bots: false,
+            });
+            await client.invoke(new Api.messages.UpdateDialogFilter({ id: folderId, filter: filterAlt }));
+            updated += 1;
+          } catch (e2: any) {
+            errors.push(`Folder "${title}" (id=${folderId}): ${e2?.message || String(e2)}`);
+          }
+        } else {
+          const msg = e?.message || String(e);
+          errors.push(`Folder "${title}" (id=${folderId}): ${msg}`);
+        }
+      }
+    }
+    return { updated, errors };
   }
 
   /**
@@ -1626,45 +1882,64 @@ export class TelegramManager {
   }
 
   /**
-   * Если чат не в sync_chats, но есть выбранные папки — проверить, входит ли чат в одну из папок.
-   * Если да: добавить чат в bd_account_sync_chats и вернуть true (далее сообщение обработается и можно подгрузить историю).
+   * Если чат не в sync_chats, но есть выбранные папки — добавить чат в БД по getEntity (без GetDialogs, без flood wait).
+   * Чат добавляется в папку 0 «Все чаты»; пользователь может перенести в другую папку из UI.
    */
   async tryAddChatFromSelectedFolders(accountId: string, chatId: string): Promise<boolean> {
     const foldersRows = await this.pool.query(
-      'SELECT folder_id, folder_title FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index',
+      'SELECT folder_id FROM bd_account_sync_folders WHERE bd_account_id = $1 LIMIT 1',
       [accountId]
     );
     if (foldersRows.rows.length === 0) return false;
 
-    for (const row of foldersRows.rows) {
-      const folderId = Number(row.folder_id);
-      try {
-        const dialogs = await this.getDialogsByFolder(accountId, folderId);
-        const found = dialogs.find((d: any) => String(d.id ?? '').trim() === chatId);
-        if (found) {
-          let peerType = 'user';
-          if (found.isChannel) peerType = 'channel';
-          else if (found.isGroup) peerType = 'chat';
-          const title = (found.name ?? '').trim() || chatId;
-          await this.pool.query(
-            `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
-             VALUES ($1, $2, $3, $4, false, $5)
-             ON CONFLICT (bd_account_id, telegram_chat_id) DO UPDATE SET
-               title = EXCLUDED.title,
-               peer_type = EXCLUDED.peer_type,
-               folder_id = EXCLUDED.folder_id`,
-            [accountId, chatId, title, peerType, folderId]
-          );
-          console.log(`[TelegramManager] Auto-added chat ${chatId} from folder ${folderId} for account ${accountId}`);
-          return true;
-        }
-      } catch (err: any) {
-        if (err?.message !== 'TIMEOUT' && !err?.message?.includes('builder.resolve')) {
-          console.warn(`[TelegramManager] tryAddChatFromSelectedFolders folder ${folderId} failed:`, err?.message);
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo?.isConnected) return false;
+
+    let title = chatId;
+    let peerType = 'user';
+    try {
+      const peerIdNum = Number(chatId);
+      const peerInput = Number.isNaN(peerIdNum) ? chatId : peerIdNum;
+      const peer = await clientInfo.client.getInputEntity(peerInput);
+      const entity = await clientInfo.client.getEntity(peer);
+      if (entity) {
+        const c = (entity as any).className;
+        if (c === 'User') {
+          const u = entity as any;
+          title = [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || title;
+          peerType = 'user';
+        } else if (c === 'Chat') {
+          title = (entity as any).title?.trim() || title;
+          peerType = 'chat';
+        } else if (c === 'Channel') {
+          title = (entity as any).title?.trim() || title;
+          peerType = 'channel';
         }
       }
+    } catch (err: any) {
+      if (err?.message !== 'TIMEOUT' && !err?.message?.includes('builder.resolve')) {
+        console.warn(`[TelegramManager] tryAddChatFromSelectedFolders getEntity ${chatId}:`, err?.message);
+      }
+      return false;
     }
-    return false;
+
+    const folderId = 0;
+    await this.pool.query(
+      `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
+       VALUES ($1, $2, $3, $4, false, $5)
+       ON CONFLICT (bd_account_id, telegram_chat_id) DO UPDATE SET
+         title = EXCLUDED.title,
+         peer_type = EXCLUDED.peer_type,
+         folder_id = COALESCE(bd_account_sync_chats.folder_id, EXCLUDED.folder_id)`,
+      [accountId, chatId, title, peerType, folderId]
+    );
+    await this.pool.query(
+      `INSERT INTO bd_account_sync_chat_folders (bd_account_id, telegram_chat_id, folder_id)
+       VALUES ($1, $2, $3) ON CONFLICT (bd_account_id, telegram_chat_id, folder_id) DO NOTHING`,
+      [accountId, chatId, folderId]
+    );
+    console.log(`[TelegramManager] Auto-added chat ${chatId} (${title}) for account ${accountId} via getEntity`);
+    return true;
   }
 
   /**
@@ -1969,6 +2244,43 @@ export class TelegramManager {
   }
 
   /**
+   * Send file (photo, document, etc.) via Telegram. Uses GramJS sendFile.
+   * @param fileBuffer - file contents (Buffer)
+   * @param opts.caption - optional caption
+   * @param opts.filename - optional filename (for documents)
+   */
+  async sendFile(
+    accountId: string,
+    chatId: string,
+    fileBuffer: Buffer,
+    opts: { caption?: string; filename?: string } = {}
+  ): Promise<Api.Message> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    try {
+      const file = Object.assign(Buffer.from(fileBuffer), {
+        name: opts.filename || 'file',
+      });
+      const client = clientInfo.client as any;
+      const message = await client.sendFile(chatId, {
+        file,
+        caption: opts.caption || '',
+      });
+      clientInfo.lastActivity = new Date();
+      await this.pool.query(
+        'UPDATE bd_accounts SET last_activity = NOW() WHERE id = $1',
+        [accountId]
+      );
+      return message;
+    } catch (error) {
+      console.error(`[TelegramManager] Error sending file:`, error);
+      throw error;
+    }
+  }
+
+  /**
    * Disconnect an account
    */
   async disconnectAccount(accountId: string): Promise<void> {
@@ -1981,7 +2293,8 @@ export class TelegramManager {
         console.error(`[TelegramManager] Error disconnecting account ${accountId}:`, error);
       }
       this.clients.delete(accountId);
-      
+      this.dialogFiltersCache.delete(accountId);
+
       const interval = this.reconnectIntervals.get(accountId);
       if (interval) {
         clearInterval(interval);

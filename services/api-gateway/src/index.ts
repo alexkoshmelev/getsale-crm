@@ -33,7 +33,7 @@ const TEAM_SERVICE = process.env.TEAM_SERVICE_URL || 'http://localhost:3011';
 // CORS middleware for API Gateway
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.header('Access-Control-Allow-Credentials', 'true');
   
@@ -233,8 +233,23 @@ const aiProxy = createProxyMiddleware({
   },
 });
 
+// Invite proxy (GET public, POST requires auth)
+const inviteProxy = createProxyMiddleware({
+  target: AUTH_SERVICE,
+  changeOrigin: true,
+  pathRewrite: { '^/api/invite': '/api/invite' },
+  onProxyRes: (proxyRes, req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  },
+});
+
 // Routes
 app.use('/api/auth', authProxy);
+app.use('/api/invite', (req, res, next) => {
+  if (req.method === 'GET') return inviteProxy(req, res, next);
+  return authenticate(req, res, next);
+}, inviteProxy);
 
 app.use('/api/crm', authenticate, rateLimit, crmProxy);
 app.use('/api/messaging', authenticate, rateLimit, messagingProxy);
@@ -352,6 +367,7 @@ const teamProxy = createProxyMiddleware({
     if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
+      if (user.role) proxyReq.setHeader('X-User-Role', user.role);
     }
   },
   onProxyRes: (proxyRes, req, res) => {

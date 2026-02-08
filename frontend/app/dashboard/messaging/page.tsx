@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
 import { useAuthStore } from '@/lib/stores/auth-store';
@@ -12,10 +12,16 @@ import {
   Mic, Paperclip, FileText, Image, Video, File,
   Sparkles, Zap, History, FileCode, Bot, Workflow,
   ChevronDown, ChevronRight, ChevronLeft, X, Clock, UserCircle, Tag, BarChart3,
-  Music, Film, Users
+  Music, Film, Users, Check, CheckCheck, RefreshCw, Pin, PinOff, Smile, Pencil
 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { ContextMenu, ContextMenuSection, ContextMenuItem } from '@/components/ui/ContextMenu';
+import { Virtuoso } from 'react-virtuoso';
+import { LinkifyText } from '@/components/messaging/LinkifyText';
+import { MediaViewer } from '@/components/messaging/MediaViewer';
+import { FolderManageModal } from '@/components/messaging/FolderManageModal';
+import { blobUrlCache, avatarAccountKey, avatarChatKey, mediaKey } from '@/lib/cache/blob-url-cache';
 
 interface BDAccount {
   id: string;
@@ -32,6 +38,8 @@ interface BDAccount {
   last_name?: string | null;
   username?: string | null;
   display_name?: string | null;
+  /** Суммарное количество непрочитанных по аккаунту (только по чатам из sync) */
+  unread_count?: number;
 }
 
 function getAccountDisplayName(account: BDAccount): string {
@@ -55,29 +63,33 @@ function getAccountInitials(account: BDAccount): string {
 function BDAccountAvatar({ accountId, account, className = 'w-10 h-10' }: { accountId: string; account: BDAccount; className?: string }) {
   const [src, setSrc] = useState<string | null>(null);
   const mounted = useRef(true);
-  const blobUrlRef = useRef<string | null>(null);
+  const key = avatarAccountKey(accountId);
 
   useEffect(() => {
     mounted.current = true;
+    const cached = blobUrlCache.get(key);
+    if (cached) {
+      setSrc(cached);
+      return () => {
+        mounted.current = false;
+        setSrc(null);
+      };
+    }
     apiClient
       .get(`/api/bd-accounts/${accountId}/avatar`, { responseType: 'blob' })
       .then((res) => {
         if (mounted.current && res.data instanceof Blob && res.data.size > 0) {
           const u = URL.createObjectURL(res.data);
-          blobUrlRef.current = u;
+          blobUrlCache.set(key, u);
           setSrc(u);
         }
       })
       .catch(() => {});
     return () => {
       mounted.current = false;
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = null;
-      }
       setSrc(null);
     };
-  }, [accountId]);
+  }, [accountId, key]);
 
   const initials = getAccountInitials(account);
   if (src) {
@@ -90,9 +102,20 @@ function BDAccountAvatar({ accountId, account, className = 'w-10 h-10' }: { acco
   );
 }
 
+interface SyncFolder {
+  id: string;
+  folder_id: number;
+  folder_title: string;
+  order_index: number;
+  is_user_created?: boolean;
+  icon?: string | null;
+}
+
 interface Chat {
   channel: string;
   channel_id: string;
+  folder_id?: number | null;
+  folder_ids?: number[];
   contact_id: string | null;
   first_name: string | null;
   last_name: string | null;
@@ -120,6 +143,7 @@ interface Message {
   telegram_media?: Record<string, unknown> | null;
   telegram_entities?: Array<Record<string, unknown>> | null;
   telegram_date?: string | null;  // оригинальное время отправки в Telegram
+  reactions?: Record<string, number> | null;  // { "👍": 2, "❤️": 1 }
 }
 
 /** Тип медиа из telegram_media (GramJS: messageMediaPhoto, messageMediaDocument и т.д.) */
@@ -191,30 +215,34 @@ function ChatAvatar({
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const mounted = useRef(true);
-  const blobUrlRef = useRef<string | null>(null);
+  const key = avatarChatKey(bdAccountId, chatId);
 
   useEffect(() => {
     if (!bdAccountId || !chatId) return;
     mounted.current = true;
+    const cached = blobUrlCache.get(key);
+    if (cached) {
+      setSrc(cached);
+      return () => {
+        mounted.current = false;
+        setSrc(null);
+      };
+    }
     apiClient
       .get(`/api/bd-accounts/${bdAccountId}/chats/${chatId}/avatar`, { responseType: 'blob' })
       .then((res) => {
         if (mounted.current && res.data instanceof Blob && res.data.size > 0) {
           const u = URL.createObjectURL(res.data);
-          blobUrlRef.current = u;
+          blobUrlCache.set(key, u);
           setSrc(u);
         }
       })
       .catch(() => {});
     return () => {
       mounted.current = false;
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = null;
-      }
       setSrc(null);
     };
-  }, [bdAccountId, chatId]);
+  }, [bdAccountId, chatId, key]);
 
   const initials = getChatInitials(chat);
   const isGroup = chat.peer_type === 'chat' || chat.peer_type === 'channel';
@@ -270,14 +298,19 @@ function getMediaProxyUrl(bdAccountId: string, channelId: string, telegramMessag
   return `${base}/api/bd-accounts/${bdAccountId}/media?${params.toString()}`;
 }
 
-/** Загружает медиа с токеном и отдаёт blob URL для img/video/audio (браузер не шлёт Authorization в src). */
+/** Загружает медиа с токеном и отдаёт blob URL для img/video/audio (браузер не шлёт Authorization в src). Использует LRU-кэш. */
 function useMediaUrl(mediaUrl: string | null) {
   const [url, setUrl] = useState<string | null>(null);
-  const blobRef = useRef<string | null>(null);
   useEffect(() => {
     if (!mediaUrl) {
       setUrl(null);
       return;
+    }
+    const key = mediaKey(mediaUrl);
+    const cached = blobUrlCache.get(key);
+    if (cached) {
+      setUrl(cached);
+      return () => setUrl(null);
     }
     let cancelled = false;
     const authStorage = typeof window !== 'undefined' ? localStorage.getItem('auth-storage') : null;
@@ -285,21 +318,19 @@ function useMediaUrl(mediaUrl: string | null) {
     fetch(mediaUrl, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
       .then((r) => (r.ok ? r.blob() : Promise.reject(new Error('Failed to load media'))))
       .then((blob) => {
-        if (!cancelled) {
-          if (blobRef.current) URL.revokeObjectURL(blobRef.current);
-          blobRef.current = URL.createObjectURL(blob);
-          setUrl(blobRef.current);
+        const u = URL.createObjectURL(blob);
+        if (cancelled) {
+          URL.revokeObjectURL(u);
+          return;
         }
+        blobUrlCache.set(key, u);
+        setUrl(u);
       })
       .catch(() => {
         if (!cancelled) setUrl(null);
       });
     return () => {
       cancelled = true;
-      if (blobRef.current) {
-        URL.revokeObjectURL(blobRef.current);
-        blobRef.current = null;
-      }
       setUrl(null);
     };
   }, [mediaUrl]);
@@ -311,12 +342,15 @@ function MessageContent({
   isOutbound,
   bdAccountId,
   channelId,
+  onOpenMedia,
 }: {
   msg: Message;
   isOutbound: boolean;
   bdAccountId: string | null;
   channelId: string;
+  onOpenMedia?: (url: string, type: 'image' | 'video') => void;
 }) {
+  const { t } = useTranslation();
   const mediaType = getMessageMediaType(msg);
   const label = mediaLabels[mediaType];
   const hasCaption = !!((msg.content ?? (msg as any).body ?? '')?.trim());
@@ -330,12 +364,13 @@ function MessageContent({
     : null;
   const mediaUrl = useMediaUrl(mediaApiUrl);
 
-  // Текст: content из API (БД); fallback на body на случай другого имени поля
   const contentText = (msg.content ?? (msg as any).body ?? '') || '';
 
   const textBlock = (
     <div className={textCls}>
-      {contentText.trim() ? contentText : mediaType === 'text' ? '\u00A0' : null}
+      {contentText.trim() ? (
+        <LinkifyText text={contentText} className="break-words" />
+      ) : mediaType === 'text' ? '\u00A0' : null}
     </div>
   );
 
@@ -345,20 +380,45 @@ function MessageContent({
 
   return (
     <div className="space-y-1">
-      {/* Медиа: фото / видео / аудио через прокси Telegram */}
       {mediaType === 'photo' && mediaUrl && (
-        <a href={mediaUrl} target="_blank" rel="noopener noreferrer" className="block rounded-lg overflow-hidden max-w-full">
-          <img src={mediaUrl} alt="" className="max-h-64 object-contain rounded" />
-        </a>
+        <button
+          type="button"
+          onClick={() => onOpenMedia?.(mediaUrl, 'image')}
+          className="block rounded-lg overflow-hidden max-w-full min-h-[120px] text-left w-full"
+        >
+          <img src={mediaUrl} alt="" className="max-h-64 object-contain rounded w-full" />
+        </button>
+      )}
+      {mediaType === 'photo' && !mediaUrl && canLoadMedia && (
+        <div className="min-h-[120px] flex items-center justify-center rounded-lg bg-muted/50 max-w-[200px]">
+          <Image className="w-8 h-8 text-muted-foreground animate-pulse" />
+        </div>
       )}
       {mediaType === 'video' && mediaUrl && (
-        <video src={mediaUrl} controls className="max-h-64 rounded-lg" />
+        <div className="relative group">
+          <video src={mediaUrl} controls className="max-h-64 min-h-[120px] rounded-lg w-full" />
+          <button
+            type="button"
+            onClick={() => onOpenMedia?.(mediaUrl, 'video')}
+            className="absolute right-2 top-2 p-1.5 rounded-md bg-black/50 text-white hover:bg-black/70 transition-colors"
+            title={t('messaging.openFullscreen')}
+          >
+            <Film className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+      {mediaType === 'video' && !mediaUrl && canLoadMedia && (
+        <div className="min-h-[120px] flex items-center justify-center rounded-lg bg-muted/50 max-w-[200px]">
+          <Film className="w-8 h-8 text-muted-foreground animate-pulse" />
+        </div>
       )}
       {(mediaType === 'voice' || mediaType === 'audio') && mediaUrl && (
         <audio src={mediaUrl} controls className="max-w-full" />
       )}
-      {/* Если медиа не загружается по URL (нет telegram_message_id) — показываем иконку и подпись */}
-      {(!mediaUrl || mediaType === 'document' || mediaType === 'sticker') && (
+      {/* Иконка и подпись для типов без превью или когда медиа ещё не загружено (не показывать для photo/video с canLoadMedia — там уже плейсхолдер) */}
+      {(!mediaUrl || mediaType === 'document' || mediaType === 'sticker') &&
+        !(mediaType === 'photo' && canLoadMedia) &&
+        !(mediaType === 'video' && canLoadMedia) && (
         <div className={`flex items-center gap-2 ${iconCls}`}>
           {mediaType === 'photo' && <Image className="w-4 h-4 shrink-0" />}
           {(mediaType === 'voice' || mediaType === 'audio') && !mediaUrl && <Music className="w-4 h-4 shrink-0" />}
@@ -382,6 +442,7 @@ function MessageContent({
 export default function MessagingPage() {
   const { t } = useTranslation();
   const { user: currentUser } = useAuthStore();
+  const { on, off, subscribe, unsubscribe, isConnected } = useWebSocketContext();
   const [accounts, setAccounts] = useState<BDAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [chats, setChats] = useState<Chat[]>([]);
@@ -406,24 +467,55 @@ export default function MessagingPage() {
   const loadOlderLastCallRef = useRef<number>(0);
   const LOAD_OLDER_COOLDOWN_MS = 2500;
   const MESSAGES_PAGE_SIZE = 50;
+  const VIRTUAL_LIST_THRESHOLD = 200;
+  const INITIAL_FIRST_ITEM_INDEX = 1000000;
+  const [prependedCount, setPrependedCount] = useState(0);
+  const virtuosoRef = useRef<any>(null);
+  const virtuosoScrollAfterChatChangeRef = useRef(false);
   const hasMoreMessages = messagesPage * MESSAGES_PAGE_SIZE < messagesTotal || !historyExhausted;
   const [showCommandsMenu, setShowCommandsMenu] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [accountSyncReady, setAccountSyncReady] = useState<boolean>(true);
   const [accountSyncProgress, setAccountSyncProgress] = useState<{ done: number; total: number } | null>(null);
   const [accountSyncError, setAccountSyncError] = useState<string | null>(null);
+  const [messageContextMenu, setMessageContextMenu] = useState<{ x: number; y: number; messageId: string } | null>(null);
+  const [deletingMessageId, setDeletingMessageId] = useState<string | null>(null);
+  const [folders, setFolders] = useState<SyncFolder[]>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<number>(0); // 0 = «все чаты» (одна папка из Telegram или дефолт)
+  const [folderIconPickerId, setFolderIconPickerId] = useState<string | null>(null);
+  const [syncFoldersPushing, setSyncFoldersPushing] = useState(false);
+  const [showFolderManageModal, setShowFolderManageModal] = useState(false);
+  const FOLDER_ICON_OPTIONS = ['📁', '📂', '💬', '⭐', '🔴', '📥', '📤', '✏️'];
+  const [pinnedChannelIds, setPinnedChannelIds] = useState<string[]>([]);
+  const [chatContextMenu, setChatContextMenu] = useState<{ x: number; y: number; chat: Chat } | null>(null);
+  const [accountContextMenu, setAccountContextMenu] = useState<{ x: number; y: number; account: BDAccount } | null>(null);
   const [showEditNameModal, setShowEditNameModal] = useState(false);
   const [editDisplayNameValue, setEditDisplayNameValue] = useState('');
   const [savingDisplayName, setSavingDisplayName] = useState(false);
   const [showChatHeaderMenu, setShowChatHeaderMenu] = useState(false);
   const chatHeaderMenuRef = useRef<HTMLDivElement>(null);
+  const [mediaViewer, setMediaViewer] = useState<{ url: string; type: 'image' | 'video' } | null>(null);
   const STORAGE_KEYS = {
     accountsPanel: 'messaging.accountsPanelCollapsed',
     chatsPanel: 'messaging.chatsPanelCollapsed',
     aiPanel: 'messaging.aiPanelExpanded',
   };
+  const getDraftKey = (accountId: string, chatId: string) =>
+    `messaging.draft.${accountId}.${chatId}`;
+  const messageInputRef = useRef<HTMLTextAreaElement>(null);
+  const prevChatRef = useRef<{ accountId: string; chatId: string } | null>(null);
+  const newMessageRef = useRef(newMessage);
+  newMessageRef.current = newMessage;
+
+  useEffect(() => {
+    const el = messageInputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(Math.max(el.scrollHeight, 40), 120)}px`;
+  }, [newMessage]);
 
   const [accountsPanelCollapsed, setAccountsPanelCollapsed] = useState(() => {
     if (typeof window === 'undefined') return false;
@@ -439,10 +531,10 @@ export default function MessagingPage() {
   });
 
   const [aiPanelExpanded, setAiPanelExpanded] = useState(() => {
-    if (typeof window === 'undefined') return false;
+    if (typeof window === 'undefined') return true;
     try {
-      return localStorage.getItem(STORAGE_KEYS.aiPanel) === 'true';
-    } catch { return false; }
+      return localStorage.getItem(STORAGE_KEYS.aiPanel) !== 'false';
+    } catch { return true; }
   });
 
   const setAccountsCollapsed = useCallback((v: boolean) => {
@@ -554,6 +646,31 @@ export default function MessagingPage() {
     };
   }, [selectedAccountId, accountSyncReady]);
 
+  // Загрузка папок при выборе аккаунта (для фильтра и «Добавить в папку»)
+  useEffect(() => {
+    if (!selectedAccountId) {
+      setFolders([]);
+      setSelectedFolderId(0);
+      return;
+    }
+    setSelectedFolderId(0);
+    apiClient.get(`/api/bd-accounts/${selectedAccountId}/sync-folders`).then((res) => {
+      setFolders(Array.isArray(res.data) ? res.data : []);
+    }).catch(() => setFolders([]));
+  }, [selectedAccountId]);
+
+  // Загрузка закреплённых чатов при выборе аккаунта
+  useEffect(() => {
+    if (!selectedAccountId) {
+      setPinnedChannelIds([]);
+      return;
+    }
+    apiClient.get('/api/messaging/pinned-chats', { params: { bdAccountId: selectedAccountId } }).then((res) => {
+      const list = Array.isArray(res.data) ? res.data : [];
+      setPinnedChannelIds(list.map((p: { channel_id: string }) => String(p.channel_id)));
+    }).catch(() => setPinnedChannelIds([]));
+  }, [selectedAccountId]);
+
   useEffect(() => {
     if (selectedChat && selectedAccountId) {
       setMessages([]);
@@ -563,6 +680,25 @@ export default function MessagingPage() {
       setMessages([]);
     }
   }, [selectedChat, selectedAccountId]);
+
+  // Черновики: при смене чата сохраняем текущий текст в localStorage, подставляем черновик нового чата
+  useEffect(() => {
+    const prev = prevChatRef.current;
+    if (prev) {
+      try {
+        localStorage.setItem(getDraftKey(prev.accountId, prev.chatId), newMessageRef.current);
+      } catch (_) {}
+    }
+    if (selectedAccountId && selectedChat) {
+      try {
+        const draft = localStorage.getItem(getDraftKey(selectedAccountId, selectedChat.channel_id)) || '';
+        setNewMessage(draft);
+      } catch (_) {}
+      prevChatRef.current = { accountId: selectedAccountId, chatId: selectedChat.channel_id };
+    } else {
+      prevChatRef.current = null;
+    }
+  }, [selectedAccountId, selectedChat?.channel_id]);
 
   // Сообщаем глобально, какой чат открыт — чтобы не играть звук уведомления, когда новое сообщение в этом же чате
   useEffect(() => {
@@ -576,7 +712,6 @@ export default function MessagingPage() {
 
   // Load messages from DB only (no Telegram API for history)
   // Real-time new messages via WebSocket
-  const { subscribe, unsubscribe, on, off, isConnected } = useWebSocketContext();
   useEffect(() => {
     if (!selectedAccountId || !isConnected) return;
     subscribe(`bd-account:${selectedAccountId}`);
@@ -624,6 +759,15 @@ export default function MessagingPage() {
       if (!msg?.bdAccountId) return;
       const ts = payload?.timestamp ?? new Date().toISOString();
       const contentPreview = (msg?.content && String(msg.content).trim()) ? String(msg.content).trim().slice(0, 200) : null;
+      const isCurrentChat = selectedAccountId === msg.bdAccountId && selectedChat?.channel_id === String(msg.channelId);
+      // Суммарный непрочитанный по аккаунту: +1 если сообщение не в открытом чате
+      if (!isCurrentChat) {
+        setAccounts((prev) =>
+          prev.map((a) =>
+            a.id === msg.bdAccountId ? { ...a, unread_count: (a.unread_count ?? 0) + 1 } : a
+          )
+        );
+      }
       // Обновить только нужный чат в списке: превью, время, счётчик непрочитанных. Не перезагружать весь список.
       if (msg.bdAccountId === selectedAccountId && msg.channelId) {
         const isCurrentChat = selectedChat?.channel_id === String(msg.channelId);
@@ -677,6 +821,34 @@ export default function MessagingPage() {
   }, [accounts, isConnected, selectedAccountId, selectedChat, subscribe, unsubscribe, on, off]);
 
   useEffect(() => {
+    const handler = (payload: { type?: string; data?: { messageId?: string; channelId?: string; bdAccountId?: string } }) => {
+      if (payload?.type !== 'message.deleted') return;
+      const d = payload.data;
+      if (!d?.messageId) return;
+      if (selectedChat && selectedAccountId && d.channelId === selectedChat.channel_id && d.bdAccountId === selectedAccountId) {
+        setMessages((prev) => prev.filter((m) => m.id !== d.messageId));
+      }
+    };
+    on('event', handler);
+    return () => off('event', handler);
+  }, [on, off, selectedChat, selectedAccountId]);
+
+  useEffect(() => {
+    if (!messageContextMenu && !chatContextMenu && !accountContextMenu) return;
+    const close = () => {
+      setMessageContextMenu(null);
+      setChatContextMenu(null);
+      setAccountContextMenu(null);
+    };
+    window.addEventListener('click', close, true);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      window.removeEventListener('click', close, true);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [messageContextMenu, chatContextMenu, accountContextMenu]);
+
+  useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
@@ -701,9 +873,21 @@ export default function MessagingPage() {
     }
   }, [showCommandsMenu, showAttachMenu, showChatHeaderMenu]);
 
-  const scrollToBottom = () => {
+  const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  }, []);
+
+  useEffect(() => {
+    scrollToBottom();
+    const t0 = setTimeout(scrollToBottom, 50);
+    const t1 = setTimeout(scrollToBottom, 150);
+    const t2 = setTimeout(scrollToBottom, 450);
+    return () => {
+      clearTimeout(t0);
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [messages, selectedChat?.channel_id, scrollToBottom]);
 
   const fetchAccounts = async () => {
     try {
@@ -737,9 +921,13 @@ export default function MessagingPage() {
       }
       
       // Chats from DB only (filtered by bdAccountId = allowed sync chats)
-      const mapped: Chat[] = chatsFromDB.map((chat: any) => ({
+      const mapped: Chat[] = chatsFromDB.map((chat: any) => {
+        const folderIds = Array.isArray(chat.folder_ids) ? chat.folder_ids.map((x: any) => Number(x)).filter((n: number) => !Number.isNaN(n)) : (chat.folder_id != null ? [Number(chat.folder_id)] : []);
+        return {
         channel: chat.channel || 'telegram',
         channel_id: String(chat.channel_id),
+        folder_id: chat.folder_id != null ? Number(chat.folder_id) : (folderIds[0] ?? null),
+        folder_ids: folderIds.length > 0 ? folderIds : undefined,
         contact_id: chat.contact_id,
         first_name: chat.first_name,
         last_name: chat.last_name,
@@ -752,7 +940,8 @@ export default function MessagingPage() {
         unread_count: parseInt(chat.unread_count) || 0,
         last_message_at: chat.last_message_at && String(chat.last_message_at).trim() ? chat.last_message_at : '',
         last_message: chat.last_message,
-      }));
+      };
+      });
       // Deduplicate by channel_id (API can return same chat multiple times when GROUP BY contact_id)
       const byChannelId = new Map<string, Chat>();
       const isIdOnly = (name: string | null, channelId: string) =>
@@ -850,6 +1039,7 @@ export default function MessagingPage() {
       });
       const list = response.data.messages || [];
       setMessages((prev) => [...list, ...prev]);
+      setPrependedCount((prev) => prev + list.length);
       setMessagesPage(nextPage);
       setMessagesTotal(response.data.pagination?.total ?? messagesTotal + list.length);
       setHistoryExhausted(response.data.historyExhausted === true);
@@ -860,20 +1050,25 @@ export default function MessagingPage() {
     }
   }, [selectedAccountId, selectedChat, loadingOlder, hasMoreMessages, messagesPage, messagesTotal, historyExhausted]);
 
-  // Восстановить позицию скролла после подгрузки старых сообщений (prepend)
+  // Восстановить позицию скролла после подгрузки старых сообщений (prepend), без фризов
   useEffect(() => {
     const restore = scrollRestoreRef.current;
     if (!restore || !messagesScrollRef.current) return;
     scrollRestoreRef.current = null;
     const el = messagesScrollRef.current;
-    requestAnimationFrame(() => {
+    const apply = () => {
       el.scrollTop = el.scrollHeight - restore.height + restore.top;
+    };
+    requestAnimationFrame(() => {
+      requestAnimationFrame(apply);
     });
   }, [messages.length]);
 
-  // Сброс «пользователь скроллил вверх» при смене чата
+  // Сброс «пользователь скроллил вверх» и счётчика prepend при смене чата
   useEffect(() => {
     hasUserScrolledUpRef.current = false;
+    setPrependedCount(0);
+    virtuosoScrollAfterChatChangeRef.current = true;
   }, [selectedChat?.channel_id]);
 
   // Отслеживание скролла вверх — подгрузка только после явного скролла (избегаем 429)
@@ -908,23 +1103,29 @@ export default function MessagingPage() {
   }, [selectedChat?.channel_id, hasMoreMessages, loadingOlder, loadOlderMessages]);
 
   const markAsRead = async () => {
-    if (!selectedChat) return;
+    if (!selectedChat || !selectedAccountId) return;
 
+    const chatUnread = selectedChat.unread_count ?? 0;
     try {
-      // Use correct endpoint: /api/messaging/chats/:chatId/mark-all-read?channel=telegram
       await apiClient.post(
         `/api/messaging/chats/${selectedChat.channel_id}/mark-all-read?channel=${selectedChat.channel}`
       );
-      // Update chat unread count
       setChats((prev) =>
         prev.map((chat) =>
-          chat.channel_id === selectedChat.channel_id
-            ? { ...chat, unread_count: 0 }
-            : chat
+          chat.channel_id === selectedChat.channel_id ? { ...chat, unread_count: 0 } : chat
         )
       );
+      // Суммарный непрочитанный по аккаунту уменьшаем на число прочитанных в этом чате
+      if (chatUnread > 0) {
+        setAccounts((prev) =>
+          prev.map((a) =>
+            a.id === selectedAccountId
+              ? { ...a, unread_count: Math.max(0, (a.unread_count ?? 0) - chatUnread) }
+              : a
+          )
+        );
+      }
     } catch (error) {
-      // Silently fail - not critical
       console.warn('Error marking as read:', error);
     }
   };
@@ -941,10 +1142,16 @@ export default function MessagingPage() {
   };
 
   const handleAttachFile = (type: 'photo' | 'video' | 'file') => {
-    console.log(`[CRM] Attach ${type}`);
     setShowAttachMenu(false);
     fileInputRef.current?.click();
-    alert(`Прикрепление ${type === 'photo' ? 'фото' : type === 'video' ? 'видео' : 'файла'} (заглушка)`);
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files?.length) {
+      setPendingFile(files[0]);
+    }
+    e.target.value = '';
   };
 
   const handleInsertFromScript = () => {
@@ -1007,18 +1214,38 @@ export default function MessagingPage() {
     alert('Отложенная отправка сообщения (заглушка)');
   };
 
+  const fileToBase64 = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        resolve(base64 || '');
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+
   const handleSendMessage = async () => {
-    if (!newMessage.trim() || !selectedChat || !selectedAccountId) return;
-    if (!isSelectedAccountMine) return; // только владелец может отправлять сообщения
+    if (!(newMessage.trim() || pendingFile) || !selectedChat || !selectedAccountId) return;
+    if (!isSelectedAccountMine) return;
 
     const messageText = newMessage.trim();
+    const fileToSend = pendingFile;
     setNewMessage('');
+    setPendingFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (selectedAccountId && selectedChat) {
+      try {
+        localStorage.removeItem(getDraftKey(selectedAccountId, selectedChat.channel_id));
+      } catch (_) {}
+    }
     setSendingMessage(true);
 
-    // Optimistically add message to UI
+    const displayContent = messageText || (fileToSend ? `[Файл: ${fileToSend.name}]` : '');
     const tempMessage: Message = {
       id: `temp-${Date.now()}`,
-      content: messageText,
+      content: displayContent,
       direction: 'outbound',
       created_at: new Date().toISOString(),
       status: 'pending',
@@ -1030,15 +1257,20 @@ export default function MessagingPage() {
     scrollToBottom();
 
     try {
-      const response = await apiClient.post('/api/messaging/send', {
+      const body: Record<string, string> = {
         contactId: selectedChat.contact_id,
         channel: selectedChat.channel,
         channelId: selectedChat.channel_id,
         content: messageText,
         bdAccountId: selectedAccountId,
-      });
+      };
+      if (fileToSend) {
+        body.fileBase64 = await fileToBase64(fileToSend);
+        body.fileName = fileToSend.name;
+      }
 
-      // Replace temp message with real one
+      const response = await apiClient.post('/api/messaging/send', body);
+
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === tempMessage.id
@@ -1051,15 +1283,20 @@ export default function MessagingPage() {
             : msg
         )
       );
-
-      // Refresh chats to update last message
       await fetchChats();
     } catch (error: any) {
-      // "A listener indicated an asynchronous response..." — от расширения Chrome, не от приложения
       console.error('Error sending message:', error);
-      // Remove temp message on error
       setMessages((prev) => prev.filter((msg) => msg.id !== tempMessage.id));
-      alert(error.response?.data?.error || 'Ошибка отправки сообщения');
+      const status = error.response?.status;
+      const data = error.response?.data;
+      if (status === 413) {
+        alert(data?.message || 'Файл слишком большой. Максимальный размер 2 ГБ.');
+      } else {
+        alert(data?.message || data?.error || 'Ошибка отправки сообщения');
+      }
+      if (fileToSend) {
+        setPendingFile(fileToSend);
+      }
     } finally {
       setSendingMessage(false);
     }
@@ -1106,6 +1343,245 @@ export default function MessagingPage() {
     }
   };
 
+  const handleFolderIconSelect = async (folderRowId: string, emoji: string) => {
+    if (!selectedAccountId) return;
+    setFolderIconPickerId(null);
+    try {
+      const res = await apiClient.patch(
+        `/api/bd-accounts/${selectedAccountId}/sync-folders/${folderRowId}`,
+        { icon: emoji || null }
+      );
+      setFolders((prev) => prev.map((f) => (f.id === folderRowId ? { ...f, icon: res.data?.icon ?? null } : f)));
+    } catch (err: any) {
+      console.error('Error updating folder icon:', err);
+    }
+  };
+
+  const handleChatFoldersToggle = async (chat: Chat, folderId: number) => {
+    if (!selectedAccountId) return;
+    const current = chatFolderIds(chat);
+    const hasFolder = current.includes(folderId);
+    const newIds = hasFolder ? current.filter((id) => id !== folderId) : [...current, folderId];
+    try {
+      await apiClient.patch(
+        `/api/bd-accounts/${selectedAccountId}/chats/${chat.channel_id}/folder`,
+        { folder_ids: newIds }
+      );
+      setChats((prev) =>
+        prev.map((c) =>
+          c.channel_id === chat.channel_id
+            ? { ...c, folder_ids: newIds, folder_id: newIds[0] ?? null }
+            : c
+        )
+      );
+    } catch (err: any) {
+      console.error('Error updating chat folders:', err);
+      alert(err?.response?.data?.error || 'Не удалось изменить папки');
+    }
+  };
+
+  const handleChatFoldersClear = async (chat: Chat) => {
+    if (!selectedAccountId) return;
+    setChatContextMenu(null);
+    try {
+      await apiClient.patch(
+        `/api/bd-accounts/${selectedAccountId}/chats/${chat.channel_id}/folder`,
+        { folder_ids: [] }
+      );
+      setChats((prev) =>
+        prev.map((c) => (c.channel_id === chat.channel_id ? { ...c, folder_ids: [], folder_id: null } : c))
+      );
+    } catch (err: any) {
+      console.error('Error clearing chat folders:', err);
+      alert(err?.response?.data?.error || 'Не удалось убрать из папок');
+    }
+  };
+
+  const handleCreateFolder = useCallback(
+    async (folder_title: string, icon: string | null) => {
+      if (!selectedAccountId) return null;
+      const res = await apiClient.post<SyncFolder>(
+        `/api/bd-accounts/${selectedAccountId}/sync-folders/custom`,
+        { folder_title: folder_title.trim().slice(0, 12) || t('messaging.folderNewDefault'), icon }
+      );
+      return res.data ?? null;
+    },
+    [selectedAccountId, t]
+  );
+
+  const handleReorderFolders = useCallback(
+    async (order: string[]) => {
+      if (!selectedAccountId) return null;
+      const res = await apiClient.patch<SyncFolder[]>(
+        `/api/bd-accounts/${selectedAccountId}/sync-folders/order`,
+        { order }
+      );
+      return Array.isArray(res.data) ? res.data : null;
+    },
+    [selectedAccountId]
+  );
+
+  const handleUpdateFolder = useCallback(
+    async (
+      folderRowId: string,
+      data: { folder_title?: string; icon?: string | null }
+    ) => {
+      if (!selectedAccountId) return null;
+      const res = await apiClient.patch<SyncFolder>(
+        `/api/bd-accounts/${selectedAccountId}/sync-folders/${folderRowId}`,
+        data
+      );
+      return res.data ?? null;
+    },
+    [selectedAccountId]
+  );
+
+  const handlePinChat = async (chat: Chat) => {
+    if (!selectedAccountId) return;
+    setChatContextMenu(null);
+    try {
+      await apiClient.post('/api/messaging/pinned-chats', {
+        bdAccountId: selectedAccountId,
+        channelId: chat.channel_id,
+      });
+      const res = await apiClient.get('/api/messaging/pinned-chats', { params: { bdAccountId: selectedAccountId } });
+      const list = Array.isArray(res.data) ? res.data : [];
+      setPinnedChannelIds(list.map((p: { channel_id: string }) => String(p.channel_id)));
+    } catch (err: any) {
+      console.error('Error pinning chat:', err);
+      alert(err?.response?.data?.error || 'Не удалось закрепить чат');
+    }
+  };
+
+  const handleUnpinChat = async (chat: Chat) => {
+    if (!selectedAccountId) return;
+    setChatContextMenu(null);
+    try {
+      await apiClient.delete(`/api/messaging/pinned-chats/${chat.channel_id}`, {
+        params: { bdAccountId: selectedAccountId },
+      });
+      setPinnedChannelIds((prev) => prev.filter((id) => id !== chat.channel_id));
+    } catch (err: any) {
+      console.error('Error unpinning chat:', err);
+      alert(err?.response?.data?.error || 'Не удалось открепить чат');
+    }
+  };
+
+  const handleRemoveChat = async (chat: Chat) => {
+    if (!selectedAccountId) return;
+    if (!window.confirm(t('messaging.deleteChatConfirm'))) return;
+    setChatContextMenu(null);
+    try {
+      await apiClient.delete(`/api/bd-accounts/${selectedAccountId}/chats/${chat.channel_id}`);
+      setChats((prev) => prev.filter((c) => c.channel_id !== chat.channel_id));
+      setPinnedChannelIds((prev) => prev.filter((id) => id !== chat.channel_id));
+      if (selectedChat?.channel_id === chat.channel_id) {
+        setSelectedChat(null);
+        setMessages([]);
+      }
+    } catch (err: any) {
+      console.error('Error removing chat:', err);
+      alert(err?.response?.data?.message || err?.response?.data?.error || t('messaging.deleteChatError'));
+    }
+  };
+
+  const renderMessageRow = useCallback(
+    (msg: Message, index: number) => {
+      const isOutbound = msg.direction === 'outbound';
+      const msgTime = msg.telegram_date ?? msg.created_at;
+      const prevMsgTime = messages[index - 1]?.telegram_date ?? messages[index - 1]?.created_at;
+      const showDateSeparator =
+        index === 0 || new Date(msgTime).toDateString() !== new Date(prevMsgTime).toDateString();
+      return (
+        <div>
+          {showDateSeparator && (
+            <div className="flex justify-center my-4">
+              <span className="text-xs text-muted-foreground bg-muted px-3 py-1 rounded-full">
+                {new Date(msgTime).toLocaleDateString('ru-RU', {
+                  day: 'numeric',
+                  month: 'long',
+                  year: 'numeric',
+                })}
+              </span>
+            </div>
+          )}
+          <div
+            className={`flex items-end gap-2 ${isOutbound ? 'flex-row-reverse' : 'flex-row'}`}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMessageContextMenu({ x: e.clientX, y: e.clientY, messageId: msg.id });
+            }}
+          >
+            <div className={`max-w-[70%] ${isOutbound ? 'msg-bubble-out' : 'msg-bubble-in'}`}>
+              <MessageContent
+                msg={msg}
+                isOutbound={isOutbound}
+                bdAccountId={selectedAccountId ?? ''}
+                channelId={selectedChat?.channel_id ?? ''}
+                onOpenMedia={setMediaViewer}
+              />
+              <div
+                className={`text-xs mt-1 flex items-center gap-1 ${
+                  isOutbound ? 'text-primary-foreground/80 justify-end' : 'text-muted-foreground justify-start'
+                }`}
+              >
+                <span>{formatTime(msgTime)}</span>
+                {isOutbound &&
+                  (msg.status === 'read' || msg.status === 'delivered' ? (
+                    <CheckCheck className="w-3.5 h-3.5 text-primary-foreground ml-1" />
+                  ) : msg.status === 'sent' ? (
+                    <Check className="w-3.5 h-3.5 text-primary-foreground/80 ml-1" />
+                  ) : null)}
+              </div>
+              {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                <div className={`flex flex-wrap gap-1 mt-1 ${isOutbound ? 'justify-end' : 'justify-start'}`}>
+                  {Object.entries(msg.reactions).map(([emoji, count]) => (
+                    <span key={emoji} className="text-xs bg-muted/80 rounded px-1.5 py-0.5" title={t('messaging.reactionCount', { count })}>
+                      {emoji} {count > 1 ? count : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    },
+    [messages, selectedAccountId, selectedChat, setMediaViewer, t]
+  );
+
+  useEffect(() => {
+    if (messages.length <= VIRTUAL_LIST_THRESHOLD || messages.length === 0 || !virtuosoScrollAfterChatChangeRef.current) return;
+    virtuosoScrollAfterChatChangeRef.current = false;
+    virtuosoRef.current?.scrollToIndex({ index: messages.length - 1, align: 'end', behavior: 'auto' });
+  }, [selectedChat?.channel_id, messages.length]);
+
+  const REACTION_EMOJI = ['👍', '❤️', '🔥', '👏', '😄', '😮', '😢', '🙏', '👎'];
+  const handleReaction = async (messageId: string, emoji: string) => {
+    setMessageContextMenu(null);
+    try {
+      const res = await apiClient.patch<Message>(`/api/messaging/messages/${messageId}/reaction`, { emoji });
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, reactions: res.data.reactions ?? m.reactions } : m)));
+    } catch (err: any) {
+      console.error('Error adding reaction:', err);
+      alert(err?.response?.data?.error || t('messaging.reactionError'));
+    }
+  };
+
+  const handleDeleteMessage = async (messageId: string) => {
+    setDeletingMessageId(messageId);
+    setMessageContextMenu(null);
+    try {
+      await apiClient.delete(`/api/messaging/messages/${messageId}`);
+      setMessages((prev) => prev.filter((m) => m.id !== messageId));
+    } catch (err: any) {
+      console.error('Error deleting message:', err);
+      alert(err?.response?.data?.message || err?.response?.data?.error || 'Не удалось удалить сообщение');
+    } finally {
+      setDeletingMessageId(null);
+    }
+  };
+
   const formatTime = (dateString: string) => {
     if (!dateString || !dateString.trim() || isNaN(new Date(dateString).getTime())) return '—';
     const date = new Date(dateString);
@@ -1147,7 +1623,39 @@ export default function MessagingPage() {
   const selectedAccount = selectedAccountId ? accounts.find((a) => a.id === selectedAccountId) : null;
   const isSelectedAccountMine = selectedAccount?.is_owner === true;
 
+  // Счётчики непрочитанных по папкам (для бейджей на кнопках папок)
+  const chatFolderIds = useCallback((c: Chat) => (c.folder_ids && c.folder_ids.length > 0 ? c.folder_ids : (c.folder_id != null ? [Number(c.folder_id)] : [])), []);
+
+  const unreadByFolder = useMemo(() => {
+    const all = chats.reduce((s, c) => s + (c.unread_count || 0), 0);
+    const byId: Record<number, number> = {};
+    folders.forEach((f) => {
+      const fid = f.folder_id;
+      byId[fid] = fid === 0 ? all : chats
+        .filter((c) => chatFolderIds(c).includes(fid))
+        .reduce((s, c) => s + (c.unread_count || 0), 0);
+    });
+    byId[0] = all; // папка 0 «все чаты» — всегда сумма по всем
+    return { all, byId };
+  }, [chats, folders, chatFolderIds]);
+
+  // Одна папка «все чаты»: из Telegram (folder_id 0) или дефолт. Без дублирования All и Все чаты.
+  const displayFolders = useMemo(() => {
+    const hasZero = folders.some((f) => f.folder_id === 0);
+    const zero: SyncFolder = hasZero
+      ? folders.find((f) => f.folder_id === 0)!
+      : { id: '0', folder_id: 0, folder_title: t('messaging.folderAll'), order_index: -1, icon: '📋' };
+    const rest = folders.filter((f) => f.folder_id !== 0);
+    return [zero, ...rest];
+  }, [folders, t]);
+
   const filteredChats = chats
+    .filter((chat) => {
+      if (selectedFolderId !== null && selectedFolderId !== 0) {
+        if (!chatFolderIds(chat).includes(selectedFolderId)) return false;
+      }
+      return true;
+    })
     .filter((chat) => {
       const name = getChatName(chat).toLowerCase();
       return name.includes(chatSearch.toLowerCase());
@@ -1159,6 +1667,14 @@ export default function MessagingPage() {
       if (chatTypeFilter === 'groups') return pt === 'chat';
       return true;
     });
+
+  // Показ: закреплённые сверху (в порядке pin), затем остальные
+  const pinnedSet = new Set(pinnedChannelIds);
+  const pinnedChatsOrdered = pinnedChannelIds
+    .map((id) => filteredChats.find((c) => c.channel_id === id))
+    .filter((c): c is Chat => c != null);
+  const unpinnedChats = filteredChats.filter((c) => !pinnedSet.has(c.channel_id));
+  const displayChats = [...pinnedChatsOrdered, ...unpinnedChats];
 
   if (loading) {
     return (
@@ -1191,19 +1707,21 @@ export default function MessagingPage() {
           </div>
         ) : (
           <>
-        <div className="p-4 border-b border-border flex items-center justify-between shrink-0">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-semibold text-foreground">{t('messaging.bdAccounts')}</h3>
-              <Button
-                size="sm"
-                onClick={() => window.location.href = '/dashboard/bd-accounts'}
-                className="p-1"
-              >
-                <Plus className="w-4 h-4" />
-              </Button>
-            </div>
-            <div className="relative">
+        <div className="p-3 border-b border-border flex flex-col gap-2 shrink-0">
+          <div className="flex items-center justify-between gap-2 min-h-[2rem]">
+            <h3 className="font-semibold text-foreground truncate">{t('messaging.bdAccounts')}</h3>
+            <button
+              type="button"
+              onClick={() => setAccountsCollapsed(true)}
+              className="p-1.5 rounded-md text-muted-foreground hover:bg-accent shrink-0"
+              title={t('messaging.collapseAccountsPanel')}
+              aria-label={t('messaging.collapseAccountsPanel')}
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1 min-w-0">
               <Search className="w-4 h-4 absolute left-3 top-2.5 text-muted-foreground" />
               <Input
                 type="text"
@@ -1213,16 +1731,15 @@ export default function MessagingPage() {
                 className="pl-9 text-sm"
               />
             </div>
+            <Button
+              size="sm"
+              onClick={() => window.location.href = '/dashboard/bd-accounts'}
+              className="p-1.5 shrink-0"
+              title={t('messaging.addAccount')}
+            >
+              <Plus className="w-4 h-4" />
+            </Button>
           </div>
-          <button
-            type="button"
-            onClick={() => setAccountsCollapsed(true)}
-            className="p-1.5 rounded-md text-muted-foreground hover:bg-accent shrink-0"
-            title="Свернуть панель аккаунтов"
-            aria-label="Свернуть панель аккаунтов"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
@@ -1238,6 +1755,10 @@ export default function MessagingPage() {
                   setSelectedAccountId(account.id);
                   setSelectedChat(null);
                   setMessages([]);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setAccountContextMenu({ x: e.clientX, y: e.clientY, account });
                 }}
                 className={`p-3 cursor-pointer border-b border-border hover:bg-accent flex gap-3 ${
                   selectedAccountId === account.id
@@ -1266,11 +1787,18 @@ export default function MessagingPage() {
                     )}
                   </div>
                 </div>
-                {account.is_active ? (
-                  <CheckCircle2 className="w-4 h-4 text-green-500 dark:text-green-400 flex-shrink-0" />
-                ) : (
-                  <XCircle className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-                )}
+                <div className="flex items-center gap-2 shrink-0">
+                  {(account.unread_count ?? 0) > 0 && (
+                    <span className="min-w-[1.25rem] h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-xs flex items-center justify-center tabular-nums">
+                      {account.unread_count! > 99 ? '99+' : account.unread_count}
+                    </span>
+                  )}
+                  {account.is_active ? (
+                    <CheckCircle2 className="w-4 h-4 text-green-500 dark:text-green-400 flex-shrink-0" />
+                  ) : (
+                    <XCircle className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                  )}
+                </div>
               </div>
             ))
           )}
@@ -1279,13 +1807,13 @@ export default function MessagingPage() {
         )}
       </div>
 
-      {/* Список чатов — на всю высоту; область списка flex-1 min-h-0 */}
+      {/* Список чатов: заголовок+поиск вверху, под ними папки + список чатов */}
       <div
-        className={`h-full min-h-0 self-stretch bg-card border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${chatsPanelCollapsed ? 'w-12' : 'w-80'}`}
+        className={`h-full min-h-0 self-stretch bg-card border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${chatsPanelCollapsed ? 'w-12' : 'w-[320px]'}`}
         aria-expanded={!chatsPanelCollapsed}
       >
         {chatsPanelCollapsed ? (
-          <div className="flex flex-col items-center py-2 flex-1 min-h-0 justify-start border-b border-border">
+          <div className="flex flex-col items-center py-2 flex-1 min-h-0 justify-start border-b border-border w-12 shrink-0">
             <button
               type="button"
               onClick={() => setChatsCollapsed(false)}
@@ -1299,64 +1827,135 @@ export default function MessagingPage() {
           </div>
         ) : (
           <>
-        {/* Шапка панели чатов: заголовок «Чаты», поиск, тип + иконка настроек списка; без скролла */}
-        <div className="p-3 border-b border-border flex flex-col gap-3 shrink-0 overflow-hidden">
-          <div className="flex items-center justify-between gap-2 min-h-[2rem]">
-            <h3 className="font-semibold text-foreground text-sm truncate">Чаты</h3>
+          {/* Первая строка: общий заголовок «Чаты» + поиск — прижаты вверх, не растягиваются */}
+          <div className="flex items-center gap-2 p-3 border-b border-border shrink-0 min-w-0 flex-none">
+            <h3 className="font-semibold text-foreground truncate shrink-0">{t('messaging.chatsPanelTitle')}</h3>
+            <div className="relative flex-1 min-w-0">
+              <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+              <Input
+                type="text"
+                placeholder={t('messaging.searchChats')}
+                value={chatSearch}
+                onChange={(e) => setChatSearch(e.target.value)}
+                className="pl-8 h-9 text-sm w-full"
+              />
+            </div>
             <button
               type="button"
               onClick={() => setChatsCollapsed(true)}
               className="p-1.5 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground shrink-0"
-              title="Свернуть панель чатов"
-              aria-label="Свернуть панель чатов"
+              title={t('messaging.collapseChatsPanel')}
+              aria-label={t('messaging.collapseChatsPanel')}
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
           </div>
-          <div className="relative min-w-0">
-            <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-            <Input
-              type="text"
-              placeholder={t('messaging.searchChats')}
-              value={chatSearch}
-              onChange={(e) => setChatSearch(e.target.value)}
-              className="pl-8 h-9 text-sm"
-            />
-          </div>
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="text-xs text-muted-foreground shrink-0">Тип:</span>
-              <div className="flex rounded-md border border-border p-0.5 bg-muted/50">
-                {(['all', 'personal', 'groups'] as const).map((key) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => setChatTypeFilter(key)}
-                    className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
-                      chatTypeFilter === key
-                        ? 'bg-card text-foreground shadow-sm'
-                        : 'text-muted-foreground hover:text-foreground'
-                    }`}
-                  >
-                    {key === 'all' ? 'Все' : key === 'personal' ? 'Личные' : 'Группы'}
-                  </button>
-                ))}
-              </div>
-            </div>
+
+          {/* Вторая строка: левая колонка — Sync + папки; правая — переключатель Все/Личные/Группы + список чатов. flex-1 чтобы контент занимал остаток, заголовок остаётся вверху */}
+          <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden">
+            {/* Левая колонка: кнопка Sync (на уровне переключателя типа) + папки + Edit */}
             {selectedAccountId && (
-              <button
-                type="button"
-                onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
-                className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors shrink-0"
-                title="Изменить список чатов / догрузить историю"
-                aria-label="Изменить список чатов"
-              >
-                <Settings className="w-4 h-4" />
-              </button>
+              <div className="w-14 flex-shrink-0 flex flex-col border-r border-border bg-muted/30 min-h-0">
+                {/* Sync/Re-sync — на одном уровне с переключателем Все/Личные/Группы справа */}
+                <div className="shrink-0 border-b border-border/50 flex items-center justify-center py-2">
+                  <button
+                    type="button"
+                    onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
+                    className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                    title={t('messaging.syncChatsTitle')}
+                    aria-label={t('messaging.syncChatsTitle')}
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto py-1 flex flex-col">
+                  {displayFolders.map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setSelectedFolderId(f.folder_id)}
+                      title={f.folder_title}
+                      className={`flex flex-col items-center justify-center py-2 px-1 gap-0.5 min-h-[48px] w-full rounded-none border-b border-border/30 ${
+                        selectedFolderId === f.folder_id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                      }`}
+                    >
+                      <span className="text-lg shrink-0">{f.icon || '📁'}</span>
+                      <span className="text-[10px] font-medium truncate w-full text-center leading-tight">{f.folder_title}</span>
+                      {(unreadByFolder.byId[f.folder_id] ?? 0) > 0 && (
+                        <span className="min-w-[1rem] rounded-full bg-primary/20 px-1 text-[9px] tabular-nums">
+                          {unreadByFolder.byId[f.folder_id]! > 99 ? '99+' : unreadByFolder.byId[f.folder_id]}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+                {isSelectedAccountMine && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!selectedAccountId) return;
+                        setSyncFoldersPushing(true);
+                        try {
+                          const res = await apiClient.post<{ success: boolean; updated?: number; errors?: string[] }>(
+                            `/api/bd-accounts/${selectedAccountId}/sync-folders-push-to-telegram`
+                          );
+                          if (res.data.errors?.length) {
+                            alert(t('messaging.syncFoldersToTelegramDoneWithErrors', { count: res.data.updated ?? 0, errors: res.data.errors.join('\n') }));
+                          } else {
+                            alert(t('messaging.syncFoldersToTelegramDone', { count: res.data.updated ?? 0 }));
+                          }
+                        } catch (err: any) {
+                          alert(err?.response?.data?.message || err?.response?.data?.error || t('messaging.syncFoldersToTelegramError'));
+                        } finally {
+                          setSyncFoldersPushing(false);
+                        }
+                      }}
+                      disabled={syncFoldersPushing}
+                      className="py-1.5 px-1 text-[10px] text-muted-foreground hover:text-foreground border-t border-border/50 disabled:opacity-50 truncate w-full"
+                      title={t('messaging.syncFoldersToTelegram')}
+                    >
+                      {syncFoldersPushing ? '…' : t('messaging.syncFoldersToTelegramShort')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowFolderManageModal(true)}
+                      className="flex flex-col items-center justify-center py-2 px-1 gap-0.5 text-muted-foreground hover:bg-accent hover:text-foreground border-t border-border"
+                      title={t('messaging.folderEdit')}
+                    >
+                      <Pencil className="w-4 h-4 shrink-0" />
+                      <span className="text-[10px] font-medium">{t('messaging.folderEdit')}</span>
+                    </button>
+                  </>
+                )}
+              </div>
             )}
+
+            {/* Правая колонка: переключатель Все/Личные/Группы + список чатов */}
+          <div className="flex-1 min-w-0 flex flex-col min-h-0">
+        {/* Вторая строка: переключатель типа (на одном уровне с кнопкой Sync слева) */}
+        <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border">
+          <span className="text-xs text-muted-foreground shrink-0">Тип:</span>
+          <div className="flex rounded-md border border-border p-0.5 bg-muted/50">
+            {(['all', 'personal', 'groups'] as const).map((key) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setChatTypeFilter(key)}
+                className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
+                  chatTypeFilter === key
+                    ? 'bg-card text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {key === 'all' ? 'Все' : key === 'personal' ? 'Личные' : 'Группы'}
+              </button>
+            ))}
           </div>
+        </div>
+
           {!accountSyncReady && (
-            <div className="text-xs text-muted-foreground bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/30 rounded-md px-2.5 py-1.5 flex items-center gap-2 overflow-hidden">
+            <div className="text-xs text-muted-foreground bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/30 rounded-md mx-3 mt-2 px-2.5 py-1.5 flex items-center gap-2 overflow-hidden shrink-0">
               {accountSyncProgress ? (
                 <span className="truncate">
                   Синхронизация: {accountSyncProgress.done} / {accountSyncProgress.total}
@@ -1377,7 +1976,6 @@ export default function MessagingPage() {
               )}
             </div>
           )}
-        </div>
 
         {/* Область списка чатов / загрузки: flex-1 min-h-0 — одна высота; лоадер в центре без дёргания при смене аккаунта */}
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col relative">
@@ -1404,15 +2002,34 @@ export default function MessagingPage() {
                 <p>Аккаунт коллеги. Настройку синхронизации выполняет владелец.</p>
               )}
             </div>
-          ) : !loadingChats && filteredChats.length === 0 ? (
+          ) : !loadingChats && displayChats.length === 0 ? (
             <div className="p-4 text-center text-sm text-muted-foreground flex-1 min-h-0 flex items-center justify-center">
               {t('messaging.noChats')}
             </div>
           ) : !loadingChats ? (
-            filteredChats.map((chat) => (
+            displayChats.map((chat, idx) => {
+              const isFirstPinned = idx === 0 && pinnedChatsOrdered.length > 0;
+              const isFirstUnpinned = pinnedChatsOrdered.length > 0 && idx === pinnedChatsOrdered.length;
+              return (
+              <React.Fragment key={`${chat.channel}-${chat.channel_id}`}>
+                {isFirstPinned && (
+                  <div className="px-3 py-1.5 text-xs font-medium text-muted-foreground bg-muted/30">
+                    {t('messaging.pinnedSection')}
+                  </div>
+                )}
+                {isFirstUnpinned && (
+                  <div className="px-3 py-1.5 text-xs font-medium text-muted-foreground border-t border-border bg-muted/30">
+                    {t('messaging.chatsSection')}
+                  </div>
+                )}
               <div
                 key={`${chat.channel}-${chat.channel_id}`}
                 onClick={() => setSelectedChat(chat)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  if (!selectedAccountId) return;
+                  setChatContextMenu({ x: e.clientX, y: e.clientY, chat });
+                }}
                 className={`p-4 cursor-pointer border-b border-border transition-colors flex gap-3 ${
                   selectedChat?.channel_id === chat.channel_id
                     ? 'bg-primary/10 dark:bg-primary/20'
@@ -1446,9 +2063,13 @@ export default function MessagingPage() {
                   </div>
                 </div>
               </div>
-            ))
+              </React.Fragment>
+              );
+            })
           ) : null}
         </div>
+          </div>
+          </div>
         </>
         )}
       </div>
@@ -1527,6 +2148,31 @@ export default function MessagingPage() {
                   <p className="text-sm">{t('messaging.noMessages')}</p>
                   <p className="text-xs mt-1 text-muted-foreground">{t('messaging.startConversation')}</p>
                 </div>
+              ) : messages.length > VIRTUAL_LIST_THRESHOLD ? (
+                <div className="flex-1 min-h-0 flex flex-col w-full max-w-3xl mx-auto">
+                  {loadingOlder && (
+                    <div className="flex justify-center py-2 flex-shrink-0">
+                      <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+                    </div>
+                  )}
+                  <Virtuoso
+                    ref={virtuosoRef}
+                    style={{ height: '100%', flex: 1 }}
+                    data={messages}
+                    firstItemIndex={INITIAL_FIRST_ITEM_INDEX - prependedCount}
+                    startReached={() => {
+                      const now = Date.now();
+                      if (now - loadOlderLastCallRef.current < LOAD_OLDER_COOLDOWN_MS) return;
+                      if (!hasMoreMessages || loadingOlder) return;
+                      loadOlderLastCallRef.current = now;
+                      loadOlderMessages();
+                    }}
+                    itemContent={(index, msg) => renderMessageRow(msg, index)}
+                    followOutput="smooth"
+                    initialTopMostItemIndex={messages.length - 1}
+                    className="space-y-3"
+                  />
+                </div>
               ) : (
                 <div className="space-y-3 w-full max-w-3xl mx-auto">
                   <div ref={messagesTopSentinelRef} className="h-2 flex-shrink-0" aria-hidden />
@@ -1535,69 +2181,146 @@ export default function MessagingPage() {
                       <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
                     </div>
                   )}
-                  {messages.map((msg, index) => {
-                    const isOutbound = msg.direction === 'outbound';
-                    const msgTime = msg.telegram_date ?? msg.created_at;
-                    const prevMsgTime = messages[index - 1]?.telegram_date ?? messages[index - 1]?.created_at;
-                    const showDateSeparator =
-                      index === 0 ||
-                      new Date(msgTime).toDateString() !== new Date(prevMsgTime).toDateString();
-                    
-                    return (
-                      <div key={msg.id}>
-                        {showDateSeparator && (
-                          <div className="flex justify-center my-4">
-                            <span className="text-xs text-muted-foreground bg-muted px-3 py-1 rounded-full">
-                              {new Date(msgTime).toLocaleDateString('ru-RU', {
-                                day: 'numeric',
-                                month: 'long',
-                                year: 'numeric'
-                              })}
-                            </span>
-                          </div>
-                        )}
-                        <div
-                          className={`flex items-end gap-2 ${
-                            isOutbound ? 'flex-row-reverse' : 'flex-row'
-                          }`}
-                        >
-                          <div
-                            className={`max-w-[70%] rounded-2xl px-4 py-2 ${
-                              isOutbound
-                                ? 'bg-blue-500 text-white rounded-br-md'
-                                : 'bg-card text-foreground rounded-bl-md shadow-sm border border-border'
-                            }`}
-                          >
-                            <MessageContent
-                                msg={msg}
-                                isOutbound={isOutbound}
-                                bdAccountId={selectedAccountId}
-                                channelId={selectedChat.channel_id}
-                              />
-                            <div
-                              className={`text-xs mt-1 flex items-center gap-1 ${
-                                isOutbound
-                                  ? 'text-blue-100 justify-end'
-                                  : 'text-muted-foreground justify-start'
-                              }`}
-                            >
-                              <span>{formatTime(msgTime)}</span>
-                              {isOutbound && (
-                                <span className="ml-1">
-                                  {msg.status === 'delivered' ? '✓✓' : 
-                                   msg.status === 'sent' ? '✓' : ''}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
+                  {messages.map((msg, index) => (
+                    <React.Fragment key={msg.id}>{renderMessageRow(msg, index)}</React.Fragment>
+                  ))}
                   <div ref={messagesEndRef} />
                 </div>
               )}
             </div>
+
+            {/* Context menu: chat — Pin, Add to folder, Remove */}
+            <ContextMenu
+              open={!!(chatContextMenu && selectedAccountId)}
+              onClose={() => setChatContextMenu(null)}
+              x={chatContextMenu?.x ?? 0}
+              y={chatContextMenu?.y ?? 0}
+              className="min-w-[180px]"
+            >
+              {chatContextMenu && selectedAccountId && (
+                <>
+                  {pinnedSet.has(chatContextMenu.chat.channel_id) ? (
+                    <ContextMenuItem
+                      icon={<PinOff className="w-4 h-4" />}
+                      label={t('messaging.unpinChat')}
+                      onClick={() => handleUnpinChat(chatContextMenu.chat)}
+                    />
+                  ) : (
+                    <ContextMenuItem
+                      icon={<Pin className="w-4 h-4" />}
+                      label={t('messaging.pinChat')}
+                      onClick={() => handlePinChat(chatContextMenu.chat)}
+                    />
+                  )}
+                  <ContextMenuSection label={t('messaging.addToFolder')}>
+                    <ContextMenuItem
+                      label={t('messaging.folderNone')}
+                      onClick={() => handleChatFoldersClear(chatContextMenu.chat)}
+                    />
+                    {folders.length === 0 ? (
+                      <ContextMenuItem label={t('messaging.folderNoFolders')} disabled />
+                    ) : (
+                      folders.map((f) => {
+                        const isInFolder = chatFolderIds(chatContextMenu.chat).includes(f.folder_id);
+                        return (
+                          <ContextMenuItem
+                            key={f.id}
+                            icon={isInFolder ? <Check className="w-4 h-4 text-primary" /> : undefined}
+                            label={
+                              <>
+                                <span className="truncate flex-1">{f.folder_title}</span>
+                                <span className="text-[10px] text-muted-foreground shrink-0">{f.is_user_created ? 'CRM' : 'TG'}</span>
+                              </>
+                            }
+                            onClick={() => handleChatFoldersToggle(chatContextMenu.chat, f.folder_id)}
+                          />
+                        );
+                      })
+                    )}
+                  </ContextMenuSection>
+                  {isSelectedAccountMine && (
+                    <>
+                      <div className="border-t border-border my-1" />
+                      <ContextMenuItem
+                        icon={<Trash2 className="w-4 h-4" />}
+                        label={t('messaging.deleteChat')}
+                        destructive
+                        onClick={() => handleRemoveChat(chatContextMenu.chat)}
+                      />
+                    </>
+                  )}
+                </>
+              )}
+            </ContextMenu>
+
+            <FolderManageModal
+              open={showFolderManageModal}
+              onClose={() => setShowFolderManageModal(false)}
+              folders={folders}
+              onFoldersChange={setFolders}
+              selectedAccountId={selectedAccountId}
+              isAccountOwner={!!isSelectedAccountMine}
+              onCreateFolder={handleCreateFolder}
+              onReorder={handleReorderFolders}
+              onUpdateFolder={handleUpdateFolder}
+            />
+
+            {/* Context menu: account — Settings (BD Accounts) */}
+            <ContextMenu
+              open={!!accountContextMenu}
+              onClose={() => setAccountContextMenu(null)}
+              x={accountContextMenu?.x ?? 0}
+              y={accountContextMenu?.y ?? 0}
+              className="min-w-[160px]"
+            >
+              {accountContextMenu && (
+                <ContextMenuItem
+                  icon={<Settings className="w-4 h-4" />}
+                  label={t('messaging.accountSettings')}
+                  onClick={() => {
+                    setAccountContextMenu(null);
+                    window.location.href = `/dashboard/bd-accounts?accountId=${accountContextMenu.account.id}`;
+                  }}
+                />
+              )}
+            </ContextMenu>
+
+            {/* Context menu: message — reactions + delete */}
+            <ContextMenu
+              open={!!messageContextMenu}
+              onClose={() => setMessageContextMenu(null)}
+              x={messageContextMenu?.x ?? 0}
+              y={messageContextMenu?.y ?? 0}
+              className="min-w-[160px]"
+            >
+              {messageContextMenu && (
+                <>
+                  <ContextMenuSection label={t('messaging.reaction')} noTopBorder>
+                    <div className="flex flex-wrap gap-1 px-2 pb-2">
+                      {REACTION_EMOJI.map((emoji) => (
+                        <button
+                          key={emoji}
+                          type="button"
+                          className="p-1.5 rounded hover:bg-accent text-lg leading-none"
+                          onClick={() => handleReaction(messageContextMenu.messageId, emoji)}
+                          title={emoji}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  </ContextMenuSection>
+                  <div className="border-t border-border my-1" />
+                  <ContextMenuItem
+                    icon={deletingMessageId === messageContextMenu.messageId ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                    label={t('messaging.deleteMessage')}
+                    destructive
+                    onClick={() => handleDeleteMessage(messageContextMenu.messageId)}
+                    disabled={deletingMessageId === messageContextMenu.messageId}
+                  />
+                </>
+              )}
+            </ContextMenu>
 
             {/* Команды CRM - верхняя панель */}
             {showCommandsMenu && (
@@ -1670,6 +2393,20 @@ export default function MessagingPage() {
             )}
 
             <div className="p-4 bg-card border-t border-border">
+              {pendingFile && (
+                <div className="flex items-center gap-2 mb-2 py-1.5 px-2 rounded-lg bg-muted/60 text-sm">
+                  <Paperclip className="w-4 h-4 text-muted-foreground shrink-0" />
+                  <span className="truncate flex-1" title={pendingFile.name}>{pendingFile.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => { setPendingFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+                    className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
+                    title="Убрать файл"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
               {/* Панель ввода сообщения */}
               <div className="flex items-end gap-2">
                 {/* Кнопка прикрепления файлов */}
@@ -1714,8 +2451,8 @@ export default function MessagingPage() {
                     ref={fileInputRef}
                     type="file"
                     className="hidden"
-                    accept="image/*,video/*,.pdf,.doc,.docx,.txt"
-                    multiple
+                    accept="image/*,video/*,.pdf,.doc,.docx,.txt,*/*"
+                    onChange={handleFileSelect}
                   />
                 </div>
 
@@ -1732,24 +2469,23 @@ export default function MessagingPage() {
                   <Mic className="w-5 h-5" />
                 </button>
 
-                {/* Поле ввода (только для своего аккаунта) */}
-                <div className="flex-1 relative">
-                  <div className="w-full">
-                    <Input
-                      type="text"
-                      placeholder={isSelectedAccountMine ? t('messaging.writeMessage') : t('messaging.colleagueViewOnly')}
-                      value={newMessage}
-                      onChange={(e) => setNewMessage(e.target.value)}
-                      onKeyPress={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          handleSendMessage();
-                        }
-                      }}
-                      className="pr-10"
-                      disabled={!isSelectedAccountMine}
-                    />
-                  </div>
+                {/* Поле ввода как в Telegram: textarea с авто-высотой, Enter — отправить, Shift+Enter — новая строка */}
+                <div className="flex-1 relative flex items-end min-h-[40px]">
+                  <textarea
+                    ref={messageInputRef}
+                    placeholder={isSelectedAccountMine ? t('messaging.writeMessage') : t('messaging.colleagueViewOnly')}
+                    value={newMessage}
+                    onChange={(e) => setNewMessage(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendMessage();
+                      }
+                    }}
+                    disabled={!isSelectedAccountMine}
+                    rows={1}
+                    className="w-full min-h-[40px] max-h-[120px] py-2.5 px-3 pr-10 rounded-xl resize-none border border-input bg-background text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  />
                   
                   {/* Кнопка команд CRM */}
                   <button
@@ -1768,7 +2504,7 @@ export default function MessagingPage() {
                 {/* Кнопка отправки (только для своего аккаунта) */}
                 <Button
                   onClick={handleSendMessage}
-                  disabled={!isSelectedAccountMine || !newMessage.trim() || sendingMessage}
+                  disabled={!isSelectedAccountMine || (!newMessage.trim() && !pendingFile) || sendingMessage}
                   className="px-4"
                   title={!isSelectedAccountMine ? 'Только владелец аккаунта может отправлять сообщения' : undefined}
                 >
@@ -1896,6 +2632,13 @@ export default function MessagingPage() {
           </div>
         )}
       </div>
+      {mediaViewer && (
+        <MediaViewer
+          url={mediaViewer.url}
+          type={mediaViewer.type}
+          onClose={() => setMediaViewer(null)}
+        />
+      )}
     </div>
   );
 }

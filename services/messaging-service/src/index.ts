@@ -2,7 +2,7 @@ import express from 'express';
 import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import { RabbitMQClient } from '@getsale/utils';
-import { EventType, MessageSentEvent } from '@getsale/events';
+import { EventType, MessageSentEvent, MessageDeletedEvent } from '@getsale/events';
 import { MessageChannel, MessageDirection, MessageStatus } from '@getsale/types';
 
 const app = express();
@@ -230,6 +230,8 @@ app.get('/api/messaging/chats', async (req, res) => {
           'telegram' AS channel,
           s.telegram_chat_id::text AS channel_id,
           s.bd_account_id,
+          s.folder_id,
+          (SELECT COALESCE(array_agg(j.folder_id ORDER BY j.folder_id), ARRAY[]::integer[]) FROM bd_account_sync_chat_folders j WHERE j.bd_account_id = s.bd_account_id AND j.telegram_chat_id = s.telegram_chat_id) AS folder_ids,
           msg.contact_id,
           s.peer_type,
           c.first_name,
@@ -368,6 +370,75 @@ app.post('/api/messaging/mark-read', async (req, res) => {
   }
 });
 
+// Pinned chats (user-specific, per bd_account)
+app.get('/api/messaging/pinned-chats', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { bdAccountId } = req.query;
+    if (!bdAccountId || String(bdAccountId).trim() === '') {
+      return res.status(400).json({ error: 'bdAccountId is required' });
+    }
+    const result = await pool.query(
+      `SELECT channel_id, order_index FROM user_chat_pins
+       WHERE user_id = $1 AND organization_id = $2 AND bd_account_id = $3
+       ORDER BY order_index ASC, created_at ASC`,
+      [user.id, user.organizationId, String(bdAccountId).trim()]
+    );
+    res.json(result.rows.map((r: any) => ({ channel_id: r.channel_id, order_index: r.order_index })));
+  } catch (error) {
+    console.error('Error fetching pinned chats:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/messaging/pinned-chats', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { bdAccountId, channelId } = req.body;
+    if (!bdAccountId || !channelId) {
+      return res.status(400).json({ error: 'bdAccountId and channelId are required' });
+    }
+    const bdId = String(bdAccountId).trim();
+    const chId = String(channelId).trim();
+    const maxResult = await pool.query(
+      `SELECT COALESCE(MAX(order_index), -1) + 1 AS next_index FROM user_chat_pins
+       WHERE user_id = $1 AND organization_id = $2 AND bd_account_id = $3`,
+      [user.id, user.organizationId, bdId]
+    );
+    const nextIndex = maxResult.rows[0]?.next_index ?? 0;
+    await pool.query(
+      `INSERT INTO user_chat_pins (user_id, organization_id, bd_account_id, channel_id, order_index)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (user_id, organization_id, bd_account_id, channel_id) DO UPDATE SET order_index = EXCLUDED.order_index`,
+      [user.id, user.organizationId, bdId, chId, nextIndex]
+    );
+    res.json({ success: true, channel_id: chId, order_index: nextIndex });
+  } catch (error) {
+    console.error('Error pinning chat:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/api/messaging/pinned-chats/:channelId', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { channelId } = req.params;
+    const { bdAccountId } = req.query;
+    if (!bdAccountId || String(bdAccountId).trim() === '') {
+      return res.status(400).json({ error: 'bdAccountId query is required' });
+    }
+    await pool.query(
+      `DELETE FROM user_chat_pins
+       WHERE user_id = $1 AND organization_id = $2 AND bd_account_id = $3 AND channel_id = $4`,
+      [user.id, user.organizationId, String(bdAccountId).trim(), String(channelId)]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error unpinning chat:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get messaging statistics
 app.get('/api/messaging/stats', async (req, res) => {
   try {
@@ -414,29 +485,42 @@ app.get('/api/messaging/stats', async (req, res) => {
   }
 });
 
-// Send message
+const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
+
+// Send message (optionally with file as base64)
 app.post('/api/messaging/send', async (req, res) => {
   try {
     const user = getUser(req);
-    const { contactId, channel, channelId, content, bdAccountId } = req.body;
+    const { contactId, channel, channelId, content, bdAccountId, fileBase64, fileName } = req.body;
 
-    if (!contactId || !channel || !channelId || !content) {
-      return res.status(400).json({ error: 'Missing required fields: contactId, channel, channelId, content' });
+    if (!contactId || !channel || !channelId) {
+      return res.status(400).json({ error: 'Missing required fields: contactId, channel, channelId' });
+    }
+    if (!content && !fileBase64) {
+      return res.status(400).json({ error: 'Missing required field: content or fileBase64' });
     }
 
-    // Get contact info to determine organization
+    if (fileBase64 && typeof fileBase64 === 'string') {
+      const estimatedBytes = (fileBase64.length * 3) / 4;
+      if (estimatedBytes > MAX_FILE_SIZE_BYTES) {
+        return res.status(413).json({
+          error: 'File too large',
+          message: 'Maximum file size is 2 GB. Use a smaller file.',
+        });
+      }
+    }
+
     const contactResult = await pool.query(
       'SELECT id, organization_id, telegram_id FROM contacts WHERE id = $1 AND organization_id = $2',
       [contactId, user.organizationId]
     );
-
     if (contactResult.rows.length === 0) {
       return res.status(404).json({ error: 'Contact not found' });
     }
 
-    const contact = contactResult.rows[0];
+    const captionOrContent = typeof content === 'string' ? content : '';
+    const contentForDb = captionOrContent || (fileName ? `[Файл: ${fileName}]` : '[Медиа]');
 
-    // Save message
     const result = await pool.query(
       `INSERT INTO messages (organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
@@ -447,24 +531,28 @@ app.post('/api/messaging/send', async (req, res) => {
         channelId,
         contactId,
         MessageDirection.OUTBOUND,
-        content,
+        contentForDb,
         MessageStatus.PENDING,
         false,
         JSON.stringify({ sentBy: user.id }),
       ]
     );
-
     const message = result.rows[0];
 
-    // Send via appropriate channel
     let sent = false;
     if (channel === MessageChannel.TELEGRAM) {
       if (!bdAccountId) {
         return res.status(400).json({ error: 'bdAccountId is required for Telegram messages' });
       }
-
       try {
-        // Call BD Accounts Service to send message via Telegram
+        const body: Record<string, string> = {
+          chatId: channelId,
+          text: captionOrContent,
+        };
+        if (fileBase64 && typeof fileBase64 === 'string') {
+          body.fileBase64 = fileBase64;
+          body.fileName = typeof fileName === 'string' ? fileName : 'file';
+        }
         const response = await fetch(`${BD_ACCOUNTS_SERVICE_URL}/api/bd-accounts/${bdAccountId}/send`, {
           method: 'POST',
           headers: {
@@ -472,10 +560,7 @@ app.post('/api/messaging/send', async (req, res) => {
             'X-User-Id': user.id,
             'X-Organization-Id': user.organizationId,
           },
-          body: JSON.stringify({
-            chatId: channelId,
-            text: content,
-          }),
+          body: JSON.stringify(body),
         });
 
         if (response.ok) {
@@ -485,8 +570,9 @@ app.post('/api/messaging/send', async (req, res) => {
           ]);
           sent = true;
         } else {
-          const errorBody = (await response.json()) as { message?: string };
-          throw new Error(errorBody.message || 'Failed to send message');
+          const errJson = await response.json().catch(() => ({})) as { message?: string; error?: string };
+          const errMsg = response.status === 413 ? (errJson.message || errJson.error || 'File too large') : (errJson.message || errJson.error || 'Failed to send message');
+          throw new Error(errMsg);
         }
       } catch (error: any) {
         console.error('Error sending Telegram message:', error);
@@ -495,7 +581,11 @@ app.post('/api/messaging/send', async (req, res) => {
           JSON.stringify({ error: error.message }),
           message.id,
         ]);
-        throw error;
+        const status = error.message && (error.message.toLowerCase().includes('too large') || error.message.includes('2 GB')) ? 413 : 500;
+        return res.status(status).json({
+          error: status === 413 ? 'File too large' : 'Internal server error',
+          message: error.message || 'Failed to send message',
+        });
       }
     }
     // TODO: Email sending
@@ -534,6 +624,77 @@ app.post('/api/messaging/send', async (req, res) => {
   }
 });
 
+// Delete message (and in Telegram if applicable)
+app.delete('/api/messaging/messages/:id', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+
+    const msgResult = await pool.query(
+      'SELECT id, organization_id, bd_account_id, channel_id, telegram_message_id FROM messages WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (msgResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+    const msg = msgResult.rows[0] as { id: string; organization_id: string; bd_account_id: string | null; channel_id: string; telegram_message_id: number | null };
+
+    if (msg.bd_account_id && msg.telegram_message_id != null) {
+      try {
+        const delRes = await fetch(
+          `${BD_ACCOUNTS_SERVICE_URL}/api/bd-accounts/${msg.bd_account_id}/delete-message`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-User-Id': user.id,
+              'X-Organization-Id': user.organizationId,
+            },
+            body: JSON.stringify({
+              channelId: msg.channel_id,
+              telegramMessageId: msg.telegram_message_id,
+            }),
+          }
+        );
+        if (!delRes.ok) {
+          const errBody = (await delRes.json()) as { message?: string };
+          throw new Error(errBody.message || 'Failed to delete message in Telegram');
+        }
+      } catch (err: any) {
+        console.error('Error deleting message in Telegram:', err);
+        return res.status(502).json({
+          error: 'Failed to delete in Telegram',
+          message: err.message || 'BD accounts service error',
+        });
+      }
+    }
+
+    await pool.query('DELETE FROM messages WHERE id = $1 AND organization_id = $2', [id, user.organizationId]);
+
+    const ev: MessageDeletedEvent = {
+      id: randomUUID(),
+      type: EventType.MESSAGE_DELETED,
+      timestamp: new Date(),
+      organizationId: user.organizationId,
+      data: {
+        messageId: msg.id,
+        bdAccountId: msg.bd_account_id || '',
+        channelId: msg.channel_id,
+        telegramMessageId: msg.telegram_message_id ?? undefined,
+      },
+    };
+    await rabbitmq.publishEvent(ev);
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Error deleting message:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message || 'Failed to delete message',
+    });
+  }
+});
+
 // Mark as read
 app.patch('/api/messaging/messages/:id/read', async (req, res) => {
   try {
@@ -549,6 +710,46 @@ app.patch('/api/messaging/messages/:id/read', async (req, res) => {
   } catch (error) {
     console.error('Error marking message as read:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Реакция на сообщение (лайк и т.д.). reactions в БД: JSONB { "👍": 2, "❤️": 1 }.
+const ALLOWED_EMOJI = ['👍', '👎', '❤️', '🔥', '👏', '😄', '😮', '😢', '🙏'];
+app.patch('/api/messaging/messages/:id/reaction', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { emoji } = req.body as { emoji?: string };
+
+    if (!emoji || typeof emoji !== 'string' || emoji.length > 10) {
+      return res.status(400).json({ error: 'Invalid emoji' });
+    }
+    const trimmed = emoji.trim();
+    if (!ALLOWED_EMOJI.includes(trimmed)) {
+      return res.status(400).json({ error: 'Emoji not allowed', allowed: ALLOWED_EMOJI });
+    }
+
+    const msgResult = await pool.query(
+      'SELECT id, reactions FROM messages WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (msgResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+    const row = msgResult.rows[0];
+    const current = (row.reactions as Record<string, number>) || {};
+    const count = (current[trimmed] || 0) + 1;
+    const next = { ...current, [trimmed]: count };
+
+    await pool.query(
+      'UPDATE messages SET reactions = $1, updated_at = NOW() WHERE id = $2 AND organization_id = $3',
+      [JSON.stringify(next), id, user.organizationId]
+    );
+    const updated = await pool.query('SELECT * FROM messages WHERE id = $1', [id]);
+    res.json(updated.rows[0]);
+  } catch (error: any) {
+    console.error('Error adding reaction:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
   }
 });
 

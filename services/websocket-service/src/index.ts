@@ -107,6 +107,8 @@ async function subscribeToEvents() {
     [
       EventType.MESSAGE_RECEIVED,
       EventType.MESSAGE_SENT,
+      EventType.MESSAGE_DELETED,
+      EventType.MESSAGE_EDITED,
       EventType.DEAL_STAGE_CHANGED,
       EventType.AI_DRAFT_GENERATED,
       EventType.AI_DRAFT_APPROVED,
@@ -120,14 +122,16 @@ async function subscribeToEvents() {
     ],
     async (event) => {
       try {
-        // Broadcast to organization room
-        io.to(`org:${event.organizationId}`).emit('event', {
-          type: event.type,
-          data: event.data,
-          timestamp: event.timestamp,
-        });
+        // Broadcast to organization room (except message.received/sent — только подписчики bd-account получают, чтобы не слать уведомления по чужим чатам)
+        if (event.type !== EventType.MESSAGE_RECEIVED && event.type !== EventType.MESSAGE_SENT) {
+          io.to(`org:${event.organizationId}`).emit('event', {
+            type: event.type,
+            data: event.data,
+            timestamp: event.timestamp,
+          });
+        }
 
-        // Also broadcast to specific rooms based on event type
+        // Сообщения — только в комнаты bd-account и чата (подписчики аккаунта = те, кто отображает чаты этого аккаунта)
         if (event.type === EventType.MESSAGE_RECEIVED || event.type === EventType.MESSAGE_SENT) {
           const data = event.data as any;
           console.log(`[WebSocket] ${event.type} received, bdAccountId=${data?.bdAccountId}, channelId=${data?.channelId}`);

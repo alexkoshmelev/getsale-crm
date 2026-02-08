@@ -29,6 +29,10 @@
     --ring: 221.2 83.2% 53.3%;
     --radius: 0.5rem;
     --radius-lg: 0.75rem;
+    /* Telegram-style message bubbles */
+    --tg-outbound: 199 89% 48%;
+    --tg-bubble-outbound: hsl(var(--tg-outbound));
+    --tg-bubble-inbound: hsl(var(--card));
     --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
     --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
     --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
@@ -122,5 +126,37 @@
   .duration-300 {
     animation-duration: 300ms;
   }
+}
+
+/* Telegram-style message bubble (use in messaging): hover/active как в TG. Текст и ссылки — белые на primary-фоне, чтобы всегда были видны */
+.msg-bubble-out {
+  @apply px-3 py-2 rounded-[12px] rounded-br-[4px] max-w-[85%] shadow-sm transition-colors duration-150;
+  background-color: hsl(var(--primary));
+  color: #ffffff;
+}
+.msg-bubble-out a {
+  color: #ffffff;
+  text-decoration: underline;
+}
+.msg-bubble-out a:hover {
+  opacity: 0.9;
+}
+.msg-bubble-out:hover {
+  filter: brightness(0.97);
+}
+.msg-bubble-out:active {
+  filter: brightness(0.93);
+}
+.msg-bubble-in {
+  @apply px-3 py-2 rounded-[12px] rounded-bl-[4px] max-w-[85%] shadow-sm transition-colors duration-150;
+  background-color: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+}
+.msg-bubble-in:hover {
+  background-color: hsl(var(--muted) / 0.6);
+  border-color: hsl(var(--border));
+}
+.msg-bubble-in:active {
+  background-color: hsl(var(--muted) / 0.8);
 }
 

@@ -77,12 +77,18 @@ Or using Docker:
 docker compose run --rm migrations npm run seed
 ```
 
-## Default Credentials
+## Default Credentials and Workspaces
 
-After seeding, you can use these credentials:
+After seeding, two users and two workspaces are created with cross-membership:
 
-- **Admin**: `admin@getsale.com` / `admin123`
-- **Test User**: `test@getsale.com` / `test123`
+- **Admin**: `admin@getsale.com` / `admin123`  
+  - Owner in **Admin Workspace** (slug: `admin-workspace`)  
+  - Admin in **Test Workspace** (slug: `test-workspace`)
+- **Test User**: `test@getsale.com` / `test123`  
+  - Owner in **Test Workspace**  
+  - Admin in **Admin Workspace**
+
+Each workspace has: default pipeline and stages, team, company, contact, deal, subscription, and invite link. Use the workspace switcher in the sidebar to change context.
 
 ## Production Best Practices
 

@@ -9,15 +9,23 @@ interface User {
   role: string;
 }
 
+interface Workspace {
+  id: string;
+  name: string;
+}
+
 interface AuthState {
   accessToken: string | null;
   refreshToken: string | null;
   user: User | null;
   isAuthenticated: boolean;
+  workspaces: Workspace[] | null;
   login: (email: string, password: string) => Promise<void>;
-  signup: (email: string, password: string, organizationName: string) => Promise<void>;
+  signup: (email: string, password: string, organizationName?: string, inviteToken?: string) => Promise<void>;
   logout: () => void;
   refreshAccessToken: () => Promise<void>;
+  fetchWorkspaces: () => Promise<void>;
+  switchWorkspace: (organizationId: string) => Promise<void>;
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -29,6 +37,7 @@ export const useAuthStore = create<AuthState>()(
       refreshToken: null,
       user: null,
       isAuthenticated: false,
+      workspaces: null,
 
       login: async (email: string, password: string) => {
         try {
@@ -53,13 +62,15 @@ export const useAuthStore = create<AuthState>()(
         }
       },
 
-      signup: async (email: string, password: string, organizationName: string) => {
+      signup: async (email: string, password: string, organizationName?: string, inviteToken?: string) => {
         try {
-          const response = await axios.post(`${API_URL}/api/auth/signup`, {
-            email,
-            password,
-            organizationName,
-          });
+          const body: Record<string, unknown> = { email, password };
+          if (inviteToken) {
+            body.inviteToken = inviteToken;
+          } else {
+            body.organizationName = organizationName ?? 'My Organization';
+          }
+          const response = await axios.post(`${API_URL}/api/auth/signup`, body);
 
           const { accessToken, refreshToken, user } = response.data;
 
@@ -83,6 +94,7 @@ export const useAuthStore = create<AuthState>()(
           refreshToken: null,
           user: null,
           isAuthenticated: false,
+          workspaces: null,
         });
         delete axios.defaults.headers.common['Authorization'];
       },
@@ -113,6 +125,35 @@ export const useAuthStore = create<AuthState>()(
           
           // Throw error so interceptor knows refresh failed
           throw error;
+        }
+      },
+
+      fetchWorkspaces: async () => {
+        const { accessToken } = get();
+        if (!accessToken) return;
+        try {
+          const response = await axios.get<Workspace[]>(`${API_URL}/api/auth/workspaces`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          });
+          set({ workspaces: response.data });
+        } catch {
+          set({ workspaces: [] });
+        }
+      },
+
+      switchWorkspace: async (organizationId: string) => {
+        const { accessToken } = get();
+        if (!accessToken) throw new Error('Not authenticated');
+        const response = await axios.post<{ accessToken: string; user: User }>(
+          `${API_URL}/api/auth/switch-workspace`,
+          { organizationId },
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        const { accessToken: newAccessToken, user } = response.data;
+        set({ accessToken: newAccessToken, user });
+        axios.defaults.headers.common['Authorization'] = `Bearer ${newAccessToken}`;
+        if (typeof window !== 'undefined') {
+          window.location.href = '/dashboard';
         }
       },
     }),
@@ -183,6 +224,7 @@ if (typeof window !== 'undefined') {
         originalRequest?.url?.includes('/api/auth/signin') ||
         originalRequest?.url?.includes('/api/auth/signup') ||
         originalRequest?.url?.includes('/api/auth/refresh') ||
+        originalRequest?.url?.includes('/api/auth/switch-workspace') ||
         originalRequest?._retry
       ) {
         return Promise.reject(error);

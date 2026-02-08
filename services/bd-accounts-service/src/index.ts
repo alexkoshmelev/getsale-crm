@@ -123,16 +123,16 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'bd-accounts-service' });
 });
 
-// Get BD accounts
+// Get BD accounts (с суммарным непрочитанным по каждому аккаунту — только по чатам из sync)
 app.get('/api/bd-accounts', async (req, res) => {
   try {
     const user = getUser(req);
-    
+
     if (!user || !user.organizationId) {
       console.error('Missing user or organizationId in request');
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    
+
     const result = await pool.query(
       `SELECT id, organization_id, telegram_id, phone_number, is_active, connected_at, last_activity,
               created_at, sync_status, sync_progress_done, sync_progress_total, sync_error,
@@ -142,9 +142,30 @@ app.get('/api/bd-accounts', async (req, res) => {
       [user.organizationId]
     );
 
+    // Суммарный непрочитанный по аккаунту — та же логика, что и в messaging (только sync_chats с peer_type user/chat, m.channel_id = s.telegram_chat_id)
+    const unreadResult = await pool.query(
+      `SELECT s.bd_account_id, COALESCE(SUM(sub.cnt), 0)::int AS unread_count
+       FROM bd_account_sync_chats s
+       JOIN bd_accounts a ON a.id = s.bd_account_id AND a.organization_id = $1
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS cnt
+         FROM messages m
+         WHERE m.organization_id = a.organization_id AND m.channel = 'telegram' AND m.unread = true
+           AND m.bd_account_id = s.bd_account_id AND m.channel_id = s.telegram_chat_id
+       ) sub ON true
+       WHERE s.peer_type IN ('user', 'chat')
+       GROUP BY s.bd_account_id`,
+      [user.organizationId]
+    );
+    const unreadByAccount: Record<string, number> = {};
+    for (const row of unreadResult.rows as any[]) {
+      unreadByAccount[row.bd_account_id] = Number(row.unread_count) || 0;
+    }
+
     const rows = result.rows.map((r: any) => ({
       ...r,
       is_owner: r.owner_id != null && r.owner_id === user.id,
+      unread_count: unreadByAccount[r.id] ?? 0,
     }));
     res.json(rows);
   } catch (error: any) {
@@ -666,6 +687,28 @@ app.get('/api/bd-accounts/:id/dialogs', async (req, res) => {
       return res.status(404).json({ error: 'BD account not found' });
     }
 
+    const forceRefresh = req.query.refresh === '1';
+    if (!forceRefresh) {
+      const chatsRows = await pool.query(
+        'SELECT telegram_chat_id, title, peer_type FROM bd_account_sync_chats WHERE bd_account_id = $1 ORDER BY created_at',
+        [id]
+      );
+      const dialogs = (chatsRows.rows as any[]).map((r) => {
+        const pt = (r.peer_type || 'user').toLowerCase();
+        return {
+          id: String(r.telegram_chat_id),
+          name: (r.title || '').trim() || String(r.telegram_chat_id),
+          isUser: pt === 'user',
+          isGroup: pt === 'chat',
+          isChannel: pt === 'channel',
+          unreadCount: 0,
+          lastMessage: '',
+          lastMessageDate: null,
+        };
+      });
+      return res.json(dialogs);
+    }
+
     const dialogs = await telegramManager.getDialogs(id);
     res.json(dialogs);
   } catch (error: any) {
@@ -679,17 +722,34 @@ app.get('/api/bd-accounts/:id/dialogs', async (req, res) => {
 
 // --- Folders: папки первым экраном, подгрузка чатов из выбранных папок ---
 
-// Get available folders (built-in + Telegram dialog filters)
+// Get available folders. По умолчанию — из БД (sync_folders). ?refresh=1 — подтянуть с Telegram (GetDialogFilters).
 app.get('/api/bd-accounts/:id/folders', async (req, res) => {
   try {
     const user = getUser(req);
     const { id } = req.params;
+    const forceRefresh = req.query.refresh === '1';
     const accountResult = await pool.query(
       'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
       [id, user.organizationId]
     );
     if (accountResult.rows.length === 0) {
       return res.status(404).json({ error: 'BD account not found' });
+    }
+    if (!forceRefresh) {
+      const rows = await pool.query(
+        'SELECT folder_id, folder_title, icon FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index, folder_id',
+        [id]
+      );
+      const folders = [
+        { id: 0, title: 'Все чаты', isCustom: false, emoticon: '💬' },
+        ...rows.rows.map((r: any) => ({
+          id: Number(r.folder_id),
+          title: (r.folder_title || '').trim() || `Папка ${r.folder_id}`,
+          isCustom: Number(r.folder_id) >= 2,
+          emoticon: r.icon || undefined,
+        })),
+      ];
+      return res.json({ folders });
     }
     const filters = await telegramManager.getDialogFilters(id);
     const folders = [{ id: 0, title: 'Все чаты', isCustom: false, emoticon: '💬' }, ...filters];
@@ -700,12 +760,12 @@ app.get('/api/bd-accounts/:id/folders', async (req, res) => {
   }
 });
 
-// Get dialogs grouped by folders — для UI выбора контактов по папкам.
-// Один запрос getDialogsAll на папку 0 и 1, кастомные папки фильтруются в памяти — меньше flood wait и таймаутов.
+// Get dialogs grouped by folders. По умолчанию — из БД (мгновенно, без запросов к Telegram). ?refresh=1 — подтянуть с Telegram.
 app.get('/api/bd-accounts/:id/dialogs-by-folders', async (req, res) => {
   try {
     const user = getUser(req);
     const { id } = req.params;
+    const forceRefresh = req.query.refresh === '1';
     const accountResult = await pool.query(
       'SELECT id, telegram_id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
       [id, user.organizationId]
@@ -716,6 +776,59 @@ app.get('/api/bd-accounts/:id/dialogs-by-folders', async (req, res) => {
     const accountTelegramId = accountResult.rows[0].telegram_id != null ? String(accountResult.rows[0].telegram_id).trim() : null;
     const excludeSelf = (dialogs: any[]) =>
       accountTelegramId ? dialogs.filter((d: any) => !(d.isUser && String(d.id).trim() === accountTelegramId)) : dialogs;
+
+    if (!forceRefresh) {
+      const foldersRows = await pool.query(
+        'SELECT folder_id, folder_title, icon FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index, folder_id',
+        [id]
+      );
+      const chatsRows = await pool.query(
+        `SELECT s.telegram_chat_id, s.title, s.peer_type, j.folder_id
+         FROM bd_account_sync_chats s
+         LEFT JOIN bd_account_sync_chat_folders j ON j.bd_account_id = s.bd_account_id AND j.telegram_chat_id = s.telegram_chat_id
+         WHERE s.bd_account_id = $1`,
+        [id]
+      );
+      const chatsByFolder = new Map<number, { id: string; name: string; isUser: boolean; isGroup: boolean; isChannel: boolean }[]>();
+      const folder0Dialogs: { id: string; name: string; isUser: boolean; isGroup: boolean; isChannel: boolean }[] = [];
+      for (const r of chatsRows.rows) {
+        const chatId = String(r.telegram_chat_id);
+        const name = (r.title || '').trim() || chatId;
+        const pt = (r.peer_type || 'user').toLowerCase();
+        const item = { id: chatId, name, isUser: pt === 'user', isGroup: pt === 'chat', isChannel: pt === 'channel' };
+        if (accountTelegramId && item.isUser && chatId === accountTelegramId) continue;
+        folder0Dialogs.push(item);
+        const fid = r.folder_id != null ? Number(r.folder_id) : 0;
+        if (!chatsByFolder.has(fid)) chatsByFolder.set(fid, []);
+        if (!chatsByFolder.get(fid)!.some((d) => d.id === chatId)) chatsByFolder.get(fid)!.push(item);
+      }
+      const folderList: { id: number; title: string; emoticon?: string; dialogs: any[] }[] = [];
+      const addedFolderIds = new Set<number>();
+      if (!foldersRows.rows.some((r: any) => Number(r.folder_id) === 0)) {
+        folderList.push({ id: 0, title: 'Все чаты', emoticon: '💬', dialogs: excludeSelf(folder0Dialogs) });
+        addedFolderIds.add(0);
+      }
+      if (!foldersRows.rows.some((r: any) => Number(r.folder_id) === 1)) {
+        folderList.push({ id: 1, title: 'Архив', emoticon: '📁', dialogs: excludeSelf(chatsByFolder.get(1) || []) });
+        addedFolderIds.add(1);
+      }
+      for (const f of foldersRows.rows) {
+        const fid = Number(f.folder_id);
+        if (addedFolderIds.has(fid)) continue;
+        const dialogs = fid === 0 ? folder0Dialogs : (chatsByFolder.get(fid) || []);
+        folderList.push({
+          id: fid,
+          title: (f.folder_title || '').trim() || `Папка ${fid}`,
+          emoticon: f.icon || undefined,
+          dialogs: excludeSelf(fid === 0 ? folder0Dialogs : dialogs),
+        });
+        addedFolderIds.add(fid);
+      }
+      if (folderList.length === 0) {
+        folderList.push({ id: 0, title: 'Все чаты', emoticon: '💬', dialogs: excludeSelf(folder0Dialogs) });
+      }
+      return res.json({ folders: folderList });
+    }
 
     const filters = await telegramManager.getDialogFilters(id);
     const [allDialogs0, allDialogs1] = await Promise.all([
@@ -750,7 +863,7 @@ app.get('/api/bd-accounts/:id/dialogs-by-folders', async (req, res) => {
   }
 });
 
-// Get selected sync folders for an account
+// Get selected sync folders for an account (ensures folders from sync_chats are present)
 app.get('/api/bd-accounts/:id/sync-folders', async (req, res) => {
   try {
     const user = getUser(req);
@@ -762,8 +875,9 @@ app.get('/api/bd-accounts/:id/sync-folders', async (req, res) => {
     if (accountResult.rows.length === 0) {
       return res.status(404).json({ error: 'BD account not found' });
     }
+    await ensureFoldersFromSyncChats(pool, telegramManager, id);
     const result = await pool.query(
-      'SELECT id, folder_id, folder_title, order_index FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index, folder_id',
+      'SELECT id, folder_id, folder_title, order_index, COALESCE(is_user_created, false) AS is_user_created, icon FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index, folder_id',
       [id]
     );
     res.json(result.rows);
@@ -800,41 +914,178 @@ app.post('/api/bd-accounts/:id/sync-folders', async (req, res) => {
       const f = folders[i];
       const folderId = Number(f.folderId ?? f.folder_id ?? 0);
       const title = String(f.folderTitle ?? f.folder_title ?? '').trim() || `Папка ${folderId}`;
+      const isUserCreated = Boolean(f.is_user_created ?? f.isUserCreated ?? false);
+      const icon = f.icon != null && String(f.icon).trim() ? String(f.icon).trim().slice(0, 20) : null;
       await pool.query(
-        `INSERT INTO bd_account_sync_folders (bd_account_id, folder_id, folder_title, order_index)
-         VALUES ($1, $2, $3, $4)`,
-        [id, folderId, title, i]
+        `INSERT INTO bd_account_sync_folders (bd_account_id, folder_id, folder_title, order_index, is_user_created, icon)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [id, folderId, title, i, isUserCreated, icon]
       );
     }
 
-    await refreshChatsFromFolders(pool, telegramManager, id);
+    // Не вызываем refreshChatsFromFolders при сохранении папок — меньше GetDialogs и flood wait.
+    // Пользователь может явно нажать «Обновить с Telegram» (sync-folders-refresh).
 
     if (Array.isArray(extraChats) && extraChats.length > 0) {
       for (const c of extraChats) {
         const chatId = String(c.id ?? c.telegram_chat_id ?? '').trim();
         if (!chatId) continue;
         const title = (c.name ?? c.title ?? '').trim() || chatId;
+        const folderId = c.folderId !== undefined && c.folderId !== null ? Number(c.folderId) : null;
         let peerType = 'user';
         if (c.isChannel) peerType = 'channel';
         else if (c.isGroup) peerType = 'chat';
         await pool.query(
           `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
-           VALUES ($1, $2, $3, $4, false, NULL)
+           VALUES ($1, $2, $3, $4, false, $5)
            ON CONFLICT (bd_account_id, telegram_chat_id) DO UPDATE SET
              title = EXCLUDED.title,
-             peer_type = EXCLUDED.peer_type`,
-          [id, chatId, title, peerType]
+             peer_type = EXCLUDED.peer_type,
+             folder_id = EXCLUDED.folder_id`,
+          [id, chatId, title, peerType, folderId]
         );
+        if (folderId != null) {
+          await pool.query(
+            `INSERT INTO bd_account_sync_chat_folders (bd_account_id, telegram_chat_id, folder_id)
+             VALUES ($1, $2, $3) ON CONFLICT (bd_account_id, telegram_chat_id, folder_id) DO NOTHING`,
+            [id, chatId, folderId]
+          );
+        }
       }
     }
 
     const result = await pool.query(
-      'SELECT id, folder_id, folder_title, order_index FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index',
+      'SELECT id, folder_id, folder_title, order_index, COALESCE(is_user_created, false) AS is_user_created, icon FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index',
       [id]
     );
     res.json(result.rows);
   } catch (error: any) {
     console.error('Error saving sync folders:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Create custom folder (user-created; next folder_id >= 2) — регистрировать до /:folderRowId
+app.post('/api/bd-accounts/:id/sync-folders/custom', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { folder_title: folderTitle, icon } = req.body;
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const isOwner = await requireAccountOwner(id, user);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Only the account owner can create folders' });
+    }
+    const title = (folderTitle != null ? String(folderTitle).trim() : '').slice(0, 12) || 'New folder';
+    const iconVal = icon != null && String(icon).trim() ? String(icon).trim().slice(0, 20) : null;
+    const maxRow = await pool.query(
+      'SELECT COALESCE(MAX(folder_id), 1) AS max_id FROM bd_account_sync_folders WHERE bd_account_id = $1',
+      [id]
+    );
+    const nextFolderId = Math.max(2, (Number(maxRow.rows[0]?.max_id) || 1) + 1);
+    const countRow = await pool.query(
+      'SELECT COUNT(*) AS c FROM bd_account_sync_folders WHERE bd_account_id = $1',
+      [id]
+    );
+    const orderIndex = Number(countRow.rows[0]?.c) || 0;
+    const insert = await pool.query(
+      `INSERT INTO bd_account_sync_folders (bd_account_id, folder_id, folder_title, order_index, is_user_created, icon)
+       VALUES ($1, $2, $3, $4, true, $5)
+       RETURNING id, folder_id, folder_title, order_index, is_user_created, icon`,
+      [id, nextFolderId, title, orderIndex, iconVal]
+    );
+    res.status(201).json(insert.rows[0]);
+  } catch (error: any) {
+    console.error('Error creating custom folder:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Reorder folders (body: { order: string[] } — array of row ids) — регистрировать до /:folderRowId
+app.patch('/api/bd-accounts/:id/sync-folders/order', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { order } = req.body;
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const isOwner = await requireAccountOwner(id, user);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Only the account owner can reorder folders' });
+    }
+    if (!Array.isArray(order) || order.length === 0) {
+      return res.status(400).json({ error: 'order must be a non-empty array of folder row ids' });
+    }
+    for (let i = 0; i < order.length; i++) {
+      await pool.query(
+        'UPDATE bd_account_sync_folders SET order_index = $1 WHERE id = $2 AND bd_account_id = $3',
+        [i, String(order[i]), id]
+      );
+    }
+    const result = await pool.query(
+      'SELECT id, folder_id, folder_title, order_index, COALESCE(is_user_created, false) AS is_user_created, icon FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index',
+      [id]
+    );
+    res.json(result.rows);
+  } catch (error: any) {
+    console.error('Error reordering folders:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Update folder icon or title (emoji / folder_title)
+app.patch('/api/bd-accounts/:id/sync-folders/:folderRowId', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id: accountId, folderRowId } = req.params;
+    const { icon, folder_title: folderTitle } = req.body;
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [accountId, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const updates: string[] = [];
+    const values: any[] = [];
+    let i = 1;
+    if (icon !== undefined) {
+      const iconVal = icon === null || icon === '' ? null : (String(icon).trim().slice(0, 20) || null);
+      updates.push(`icon = $${i++}`);
+      values.push(iconVal);
+    }
+    if (folderTitle !== undefined) {
+      const titleVal = String(folderTitle ?? '').trim().slice(0, 12) || null;
+      updates.push(`folder_title = $${i++}`);
+      values.push(titleVal);
+    }
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    values.push(folderRowId, accountId);
+    const result = await pool.query(
+      `UPDATE bd_account_sync_folders SET ${updates.join(', ')}
+       WHERE id = $${i++} AND bd_account_id = $${i}
+       RETURNING id, folder_id, folder_title, order_index, is_user_created, icon`,
+      values
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Folder not found' });
+    }
+    res.json(result.rows[0]);
+  } catch (error: any) {
+    console.error('Error updating folder:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
   }
 });
@@ -858,6 +1109,87 @@ app.post('/api/bd-accounts/:id/sync-folders-refresh', async (req, res) => {
     res.status(500).json({ error: 'Internal server error', message: error.message });
   }
 });
+
+// Push folders from CRM to Telegram (reverse sync: update Telegram dialog filters)
+app.post('/api/bd-accounts/:id/sync-folders-push-to-telegram', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const isOwner = await requireAccountOwner(id, user);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Only the account owner can push folders to Telegram' });
+    }
+    const result = await telegramManager.pushFoldersToTelegram(id);
+    res.json({ success: true, updated: result.updated, errors: result.errors });
+  } catch (error: any) {
+    console.error('Error pushing folders to Telegram:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+/**
+ * Ensure bd_account_sync_folders has a row for every distinct folder_id that appears in bd_account_sync_chats.
+ * Used when chats were saved with folder_id (e.g. from POST sync-chats or partial selection) but folders table was empty.
+ */
+async function ensureFoldersFromSyncChats(
+  pool: Pool,
+  telegramManager: TelegramManager,
+  accountId: string
+): Promise<void> {
+  const distinct = await pool.query(
+    `SELECT DISTINCT folder_id FROM (
+      SELECT folder_id FROM bd_account_sync_chat_folders WHERE bd_account_id = $1
+      UNION
+      SELECT folder_id FROM bd_account_sync_chats WHERE bd_account_id = $1 AND folder_id IS NOT NULL
+    ) u ORDER BY folder_id`,
+    [accountId]
+  );
+  if (distinct.rows.length === 0) return;
+
+  const existing = await pool.query(
+    'SELECT folder_id FROM bd_account_sync_folders WHERE bd_account_id = $1',
+    [accountId]
+  );
+  const existingIds = new Set(existing.rows.map((r: any) => Number(r.folder_id)));
+
+  let filtersByFolder: Map<number, { title: string; emoticon?: string }> = new Map();
+  try {
+    if (telegramManager.isConnected(accountId)) {
+      const filters = await telegramManager.getDialogFilters(accountId);
+      for (const f of filters) filtersByFolder.set(f.id, { title: f.title, emoticon: f.emoticon });
+    }
+  } catch (_) {}
+
+  const defaultTitles: Record<number, string> = { 0: 'Все чаты', 1: 'Архив' };
+  const defaultIcons: Record<number, string> = { 0: '💬', 1: '📁' };
+
+  let orderIndex = (await pool.query('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM bd_account_sync_folders WHERE bd_account_id = $1', [accountId])).rows[0]?.next ?? 0;
+
+  for (const row of distinct.rows) {
+    const folderId = Number(row.folder_id);
+    if (existingIds.has(folderId)) continue;
+
+    const fromTg = filtersByFolder.get(folderId);
+    const title = (fromTg?.title ?? defaultTitles[folderId] ?? `Папка ${folderId}`).trim().slice(0, 255) || `Папка ${folderId}`;
+    const icon = fromTg?.emoticon ?? defaultIcons[folderId] ?? null;
+
+    await pool.query(
+      `INSERT INTO bd_account_sync_folders (bd_account_id, folder_id, folder_title, order_index, is_user_created, icon)
+       VALUES ($1, $2, $3, $4, false, $5)
+       ON CONFLICT (bd_account_id, folder_id) DO NOTHING`,
+      [accountId, folderId, title, orderIndex, icon ?? null]
+    );
+    orderIndex++;
+    existingIds.add(folderId);
+  }
+}
 
 async function refreshChatsFromFolders(
   pool: Pool,
@@ -922,6 +1254,11 @@ async function refreshChatsFromFolders(
              folder_id = EXCLUDED.folder_id`,
           [accountId, chatId, title, peerType, folderId]
         );
+        await pool.query(
+          `INSERT INTO bd_account_sync_chat_folders (bd_account_id, telegram_chat_id, folder_id)
+           VALUES ($1, $2, $3) ON CONFLICT (bd_account_id, telegram_chat_id, folder_id) DO NOTHING`,
+          [accountId, chatId, folderId]
+        );
       }
     } catch (err: any) {
       console.warn(`[BD Accounts] refreshChatsFromFolders folder ${folderId} failed:`, err?.message);
@@ -944,11 +1281,26 @@ app.get('/api/bd-accounts/:id/sync-chats', async (req, res) => {
       return res.status(404).json({ error: 'BD account not found' });
     }
 
-    const result = await pool.query(
+    const chatsRows = await pool.query(
       'SELECT id, telegram_chat_id, title, peer_type, is_folder, folder_id, created_at FROM bd_account_sync_chats WHERE bd_account_id = $1 ORDER BY folder_id NULLS LAST, created_at',
       [id]
     );
-    res.json(result.rows);
+    const junctionRows = await pool.query(
+      'SELECT telegram_chat_id, folder_id FROM bd_account_sync_chat_folders WHERE bd_account_id = $1',
+      [id]
+    );
+    const folderIdsByChat = new Map<string, number[]>();
+    for (const r of junctionRows.rows) {
+      const tid = String(r.telegram_chat_id);
+      if (!folderIdsByChat.has(tid)) folderIdsByChat.set(tid, []);
+      folderIdsByChat.get(tid)!.push(Number(r.folder_id));
+    }
+    const rows = chatsRows.rows.map((r: any) => {
+      const tid = String(r.telegram_chat_id);
+      const folder_ids = folderIdsByChat.get(tid) ?? (r.folder_id != null ? [Number(r.folder_id)] : []);
+      return { ...r, folder_ids };
+    });
+    res.json(rows);
   } catch (error: any) {
     console.error('Error fetching sync chats:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
@@ -981,12 +1333,95 @@ app.post('/api/bd-accounts/:id/chats/:chatId/load-older-history', async (req, re
   }
 });
 
-// Save selected chats for sync (replace existing selection) — только владелец аккаунта
+// Назначить чат папкам (мультивыбор — чат может быть в нескольких папках). body: { folder_ids: number[] }
+app.patch('/api/bd-accounts/:id/chats/:chatId/folder', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id: accountId, chatId } = req.params;
+    const { folder_ids: folderIdsRaw, folder_id: legacyFolderId } = req.body;
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [accountId, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+
+    let folderIds: number[] = [];
+    if (Array.isArray(folderIdsRaw)) {
+      folderIds = folderIdsRaw.map((x: any) => Number(x)).filter((n: number) => !Number.isNaN(n));
+    } else if (legacyFolderId !== undefined && legacyFolderId !== null && legacyFolderId !== '') {
+      folderIds = [Number(legacyFolderId)];
+    }
+
+    const chatExists = await pool.query(
+      'SELECT id FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2',
+      [accountId, chatId]
+    );
+    if (chatExists.rows.length === 0) {
+      return res.status(404).json({ error: 'Chat not found in sync list' });
+    }
+
+    await pool.query('DELETE FROM bd_account_sync_chat_folders WHERE bd_account_id = $1 AND telegram_chat_id = $2', [accountId, chatId]);
+    for (const fid of folderIds) {
+      await pool.query(
+        `INSERT INTO bd_account_sync_chat_folders (bd_account_id, telegram_chat_id, folder_id)
+         VALUES ($1, $2, $3) ON CONFLICT (bd_account_id, telegram_chat_id, folder_id) DO NOTHING`,
+        [accountId, chatId, fid]
+      );
+    }
+    const primaryFolderId = folderIds[0] ?? null;
+    await pool.query(
+      'UPDATE bd_account_sync_chats SET folder_id = $1 WHERE bd_account_id = $2 AND telegram_chat_id = $3',
+      [primaryFolderId, accountId, chatId]
+    );
+    res.json({ success: true, folder_ids: folderIds, folder_id: primaryFolderId });
+  } catch (error: any) {
+    console.error('Error updating chat folder:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Удалить чат из списка синхронизации (убрать из мессенджера) — только владелец аккаунта
+app.delete('/api/bd-accounts/:id/chats/:chatId', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id: accountId, chatId } = req.params;
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [accountId, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const isOwner = await requireAccountOwner(accountId, user);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Only the account owner can remove a chat from the list' });
+    }
+
+    await pool.query('DELETE FROM bd_account_sync_chat_folders WHERE bd_account_id = $1 AND telegram_chat_id = $2', [accountId, chatId]);
+    const result = await pool.query(
+      'DELETE FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 RETURNING id',
+      [accountId, chatId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Chat not found in sync list' });
+    }
+    res.status(200).json({ success: true });
+  } catch (error: any) {
+    console.error('Error removing chat from sync:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Save selected chats for sync (replace existing selection) — только владелец аккаунта. chats: [{ id, name, isUser, isGroup, isChannel, folderId? }]
 app.post('/api/bd-accounts/:id/sync-chats', async (req, res) => {
   try {
     const user = getUser(req);
     const { id } = req.params;
-    const { chats } = req.body; // [{ id, name, isUser, isGroup, isChannel }]
+    const { chats } = req.body; // [{ id, name, isUser, isGroup, isChannel, folderId? }]
 
     const accountResult = await pool.query(
       'SELECT id, telegram_id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
@@ -1007,11 +1442,14 @@ app.post('/api/bd-accounts/:id/sync-chats', async (req, res) => {
     const accountTelegramId = accountResult.rows[0].telegram_id != null ? String(accountResult.rows[0].telegram_id).trim() : null;
 
     await pool.query('DELETE FROM bd_account_sync_chats WHERE bd_account_id = $1', [id]);
+    await pool.query('DELETE FROM bd_account_sync_chat_folders WHERE bd_account_id = $1', [id]);
 
     let inserted = 0;
     for (const c of chats) {
       const chatId = String(c.id ?? c.telegram_chat_id ?? '').trim();
       const title = (c.name ?? c.title ?? '').trim();
+      const folderId = c.folderId !== undefined && c.folderId !== null ? Number(c.folderId) : null;
+      const folderIds = Array.isArray(c.folderIds) ? c.folderIds.map((x: any) => Number(x)).filter((n: number) => !Number.isNaN(n)) : (folderId != null ? [folderId] : []);
       let peerType = 'user';
       if (c.isChannel) peerType = 'channel';
       else if (c.isGroup) peerType = 'chat';
@@ -1019,25 +1457,45 @@ app.post('/api/bd-accounts/:id/sync-chats', async (req, res) => {
         console.warn('[BD Accounts] Skipping chat with empty id:', c);
         continue;
       }
-      // Не сохраняем «Избранное» (Saved Messages) — чат с собой; peer_type user и id = telegram_id аккаунта
       if (peerType === 'user' && accountTelegramId && chatId === accountTelegramId) {
         console.log('[BD Accounts] Skipping Saved Messages (self-chat) for account', id);
         continue;
       }
+      const primaryFolder = folderIds[0] ?? folderId ?? null;
       await pool.query(
-        `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder)
-         VALUES ($1, $2, $3, $4, false)`,
-        [id, chatId, title, peerType]
+        `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
+         VALUES ($1, $2, $3, $4, false, $5)`,
+        [id, chatId, title, peerType, primaryFolder]
       );
+      for (const fid of folderIds) {
+        await pool.query(
+          `INSERT INTO bd_account_sync_chat_folders (bd_account_id, telegram_chat_id, folder_id)
+           VALUES ($1, $2, $3) ON CONFLICT (bd_account_id, telegram_chat_id, folder_id) DO NOTHING`,
+          [id, chatId, fid]
+        );
+      }
       inserted++;
     }
     console.log(`[BD Accounts] Saved ${inserted} sync chats for account ${id} (requested ${chats.length})`);
 
-    const result = await pool.query(
-      'SELECT id, telegram_chat_id, title, peer_type FROM bd_account_sync_chats WHERE bd_account_id = $1 ORDER BY created_at',
+    await ensureFoldersFromSyncChats(pool, telegramManager, id);
+
+    const chatsRows = await pool.query(
+      'SELECT id, telegram_chat_id, title, peer_type, folder_id, created_at FROM bd_account_sync_chats WHERE bd_account_id = $1 ORDER BY folder_id NULLS LAST, created_at',
       [id]
     );
-    res.json(result.rows);
+    const junctionRows = await pool.query('SELECT telegram_chat_id, folder_id FROM bd_account_sync_chat_folders WHERE bd_account_id = $1', [id]);
+    const folderIdsByChat = new Map<string, number[]>();
+    for (const r of junctionRows.rows) {
+      const tid = String(r.telegram_chat_id);
+      if (!folderIdsByChat.has(tid)) folderIdsByChat.set(tid, []);
+      folderIdsByChat.get(tid)!.push(Number(r.folder_id));
+    }
+    const resultRows = chatsRows.rows.map((r: any) => ({
+      ...r,
+      folder_ids: folderIdsByChat.get(String(r.telegram_chat_id)) ?? (r.folder_id != null ? [Number(r.folder_id)] : []),
+    }));
+    res.json(resultRows);
   } catch (error: any) {
     console.error('Error saving sync chats:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
@@ -1294,6 +1752,7 @@ app.delete('/api/bd-accounts/:id', async (req, res) => {
     await telegramManager.disconnectAccount(id);
 
     await pool.query('UPDATE messages SET bd_account_id = NULL WHERE bd_account_id = $1', [id]);
+    await pool.query('DELETE FROM bd_account_sync_chat_folders WHERE bd_account_id = $1', [id]);
     await pool.query('DELETE FROM bd_account_sync_chats WHERE bd_account_id = $1', [id]);
     await pool.query('DELETE FROM bd_account_sync_folders WHERE bd_account_id = $1', [id]);
     await pool.query('DELETE FROM bd_accounts WHERE id = $1', [id]);
@@ -1308,34 +1767,80 @@ app.delete('/api/bd-accounts/:id', async (req, res) => {
   }
 });
 
-// Send message via Telegram (internal endpoint for messaging service)
-app.post('/api/bd-accounts/:id/send', async (req, res) => {
+// Delete message in Telegram (internal endpoint for messaging service)
+app.post('/api/bd-accounts/:id/delete-message', async (req, res) => {
   try {
     const user = getUser(req);
     const { id } = req.params;
-    const { chatId, text } = req.body;
+    const { channelId, telegramMessageId } = req.body;
 
-    if (!chatId || !text) {
-      return res.status(400).json({ error: 'Missing required fields: chatId, text' });
+    if (!channelId || telegramMessageId == null) {
+      return res.status(400).json({ error: 'Missing required fields: channelId, telegramMessageId' });
     }
 
-    // Verify account belongs to organization
     const accountResult = await pool.query(
       'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
       [id, user.organizationId]
     );
-
     if (accountResult.rows.length === 0) {
       return res.status(404).json({ error: 'BD account not found' });
     }
 
-    // Check if account is connected
     if (!telegramManager.isConnected(id)) {
       return res.status(400).json({ error: 'BD account is not connected' });
     }
 
-    // Send message
-    const message = await telegramManager.sendMessage(id, chatId, text);
+    await telegramManager.deleteMessageInTelegram(id, String(channelId), Number(telegramMessageId));
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Error deleting message in Telegram:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message || 'Failed to delete message',
+    });
+  }
+});
+
+const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB (Telegram limit)
+
+// Send message or file via Telegram (internal endpoint for messaging service)
+app.post('/api/bd-accounts/:id/send', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { chatId, text, fileBase64, fileName } = req.body;
+
+    if (!chatId) {
+      return res.status(400).json({ error: 'Missing required field: chatId' });
+    }
+    if (!text && !fileBase64) {
+      return res.status(400).json({ error: 'Missing required field: text or fileBase64' });
+    }
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    if (!telegramManager.isConnected(id)) {
+      return res.status(400).json({ error: 'BD account is not connected' });
+    }
+
+    let message: any;
+    if (fileBase64 && typeof fileBase64 === 'string') {
+      const buf = Buffer.from(fileBase64, 'base64');
+      if (buf.length > MAX_FILE_SIZE_BYTES) {
+        return res.status(413).json({ error: 'File too large', message: 'Maximum file size is 2 GB' });
+      }
+      message = await telegramManager.sendFile(id, chatId, buf, {
+        caption: typeof text === 'string' ? text : '',
+        filename: typeof fileName === 'string' ? fileName.trim() || 'file' : 'file',
+      });
+    } else {
+      message = await telegramManager.sendMessage(id, chatId, typeof text === 'string' ? text : '');
+    }
 
     res.json({
       success: true,
@@ -1344,9 +1849,9 @@ app.post('/api/bd-accounts/:id/send', async (req, res) => {
     });
   } catch (error: any) {
     console.error('Error sending message:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Internal server error',
-      message: error.message || 'Failed to send message'
+      message: error.message || 'Failed to send message',
     });
   }
 });

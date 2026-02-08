@@ -30,6 +30,8 @@ export enum EventType {
   MESSAGE_RECEIVED = 'message.received',
   MESSAGE_SENT = 'message.sent',
   MESSAGE_READ = 'message.read',
+  MESSAGE_DELETED = 'message.deleted',
+  MESSAGE_EDITED = 'message.edited',
   
   // Campaign
   CAMPAIGN_CREATED = 'campaign.created',
@@ -119,6 +121,27 @@ export interface MessageSentEvent extends BaseEvent {
     channel: string;
     contactId?: string;
     bdAccountId?: string;
+  };
+}
+
+export interface MessageDeletedEvent extends BaseEvent {
+  type: EventType.MESSAGE_DELETED;
+  data: {
+    messageId: string;
+    bdAccountId: string;
+    channelId: string;
+    telegramMessageId?: number;
+  };
+}
+
+export interface MessageEditedEvent extends BaseEvent {
+  type: EventType.MESSAGE_EDITED;
+  data: {
+    messageId: string;
+    bdAccountId: string;
+    channelId: string;
+    content?: string;
+    telegramMessageId?: number;
   };
 }
 
@@ -394,6 +417,8 @@ export type Event =
   | UserCreatedEvent
   | MessageReceivedEvent
   | MessageSentEvent
+  | MessageDeletedEvent
+  | MessageEditedEvent
   | DealStageChangedEvent
   | AIDraftGeneratedEvent
   | AIDraftApprovedEvent

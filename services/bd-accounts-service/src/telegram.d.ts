@@ -36,6 +36,9 @@ declare module 'telegram/events' {
     constructor(opts?: unknown);
   }
   export class Raw {
+    constructor(opts?: { types?: unknown[]; func?: (event: unknown) => boolean });
+  }
+  export class EditedMessage {
     constructor(opts?: unknown);
   }
 }

@@ -25,7 +25,12 @@ import {
   Moon,
   Monitor,
   Keyboard,
+  Volume2,
+  VolumeX,
+  ChevronDown,
+  Loader2,
 } from 'lucide-react';
+import { useNotificationsStore } from '@/lib/stores/notifications-store';
 import { clsx } from 'clsx';
 import { GlobalSearch } from '@/components/layout/GlobalSearch';
 import { Breadcrumbs } from '@/components/layout/Breadcrumbs';
@@ -60,11 +65,18 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const { t } = useTranslation();
   const router = useRouter();
   const pathname = usePathname();
-  const { user, logout } = useAuthStore();
+  const { user, logout, workspaces, fetchWorkspaces, switchWorkspace } = useAuthStore();
   const { sidebarCollapsed, toggleSidebar } = useLayoutStore();
   const { mode: themeMode, setMode: setThemeMode } = useThemeStore();
   const { locale, setLocale } = useLocaleStore();
+  const { muted: notificationsMuted, toggleMuted: toggleNotificationsMuted } = useNotificationsStore();
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [workspaceDropdownOpen, setWorkspaceDropdownOpen] = useState(false);
+  const [switching, setSwitching] = useState(false);
+
+  useEffect(() => {
+    if (user?.id) fetchWorkspaces();
+  }, [user?.id, fetchWorkspaces]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -187,6 +199,66 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
           })}
         </nav>
 
+        {/* Переключатель воркспейса */}
+        {!sidebarCollapsed && (
+          <div className="px-3 py-2 border-t border-border relative">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">
+              Рабочее пространство
+            </p>
+            {workspaces === null ? (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>…</span>
+              </div>
+            ) : workspaces && workspaces.length > 0 ? (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceDropdownOpen((v) => !v)}
+                  className="w-full flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-sm bg-muted/50 hover:bg-muted text-left truncate"
+                  title={workspaces.find((w) => w.id === user?.organizationId)?.name ?? user?.organizationId}
+                >
+                  <span className="truncate">
+                    {workspaces.find((w) => w.id === user?.organizationId)?.name ?? user?.organizationId ?? '—'}
+                  </span>
+                  <ChevronDown className={clsx('w-4 h-4 shrink-0 transition-transform', workspaceDropdownOpen && 'rotate-180')} />
+                </button>
+                {workspaceDropdownOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" aria-hidden onClick={() => setWorkspaceDropdownOpen(false)} />
+                    <div className="absolute left-0 right-0 top-full mt-1 py-1 bg-popover border border-border rounded-lg shadow-lg z-50 max-h-48 overflow-y-auto">
+                      {workspaces.map((w) => (
+                        <button
+                          key={w.id}
+                          type="button"
+                          onClick={() => {
+                            if (w.id === user?.organizationId) {
+                              setWorkspaceDropdownOpen(false);
+                              return;
+                            }
+                            setSwitching(true);
+                            switchWorkspace(w.id).finally(() => setSwitching(false));
+                            setWorkspaceDropdownOpen(false);
+                          }}
+                          disabled={switching}
+                          className={clsx(
+                            'w-full px-3 py-2 text-left text-sm truncate',
+                            w.id === user?.organizationId ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-accent'
+                          )}
+                        >
+                          {w.name}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground truncate">—</p>
+            )}
+          </div>
+        )}
+
         {/* User + Logout only */}
         <div className="shrink-0 border-t border-border p-2 space-y-1">
           {!sidebarCollapsed && (
@@ -235,8 +307,21 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
             </div>
           </div>
 
-          {/* Notifications, Help, Shortcuts, Theme, Language */}
+          {/* Notifications sound, Notifications, Help, Shortcuts, Theme, Language */}
           <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={toggleNotificationsMuted}
+              className={clsx(
+                'p-2 rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+                notificationsMuted
+                  ? 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                  : 'text-primary hover:bg-primary/10'
+              )}
+              title={notificationsMuted ? t('notifications.unmute') : t('notifications.mute')}
+            >
+              {notificationsMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+            </button>
             <NotificationsDropdown />
             <HelpDropdown />
             <button
