@@ -372,13 +372,13 @@ export default function SettingsPage() {
                             <td className="py-2.5 pr-4 font-medium">{log.action}</td>
                             <td className="py-2.5 pr-4 font-mono text-xs">{log.user_id.slice(0, 8)}…</td>
                             <td className="py-2.5">
-                              {(log.old_value || log.new_value) && (
+                              {(log.old_value || log.new_value) ? (
                                 <span className="text-muted-foreground">
-                                  {log.old_value && typeof log.old_value === 'object' && JSON.stringify(log.old_value)}
+                                  {log.old_value && typeof log.old_value === 'object' ? JSON.stringify(log.old_value) : null}
                                   {log.old_value && log.new_value ? ' → ' : ''}
-                                  {log.new_value && typeof log.new_value === 'object' && JSON.stringify(log.new_value)}
+                                  {log.new_value && typeof log.new_value === 'object' ? JSON.stringify(log.new_value) : null}
                                 </span>
-                              )}
+                              ) : null}
                             </td>
                           </tr>
                         ))}

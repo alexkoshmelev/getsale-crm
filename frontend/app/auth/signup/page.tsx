@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/lib/stores/auth-store';
@@ -8,7 +8,7 @@ import Link from 'next/link';
 import { Input } from '@/components/ui/Input';
 import Button from '@/components/ui/Button';
 
-export default function SignupPage() {
+function SignupForm() {
   const { t } = useTranslation();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -116,5 +116,17 @@ export default function SignupPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function SignupPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="animate-pulse text-muted-foreground text-sm">{'\u2022'}</div>
+      </div>
+    }>
+      <SignupForm />
+    </Suspense>
   );
 }
