@@ -160,3 +160,56 @@
   background-color: hsl(var(--muted) / 0.8);
 }
 
+/* Тонкие кастомные скроллбары (ширина скролла = 6px для выравнивания отступов) */
+:root {
+  --scrollbar-w: 6px;
+}
+/* Всегда видимый — для панели истории сообщений */
+.scroll-thin {
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground) / 0.4) transparent;
+}
+.scroll-thin::-webkit-scrollbar {
+  width: var(--scrollbar-w);
+  height: var(--scrollbar-w);
+}
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: hsl(var(--muted-foreground) / 0.4);
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.6);
+}
+
+/* Появляется при наведении. Симметричные отступы: слева и справа по --scrollbar-w; скролл рисуется в правых 6px (без scrollbar-gutter, чтобы не зависеть от разной ширины gutter в браузерах). */
+.scroll-thin-overlay {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  padding-left: var(--scrollbar-w);
+  padding-right: var(--scrollbar-w);
+}
+.scroll-thin-overlay:hover {
+  scrollbar-color: hsl(var(--muted-foreground) / 0.4) transparent;
+}
+.scroll-thin-overlay::-webkit-scrollbar {
+  width: var(--scrollbar-w);
+  height: var(--scrollbar-w);
+}
+.scroll-thin-overlay::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-thin-overlay::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: transparent;
+}
+.scroll-thin-overlay:hover::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.45);
+}
+.scroll-thin-overlay:hover::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.6);
+}
+

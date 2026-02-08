@@ -199,11 +199,65 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
           })}
         </nav>
 
-        {/* Переключатель воркспейса */}
-        {!sidebarCollapsed && (
+        {/* Переключатель воркспейса: развёрнутый — название; свернутый — заглавные буквы */}
+        {sidebarCollapsed ? (
+          <div className="px-2 py-2 border-t border-border flex flex-col items-center gap-1">
+            {workspaces === null ? (
+              <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+            ) : workspaces && workspaces.length > 0 ? (
+              <div className="relative w-full flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceDropdownOpen((v) => !v)}
+                  className="w-9 h-9 rounded-lg bg-muted/50 hover:bg-muted flex items-center justify-center text-xs font-semibold text-foreground shrink-0 transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+                  title={workspaces.find((w) => w.id === user?.organizationId)?.name ?? user?.organizationId ?? ''}
+                >
+                  {(() => {
+                    const name = workspaces.find((w) => w.id === user?.organizationId)?.name ?? '';
+                    const parts = name.trim().split(/\s+/).filter(Boolean);
+                    if (parts.length >= 2) return (parts[0]![0] + parts[parts.length - 1]![0]).toUpperCase().slice(0, 2);
+                    if (name.length >= 2) return name.slice(0, 2).toUpperCase();
+                    return name.slice(0, 1).toUpperCase() || '—';
+                  })()}
+                </button>
+                {workspaceDropdownOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" aria-hidden onClick={() => setWorkspaceDropdownOpen(false)} />
+                    <div className="absolute left-full top-0 ml-1 py-1 min-w-[10rem] bg-popover border border-border rounded-lg shadow-lg z-50 max-h-48 overflow-y-auto">
+                      {workspaces.map((w) => (
+                        <button
+                          key={w.id}
+                          type="button"
+                          onClick={() => {
+                            if (w.id === user?.organizationId) {
+                              setWorkspaceDropdownOpen(false);
+                              return;
+                            }
+                            setSwitching(true);
+                            switchWorkspace(w.id).finally(() => setSwitching(false));
+                            setWorkspaceDropdownOpen(false);
+                          }}
+                          disabled={switching}
+                          className={clsx(
+                            'w-full px-3 py-2 text-left text-sm truncate',
+                            w.id === user?.organizationId ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-accent'
+                          )}
+                        >
+                          {w.name}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
+              <span className="text-muted-foreground text-xs">—</span>
+            )}
+          </div>
+        ) : (
           <div className="px-3 py-2 border-t border-border relative">
             <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">
-              Рабочее пространство
+              {t('nav.workspace')}
             </p>
             {workspaces === null ? (
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">

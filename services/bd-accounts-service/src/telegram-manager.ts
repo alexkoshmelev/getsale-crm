@@ -1025,6 +1025,22 @@ export class TelegramManager {
   }
 
   /**
+   * Чат входит хотя бы в одну папку, отличную от «Все чаты» (folder_id <> 0).
+   * Уведомления не шлём по чатам, которые только в фиктивной папке All chats — иначе прилетали бы пуши по всем диалогам.
+   */
+  private async isChatInNonAllChatsFolder(accountId: string, telegramChatId: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `SELECT 1 FROM (
+        SELECT folder_id FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 AND folder_id IS NOT NULL AND folder_id <> 0
+        UNION
+        SELECT folder_id FROM bd_account_sync_chat_folders WHERE bd_account_id = $1 AND telegram_chat_id = $2 AND folder_id <> 0
+      ) u LIMIT 1`,
+      [accountId, telegramChatId]
+    );
+    return result.rows.length > 0;
+  }
+
+  /**
    * Сохраняет сообщение в БД с полными данными Telegram (entities, media, reply_to, extra).
    * При совпадении (bd_account_id, channel_id, telegram_message_id) обновляет запись.
    */
@@ -1152,21 +1168,11 @@ export class TelegramManager {
 
       if (!chatId) return;
 
-      // Только чаты из sync; при авто-добавлении уведомление на фронт не шлём
-      let allowed = await this.isChatAllowedForAccount(accountId, chatId);
-      let justAddedToSync = false;
+      // Только чаты, которые пользователь выбрал при синхронизации (bd_account_sync_chats). Не авто-добавляем при приходе сообщения.
+      const allowed = await this.isChatAllowedForAccount(accountId, chatId);
       if (!allowed) {
-        const added = await this.tryAddChatFromSelectedFolders(accountId, chatId);
-        if (added) {
-          allowed = true;
-          justAddedToSync = true;
-          this.syncHistoryForChat(accountId, organizationId, chatId).catch((e) =>
-            console.warn('[TelegramManager] Background syncHistoryForChat failed:', e?.message)
-          );
-        } else {
-          console.log(`[TelegramManager] Short: chat not in sync list, skipping, accountId=${accountId}, chatId=${chatId}`);
-          return;
-        }
+        console.log(`[TelegramManager] Short: chat not in sync list (user did not select during sync), skipping, accountId=${accountId}, chatId=${chatId}`);
+        return;
       }
 
       const contactId = await this.ensureContactForTelegramId(organizationId, senderId || chatId);
@@ -1201,7 +1207,9 @@ export class TelegramManager {
         await this.pool.query('UPDATE bd_accounts SET last_activity = NOW() WHERE id = $1', [accountId]);
       }
 
-      if (!justAddedToSync) {
+      // Уведомление на фронт только если чат в папке, отличной от «Все чаты» (folder_id <> 0)
+      const inNonAllFolder = await this.isChatInNonAllChatsFolder(accountId, chatId);
+      if (inNonAllFolder) {
         const event: MessageReceivedEvent = {
           id: randomUUID(),
           type: EventType.MESSAGE_RECEIVED,
@@ -1219,6 +1227,8 @@ export class TelegramManager {
         };
         await this.rabbitmq.publishEvent(event);
         console.log(`[TelegramManager] Short message saved and event published, messageId=${savedMessage.id}, channelId=${chatId}`);
+      } else {
+        console.log(`[TelegramManager] Short message saved, chat only in All chats (folder 0), no event, accountId=${accountId}, chatId=${chatId}`);
       }
     } catch (error) {
       console.error(`[TelegramManager] Error handling short message:`, error);
@@ -1226,8 +1236,8 @@ export class TelegramManager {
   }
 
   /**
-   * Handle new message (incoming or outgoing from another device). Only for allowed chats (bd_account_sync_chats);
-   * save to DB + emit event for WS. Сообщения по чатам, которые пользователь не выбирал при синхронизации, не публикуются.
+   * Handle new message (incoming or outgoing from another device). Only for chats in bd_account_sync_chats
+   * (chats the user selected during sync). No auto-add on message — save + emit event only for sync_chats.
    */
   private async handleNewMessage(
     message: Api.Message,
@@ -1258,21 +1268,11 @@ export class TelegramManager {
         }
       }
 
-      // Только чаты из bd_account_sync_chats; если чат в выбранной папке — авто-добавляем и подгружаем историю (но уведомление на фронт не шлём — только по явно выбранным).
-      let allowed = await this.isChatAllowedForAccount(accountId, chatId);
-      let justAddedToSync = false;
+      // Только чаты, которые пользователь выбрал при синхронизации (bd_account_sync_chats). Не авто-добавляем чаты при приходе сообщения — иначе прилетали бы уведомления по всем чатам.
+      const allowed = await this.isChatAllowedForAccount(accountId, chatId);
       if (!allowed) {
-        const added = await this.tryAddChatFromSelectedFolders(accountId, chatId);
-        if (added) {
-          allowed = true;
-          justAddedToSync = true;
-          this.syncHistoryForChat(accountId, organizationId, chatId).catch((e) =>
-            console.warn('[TelegramManager] Background syncHistoryForChat failed:', e?.message)
-          );
-        } else {
-          console.log(`[TelegramManager] Chat not in sync list (add chat to sync in UI), skipping message, accountId=${accountId}, chatId=${chatId}`);
-          return;
-        }
+        console.log(`[TelegramManager] Chat not in sync list (user did not select this chat during sync), skipping message, accountId=${accountId}, chatId=${chatId}`);
+        return;
       }
 
       const contactId = await this.ensureContactForTelegramId(organizationId, senderId || chatId);
@@ -1302,8 +1302,9 @@ export class TelegramManager {
         );
       }
 
-      // Уведомление на фронт только если чат был уже в sync (не авто-добавлен в этом запросе). Редакт/удаление — отдельные события, звук по ним не играем.
-      if (!justAddedToSync) {
+      // Уведомление на фронт только если чат в папке, отличной от «Все чаты» (folder_id <> 0)
+      const inNonAllFolder = await this.isChatInNonAllChatsFolder(accountId, chatId);
+      if (inNonAllFolder) {
         const event: MessageReceivedEvent = {
           id: randomUUID(),
           type: EventType.MESSAGE_RECEIVED,
@@ -1321,6 +1322,8 @@ export class TelegramManager {
         };
         await this.rabbitmq.publishEvent(event);
         console.log(`[TelegramManager] MessageReceivedEvent published, messageId=${savedMessage.id}, channelId=${chatId}`);
+      } else {
+        console.log(`[TelegramManager] Message saved, chat only in All chats (folder 0), no event, accountId=${accountId}, chatId=${chatId}`);
       }
     } catch (error) {
       console.error(`[TelegramManager] Error handling new message:`, error);

@@ -172,15 +172,15 @@ function getMessageMediaType(msg: Message): MessageMediaType {
   return 'text';
 }
 
-const mediaLabels: Record<MessageMediaType, string> = {
+const MEDIA_TYPE_I18N_KEYS: Record<MessageMediaType, string> = {
   text: '',
-  photo: 'Фото',
-  voice: 'Голосовое сообщение',
-  audio: 'Аудио',
-  video: 'Видео',
-  document: 'Документ',
-  sticker: 'Стикер',
-  unknown: 'Вложение',
+  photo: 'photo',
+  voice: 'mediaVoice',
+  audio: 'mediaAudio',
+  video: 'video',
+  document: 'mediaDocument',
+  sticker: 'mediaSticker',
+  unknown: 'mediaUnknown',
 };
 
 function getChatDisplayName(chat: Chat): string {
@@ -260,7 +260,7 @@ function ChatAvatar({
   );
 }
 
-function DownloadLink({ url, className }: { url: string; className?: string }) {
+function DownloadLink({ url, className, downloadLabel = 'Download' }: { url: string; className?: string; downloadLabel?: string }) {
   const [loading, setLoading] = useState(false);
   const handleClick = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -287,7 +287,7 @@ function DownloadLink({ url, className }: { url: string; className?: string }) {
   };
   return (
     <button type="button" onClick={handleClick} className={className} disabled={loading}>
-      {loading ? '…' : 'Скачать'}
+      {loading ? '…' : downloadLabel}
     </button>
   );
 }
@@ -352,7 +352,7 @@ function MessageContent({
 }) {
   const { t } = useTranslation();
   const mediaType = getMessageMediaType(msg);
-  const label = mediaLabels[mediaType];
+  const label = mediaType === 'text' ? '' : t('messaging.' + MEDIA_TYPE_I18N_KEYS[mediaType]);
   const hasCaption = !!((msg.content ?? (msg as any).body ?? '')?.trim());
   const textCls = 'text-sm leading-relaxed whitespace-pre-wrap break-words';
   const iconCls = isOutbound ? 'text-primary-foreground/80' : 'text-muted-foreground';
@@ -432,7 +432,7 @@ function MessageContent({
         </div>
       )}
       {mediaType === 'document' && mediaApiUrl && (
-        <DownloadLink url={mediaApiUrl} className="text-xs underline" />
+        <DownloadLink url={mediaApiUrl} className="text-xs underline" downloadLabel={t('messaging.download')} />
       )}
       {hasCaption && textBlock}
     </div>
@@ -1689,21 +1689,45 @@ export default function MessagingPage() {
     <div className="relative flex flex-1 items-stretch h-full min-h-full w-full min-w-0 bg-card rounded-lg border border-border overflow-hidden isolate">
       {/* BD Accounts — на всю высоту; список flex-1 min-h-0 */}
       <div
-        className={`h-full min-h-0 self-stretch bg-muted/40 dark:bg-muted/20 border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${accountsPanelCollapsed ? 'w-12' : 'w-64'}`}
+        className={`h-full min-h-0 self-stretch bg-muted/40 dark:bg-muted/20 border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${accountsPanelCollapsed ? 'w-16' : 'w-64'}`}
         aria-expanded={!accountsPanelCollapsed}
       >
         {accountsPanelCollapsed ? (
-          <div className="flex flex-col items-center py-2 flex-1 min-h-0 justify-start border-b border-border">
+          <div className="flex flex-col flex-1 min-h-0 w-full">
             <button
               type="button"
               onClick={() => setAccountsCollapsed(false)}
-              className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground flex flex-col items-center gap-0.5 w-full"
+              className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground flex flex-col items-center gap-0.5 w-full shrink-0 border-b border-border"
               title={t('messaging.bdAccounts') + ' — развернуть'}
               aria-label={t('messaging.bdAccounts') + ', развернуть панель'}
             >
               <UserCircle className="w-5 h-5 shrink-0" aria-hidden />
               <ChevronRight className="w-4 h-4 shrink-0" aria-hidden />
             </button>
+            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center pt-2 pb-1 gap-1 scroll-thin-overlay">
+              {filteredAccounts.length === 0 ? null : filteredAccounts.map((account) => (
+                <button
+                  key={account.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedAccountId(account.id);
+                    setSelectedChat(null);
+                    setMessages([]);
+                  }}
+                  title={getAccountDisplayName(account)}
+                  className={`relative shrink-0 rounded-full p-0.5 transition-colors hover:ring-2 hover:ring-primary/50 ${
+                    selectedAccountId === account.id ? 'ring-2 ring-primary' : ''
+                  }`}
+                >
+                  <BDAccountAvatar accountId={account.id} account={account} className="w-8 h-8" />
+                  {(account.unread_count ?? 0) > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 min-w-[0.875rem] h-3.5 px-0.5 rounded-full bg-primary text-primary-foreground text-[10px] flex items-center justify-center leading-none">
+                      {account.unread_count! > 99 ? '99+' : account.unread_count}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
           <>
@@ -1742,7 +1766,7 @@ export default function MessagingPage() {
           </div>
         </div>
 
-        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
+        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col scroll-thin-overlay">
           {filteredAccounts.length === 0 ? (
             <div className="p-4 text-center text-sm text-muted-foreground flex-1 min-h-0 flex items-center justify-center">
               {t('messaging.noAccounts')}
@@ -1809,21 +1833,129 @@ export default function MessagingPage() {
 
       {/* Список чатов: заголовок+поиск вверху, под ними папки + список чатов */}
       <div
-        className={`h-full min-h-0 self-stretch bg-card border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${chatsPanelCollapsed ? 'w-12' : 'w-[320px]'}`}
+        className={`h-full min-h-0 self-stretch bg-card border-r border-border flex flex-col transition-[width] duration-200 shrink-0 ${chatsPanelCollapsed ? 'w-32' : 'w-[320px]'}`}
         aria-expanded={!chatsPanelCollapsed}
       >
         {chatsPanelCollapsed ? (
-          <div className="flex flex-col items-center py-2 flex-1 min-h-0 justify-start border-b border-border w-12 shrink-0">
+          <div className="flex flex-col flex-1 min-h-0 w-full min-w-0">
+            {/* Кнопка разворота на всю ширину (как в Telegram) */}
             <button
               type="button"
               onClick={() => setChatsCollapsed(false)}
-              className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground flex flex-col items-center gap-0.5 w-full"
-              title="Чаты — развернуть"
-              aria-label="Развернуть панель чатов"
+              className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground flex flex-col items-center gap-0.5 w-full shrink-0 border-b border-border"
+              title={t('messaging.chatsPanelTitle') + ' — развернуть'}
+              aria-label={t('messaging.expandChatsPanel')}
             >
               <MessageSquare className="w-5 h-5 shrink-0" aria-hidden />
               <ChevronRight className="w-4 h-4 shrink-0" aria-hidden />
             </button>
+            {selectedAccountId && (
+              <div className="flex flex-1 min-h-0 min-w-0">
+                {/* Левая колонка: Sync + папки + Sync to TG + Edit (как в развёрнутом виде) */}
+                <div className="w-16 flex-shrink-0 flex flex-col border-r border-border bg-muted/30 min-h-0">
+                  {/* Кнопка синхронизации сверху */}
+                  <div className="shrink-0 border-b border-border/50 flex items-center justify-center py-2">
+                    <button
+                      type="button"
+                      onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
+                      className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                      title={t('messaging.syncChatsTitle')}
+                      aria-label={t('messaging.syncChatsTitle')}
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto pt-2 pb-1 flex flex-col scroll-thin-overlay">
+                    {displayFolders.map((f) => (
+                      <button
+                        key={f.id}
+                        type="button"
+                        onClick={() => setSelectedFolderId(f.folder_id)}
+                        title={f.folder_title}
+                        className={`flex flex-col items-center justify-center py-2 px-1 gap-0.5 min-h-[48px] w-full rounded-none border-b border-border/30 ${
+                          selectedFolderId === f.folder_id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                        }`}
+                      >
+                        <span className="text-lg shrink-0 leading-none">{f.icon || '📁'}</span>
+                        <span className="text-[10px] font-medium truncate w-full text-center leading-tight">{f.folder_title}</span>
+                        {(unreadByFolder.byId[f.folder_id] ?? 0) > 0 && (
+                          <span className="min-w-[1rem] rounded-full bg-primary/20 px-1 text-[9px] tabular-nums leading-none">
+                            {unreadByFolder.byId[f.folder_id]! > 99 ? '99+' : unreadByFolder.byId[f.folder_id]}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                  {isSelectedAccountMine && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!selectedAccountId) return;
+                          setSyncFoldersPushing(true);
+                          try {
+                            const res = await apiClient.post<{ success: boolean; updated?: number; errors?: string[] }>(
+                              `/api/bd-accounts/${selectedAccountId}/sync-folders-push-to-telegram`
+                            );
+                            if (res.data.errors?.length) {
+                              alert(t('messaging.syncFoldersToTelegramDoneWithErrors', { count: res.data.updated ?? 0, errors: res.data.errors.join('\n') }));
+                            } else {
+                              alert(t('messaging.syncFoldersToTelegramDone', { count: res.data.updated ?? 0 }));
+                            }
+                          } catch (err: any) {
+                            alert(err?.response?.data?.message || err?.response?.data?.error || t('messaging.syncFoldersToTelegramError'));
+                          } finally {
+                            setSyncFoldersPushing(false);
+                          }
+                        }}
+                        disabled={syncFoldersPushing}
+                        className="py-1.5 px-1 text-[10px] text-muted-foreground hover:text-foreground border-t border-border/50 disabled:opacity-50 truncate w-full shrink-0"
+                        title={t('messaging.syncFoldersToTelegram')}
+                      >
+                        {syncFoldersPushing ? '…' : t('messaging.syncFoldersToTelegramShort')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowFolderManageModal(true)}
+                        className="flex flex-col items-center justify-center py-2 px-1 gap-0.5 text-muted-foreground hover:bg-accent hover:text-foreground border-t border-border shrink-0"
+                        title={t('messaging.folderEdit')}
+                      >
+                        <Pencil className="w-4 h-4 shrink-0" />
+                        <span className="text-[10px] font-medium">{t('messaging.folderEdit')}</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+                {/* Правая колонка: чаты — аватарки/инициалы (ширина w-16) */}
+                <div className="w-16 flex-shrink-0 flex flex-col min-h-0">
+                  <div className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center pt-2 pb-1 gap-1 scroll-thin-overlay">
+                    {!loadingChats && accountSyncReady && displayChats.length > 0 && displayChats.map((chat) => (
+                      <button
+                        key={`${chat.channel}-${chat.channel_id}`}
+                        type="button"
+                        onClick={() => setSelectedChat(chat)}
+                        title={getChatName(chat)}
+                        className={`relative shrink-0 rounded-full p-0.5 transition-colors hover:ring-2 hover:ring-primary/50 ${
+                          selectedChat?.channel_id === chat.channel_id ? 'ring-2 ring-primary' : ''
+                        }`}
+                      >
+                        <ChatAvatar
+                          bdAccountId={selectedAccountId}
+                          chatId={chat.channel_id}
+                          chat={chat}
+                          className="w-8 h-8"
+                        />
+                        {chat.unread_count > 0 && (
+                          <span className="absolute -top-0.5 -right-0.5 min-w-[0.875rem] h-3.5 px-0.5 rounded-full bg-primary text-primary-foreground text-[10px] flex items-center justify-center leading-none">
+                            {chat.unread_count}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <>
@@ -1855,8 +1987,8 @@ export default function MessagingPage() {
           <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden">
             {/* Левая колонка: кнопка Sync (на уровне переключателя типа) + папки + Edit */}
             {selectedAccountId && (
-              <div className="w-14 flex-shrink-0 flex flex-col border-r border-border bg-muted/30 min-h-0">
-                {/* Sync/Re-sync — на одном уровне с переключателем Все/Личные/Группы справа */}
+              <div className="w-16 flex-shrink-0 flex flex-col border-r border-border bg-muted/30 min-h-0">
+                {/* Sync/Re-sync — на одном уровне с переключателем Все/Личные/Группы справа. Ширина w-16 = как свернутая навигация, не меняется при сворачивании панели чатов */}
                 <div className="shrink-0 border-b border-border/50 flex items-center justify-center py-2">
                   <button
                     type="button"
@@ -1868,7 +2000,7 @@ export default function MessagingPage() {
                     <RefreshCw className="w-4 h-4" />
                   </button>
                 </div>
-                <div className="flex-1 min-h-0 overflow-y-auto py-1 flex flex-col">
+                <div className="flex-1 min-h-0 overflow-y-auto py-1 flex flex-col scroll-thin-overlay">
                   {displayFolders.map((f) => (
                     <button
                       key={f.id}
@@ -1935,7 +2067,7 @@ export default function MessagingPage() {
           <div className="flex-1 min-w-0 flex flex-col min-h-0">
         {/* Вторая строка: переключатель типа (на одном уровне с кнопкой Sync слева) */}
         <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border">
-          <span className="text-xs text-muted-foreground shrink-0">Тип:</span>
+          <span className="text-xs text-muted-foreground shrink-0">{t('messaging.chatTypeLabel')}</span>
           <div className="flex rounded-md border border-border p-0.5 bg-muted/50">
             {(['all', 'personal', 'groups'] as const).map((key) => (
               <button
@@ -1948,7 +2080,7 @@ export default function MessagingPage() {
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                {key === 'all' ? 'Все' : key === 'personal' ? 'Личные' : 'Группы'}
+                {key === 'all' ? t('messaging.filterAll') : key === 'personal' ? t('messaging.filterPersonal') : t('messaging.filterGroups')}
               </button>
             ))}
           </div>
@@ -1968,7 +2100,7 @@ export default function MessagingPage() {
                     onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
                     className="text-primary font-medium shrink-0 hover:underline"
                   >
-                    Настроить
+                    {t('messaging.configure')}
                   </button>
                 </>
               ) : (
@@ -1978,7 +2110,7 @@ export default function MessagingPage() {
           )}
 
         {/* Область списка чатов / загрузки: flex-1 min-h-0 — одна высота; лоадер в центре без дёргания при смене аккаунта */}
-        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col relative">
+        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col relative scroll-thin-overlay">
           {loadingChats ? (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <Loader2 className="w-6 h-6 animate-spin text-blue-600 shrink-0" aria-hidden />
@@ -1987,19 +2119,19 @@ export default function MessagingPage() {
           {!loadingChats && !accountSyncReady ? (
             <div className="p-4 flex flex-1 min-h-0 flex-col items-center justify-center text-center text-sm text-muted-foreground">
               {accountSyncProgress ? (
-                <span>Ожидание завершения начальной синхронизации аккаунта…</span>
+                <span>{t('messaging.waitingSync')}</span>
               ) : isSelectedAccountMine ? (
                 <>
-                  <p className="mb-3">Аккаунт ожидает настройки синхронизации.</p>
+                  <p className="mb-3">{t('messaging.accountNeedsSync')}</p>
                   <Button
                     size="sm"
                     onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
                   >
-                    Выбрать чаты и начать синхронизацию
+                    {t('messaging.selectChatsAndStartSync')}
                   </Button>
                 </>
               ) : (
-                <p>Аккаунт коллеги. Настройку синхронизации выполняет владелец.</p>
+                <p>{t('messaging.colleagueSyncOwner')}</p>
               )}
             </div>
           ) : !loadingChats && displayChats.length === 0 ? (
@@ -2078,8 +2210,8 @@ export default function MessagingPage() {
       <div className="flex-1 min-h-0 min-w-0 self-stretch h-full flex flex-col bg-background overflow-hidden">
         {selectedChat ? (
           <>
-            <div className="px-4 py-3 border-b border-border bg-card/95 backdrop-blur-sm shrink-0">
-              <div className="flex items-center justify-between gap-2">
+            <div className="px-4 py-3 border-b border-border bg-card/95 backdrop-blur-sm shrink-0 min-h-[3.5rem] flex flex-col justify-center">
+              <div className="flex items-center justify-between gap-2 min-h-[2rem]">
                 <div className="min-w-0 flex-1">
                   <div className="font-semibold truncate">{getChatName(selectedChat)}</div>
                   {selectedChat.telegram_id && (
@@ -2122,7 +2254,7 @@ export default function MessagingPage() {
                   <Input
                     value={editDisplayNameValue}
                     onChange={(e) => setEditDisplayNameValue(e.target.value)}
-                    placeholder="Введите имя"
+                    placeholder={t('messaging.enterName')}
                     className="mb-4"
                   />
                   <div className="flex justify-end gap-2">
@@ -2130,14 +2262,14 @@ export default function MessagingPage() {
                       Отмена
                     </Button>
                     <Button onClick={saveDisplayName} disabled={savingDisplayName}>
-                      {savingDisplayName ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Сохранить'}
+                      {savingDisplayName ? <Loader2 className="w-4 h-4 animate-spin" /> : t('common.save')}
                     </Button>
                   </div>
                 </div>
               </div>
             )}
 
-            <div ref={messagesScrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 bg-muted/20 flex flex-col">
+            <div ref={messagesScrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pl-4 pt-4 pb-4 pr-[10px] bg-muted/20 flex flex-col scroll-thin">
               {loadingMessages ? (
                 <div className="flex items-center justify-center h-full">
                   <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
@@ -2331,14 +2463,14 @@ export default function MessagingPage() {
                     className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <FileCode className="w-4 h-4 text-blue-600" />
-                    <span>Из скрипта</span>
+                    <span>{t('messaging.fromScript')}</span>
                   </button>
                   <button
                     onClick={handleInsertPrevious}
                     className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <History className="w-4 h-4 text-purple-600" />
-                    <span>Предыдущее</span>
+                    <span>{t('messaging.previous')}</span>
                   </button>
                   <button
                     onClick={handleInsertAIGenerated}
@@ -2352,35 +2484,35 @@ export default function MessagingPage() {
                     className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <Zap className="w-4 h-4 text-orange-600" />
-                    <span>Автоматизация</span>
+                    <span>{t('messaging.automation')}</span>
                   </button>
                   <button
                     onClick={handleCreateContact}
                     className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <UserCircle className="w-4 h-4 text-green-600" />
-                    <span>Создать контакт</span>
+                    <span>{t('messaging.createContact')}</span>
                   </button>
                   <button
                     onClick={handleAddTag}
                     className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <Tag className="w-4 h-4 text-indigo-600" />
-                    <span>Добавить тег</span>
+                    <span>{t('messaging.addTag')}</span>
                   </button>
                   <button
                     onClick={handleViewAnalytics}
                     className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <BarChart3 className="w-4 h-4 text-cyan-600" />
-                    <span>Аналитика</span>
+                    <span>{t('nav.analytics')}</span>
                   </button>
                   <button
                     onClick={handleScheduleMessage}
                     className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent transition-colors"
                   >
                     <Clock className="w-4 h-4 text-pink-600" />
-                    <span>Отложить</span>
+                    <span>{t('messaging.schedule')}</span>
                   </button>
                   <button
                     onClick={() => setShowCommandsMenu(false)}
@@ -2401,7 +2533,7 @@ export default function MessagingPage() {
                     type="button"
                     onClick={() => { setPendingFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
                     className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
-                    title="Убрать файл"
+                    title={t('messaging.removeFile')}
                   >
                     <X className="w-4 h-4" />
                   </button>
@@ -2414,7 +2546,7 @@ export default function MessagingPage() {
                   <button
                     onClick={() => setShowAttachMenu(!showAttachMenu)}
                     className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
-                    title="Прикрепить файл"
+                    title={t('messaging.attachFile')}
                   >
                     <Paperclip className="w-5 h-5" />
                   </button>
@@ -2427,21 +2559,21 @@ export default function MessagingPage() {
                         className="w-full flex items-center gap-3 px-3 py-2 text-sm hover:bg-accent rounded-lg transition-colors"
                       >
                         <Image className="w-4 h-4 text-blue-600" />
-                        <span>Фото</span>
+                        <span>{t('messaging.photo')}</span>
                       </button>
                       <button
                         onClick={() => handleAttachFile('video')}
                         className="w-full flex items-center gap-3 px-3 py-2 text-sm hover:bg-accent rounded-lg transition-colors"
                       >
                         <Video className="w-4 h-4 text-red-600" />
-                        <span>Видео</span>
+                        <span>{t('messaging.video')}</span>
                       </button>
                       <button
                         onClick={() => handleAttachFile('file')}
                         className="w-full flex items-center gap-3 px-3 py-2 text-sm hover:bg-accent rounded-lg transition-colors"
                       >
                         <File className="w-4 h-4 text-muted-foreground" />
-                        <span>Файл</span>
+                        <span>{t('messaging.file')}</span>
                       </button>
                     </div>
                   )}
@@ -2464,7 +2596,7 @@ export default function MessagingPage() {
                       ? 'bg-red-100 text-red-600 animate-pulse'
                       : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                   }`}
-                  title="Голосовое сообщение"
+                  title={t('messaging.voiceMessage')}
                 >
                   <Mic className="w-5 h-5" />
                 </button>
@@ -2495,7 +2627,7 @@ export default function MessagingPage() {
                         ? 'bg-blue-100 text-blue-600'
                         : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                     }`}
-                    title="Команды CRM"
+                    title={t('messaging.crmCommands')}
                   >
                     <Bot className="w-4 h-4" />
                   </button>
@@ -2506,7 +2638,7 @@ export default function MessagingPage() {
                   onClick={handleSendMessage}
                   disabled={!isSelectedAccountMine || (!newMessage.trim() && !pendingFile) || sendingMessage}
                   className="px-4"
-                  title={!isSelectedAccountMine ? 'Только владелец аккаунта может отправлять сообщения' : undefined}
+                  title={!isSelectedAccountMine ? t('messaging.onlyOwnerCanSend') : undefined}
                 >
                   {sendingMessage ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
@@ -2520,7 +2652,7 @@ export default function MessagingPage() {
               {isRecording && (
                 <div className="mt-2 flex items-center gap-2 text-sm text-red-600">
                   <div className="w-2 h-2 bg-red-600 rounded-full animate-pulse"></div>
-                  <span>Идет запись голосового сообщения...</span>
+                  <span>{t('messaging.recordingVoice')}</span>
                   <button
                     onClick={() => setIsRecording(false)}
                     className="ml-auto text-xs text-muted-foreground hover:text-foreground"
@@ -2534,7 +2666,7 @@ export default function MessagingPage() {
               {!showCommandsMenu && (
                 <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
                   <Bot className="w-3 h-3" />
-                  <span>Нажмите на иконку бота для доступа к командам CRM</span>
+                  <span>{t('messaging.botCommandsHint')}</span>
                 </div>
               )}
             </div>
@@ -2554,62 +2686,57 @@ export default function MessagingPage() {
         )}
       </div>
 
-      {/* Панель ИИ-помощника справа — на всю высоту */}
+      {/* Панель ИИ-помощника справа — ширина и стили как у левых панелей (w-16 свернута, w-[320px] развернута) */}
       <div
-        className={`h-full min-h-0 self-stretch border-l border-border flex flex-col transition-[width] duration-200 ease-out shrink-0 bg-card ${aiPanelExpanded ? 'w-[min(24rem,90vw)]' : 'w-12'}`}
+        className={`h-full min-h-0 self-stretch bg-card border-l border-border flex flex-col transition-[width] duration-200 shrink-0 ${aiPanelExpanded ? 'w-[320px]' : 'w-16'}`}
         aria-expanded={aiPanelExpanded}
       >
         {aiPanelExpanded ? (
           <>
-            <div className="p-3 border-b border-border flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2 min-w-0">
-                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
-                  <Sparkles className="w-4 h-4 text-primary" />
-                </div>
-                <span className="font-semibold text-sm truncate">ИИ-помощник</span>
-              </div>
+            <div className="flex items-center justify-between gap-2 p-3 border-b border-border shrink-0 min-h-[3.5rem]">
+              <h3 className="font-semibold text-foreground truncate flex-1 min-w-0">{t('messaging.aiAssistant')}</h3>
               <button
                 type="button"
                 onClick={() => setAiPanelExpandedStored(false)}
-                className="p-1.5 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground shrink-0"
-                title="Свернуть панель"
-                aria-label="Свернуть панель ИИ-помощника"
+                className="p-1.5 rounded-md text-muted-foreground hover:bg-accent shrink-0"
+                title={t('messaging.collapsePanel')}
+                aria-label={t('messaging.collapseAiPanelAria')}
               >
-                <ChevronRight className="w-5 h-5" />
+                <ChevronRight className="w-4 h-4" />
               </button>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col p-3">
               <p className="text-xs text-muted-foreground mb-3">
-                Команды для текущего чата (заглушка, бэкенд позже):
+                {t('messaging.aiCommandsPlaceholder')}
               </p>
               <div className="space-y-2">
                 {[
-                  { icon: FileText, label: 'Саммаризация чата', desc: 'Краткое содержание переписки' },
-                  { icon: Send, label: 'Придумать сообщение', desc: 'ИИ предложит текст ответа' },
-                  { icon: Bot, label: 'Ответить за меня', desc: 'Автоответ пока вас нет' },
-                  { icon: MessageSquare, label: 'Идеи для ответа', desc: 'Несколько вариантов ответа' },
-                  { icon: Zap, label: 'Тон сообщения', desc: 'Сделать текст вежливее / короче' },
-                ].map(({ icon: Icon, label, desc }) => (
+                  { icon: FileText, labelKey: 'aiSummary', descKey: 'aiSummaryDesc' },
+                  { icon: Send, labelKey: 'aiCompose', descKey: 'aiComposeDesc' },
+                  { icon: Bot, labelKey: 'aiReplyForMe', descKey: 'aiReplyForMeDesc' },
+                  { icon: MessageSquare, labelKey: 'aiReplyIdeas', descKey: 'aiReplyIdeasDesc' },
+                  { icon: Zap, labelKey: 'aiTone', descKey: 'aiToneDesc' },
+                ].map(({ icon: Icon, labelKey, descKey }) => (
                   <button
-                    key={label}
+                    key={labelKey}
                     type="button"
                     className="w-full text-left p-3 rounded-lg border border-border bg-muted/30 hover:bg-muted/50 transition-colors flex gap-3 items-start"
                   >
                     <Icon className="w-4 h-4 text-primary shrink-0 mt-0.5" />
                     <div className="min-w-0 flex-1">
-                      <div className="font-medium text-sm">{label}</div>
-                      <div className="text-xs text-muted-foreground mt-0.5">{desc}</div>
+                      <div className="font-medium text-sm">{t(`messaging.${labelKey}`)}</div>
+                      <div className="text-xs text-muted-foreground mt-0.5">{t(`messaging.${descKey}`)}</div>
                     </div>
                   </button>
                 ))}
               </div>
               <div className="mt-4 pt-4 border-t border-border">
-                <p className="text-xs text-muted-foreground mb-2">Чат с помощником (заглушка):</p>
+                <p className="text-xs text-muted-foreground mb-2">{t('messaging.aiChatPlaceholder')}</p>
                 <div className="rounded-lg border border-border bg-muted/20 p-3 min-h-[8rem] text-sm text-muted-foreground">
-                  Здесь будет диалог в стиле ChatGPT/Claude — ввод запроса и ответы ИИ. Пока без бэкенда.
+                  {t('messaging.aiChatStubText')}
                 </div>
                 <Input
-                  placeholder="Спросить помощника..."
+                  placeholder={t('messaging.askAssistantPlaceholder')}
                   className="mt-2 text-sm"
                   disabled
                   readOnly
@@ -2618,13 +2745,13 @@ export default function MessagingPage() {
             </div>
           </>
         ) : (
-          <div className="flex flex-col items-center py-3 flex-1 min-h-0 justify-start border-b border-transparent">
+          <div className="flex flex-col flex-1 min-h-0 w-full">
             <button
               type="button"
               onClick={() => setAiPanelExpandedStored(true)}
-              className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground flex flex-col items-center gap-0.5 w-full"
-              title="ИИ-помощник — развернуть"
-              aria-label="Развернуть панель ИИ-помощника"
+              className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground flex flex-col items-center gap-0.5 w-full shrink-0 border-b border-border"
+              title={t('messaging.expandAiPanel')}
+              aria-label={t('messaging.expandAiPanelAria')}
             >
               <Sparkles className="w-5 h-5 shrink-0" aria-hidden />
               <ChevronLeft className="w-4 h-4 shrink-0" aria-hidden />
