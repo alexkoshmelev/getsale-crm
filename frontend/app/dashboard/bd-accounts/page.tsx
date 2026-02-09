@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { apiClient } from '@/lib/api/client';
 import { useWebSocketContext } from '@/lib/contexts/websocket-context';
-import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Power, PowerOff, Search, FolderOpen, ChevronRight, ChevronDown, User } from 'lucide-react';
+import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Power, PowerOff, Search, FolderOpen, ChevronRight, ChevronDown, User, RefreshCw } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
@@ -139,6 +139,7 @@ export default function BDAccountsPage() {
   const [expandedFolderId, setExpandedFolderId] = useState<number | null>(null);
   const [chatTypeFilter, setChatTypeFilter] = useState<'all' | 'personal' | 'groups'>('all');
   const [syncProgress, setSyncProgress] = useState<{ done: number; total: number; currentTitle?: string } | null>(null);
+  const [refetchFoldersLoading, setRefetchFoldersLoading] = useState(false);
 
   const toggleFolderExpanded = useCallback((folderId: number) => {
     const id = Number(folderId);
@@ -161,7 +162,7 @@ export default function BDAccountsPage() {
   }, []);
 
   // Открыть модалку «Выбор чатов» по ссылке с Мессенджера (?accountId=...&openSelectChats=1)
-  // Загружаем диалоги по папкам (Все чаты = folder 0, кастомные папки из Telegram) и ранее выбранные чаты с folder_id
+  // Сначала грузим из БД; при первом открытии (пустой список) один раз подтягиваем папки и чаты из Telegram
   useEffect(() => {
     const accountId = searchParams.get('accountId');
     const openSelectChats = searchParams.get('openSelectChats');
@@ -174,11 +175,36 @@ export default function BDAccountsPage() {
     setSelectChatsSearch('');
     setLoadingDialogs(true);
     router.replace('/dashboard/bd-accounts'); // убрать query из URL
+    let skipOuterFinally = false;
     Promise.all([
       apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders`, { timeout: 120000 }).then((res) => (res.data?.folders ?? []) as FolderWithDialogs[]),
       apiClient.get(`/api/bd-accounts/${accountId}/sync-chats`).then((res) => (Array.isArray(res.data) ? res.data : []) as SyncChatRow[]),
     ])
       .then(([folders, syncList]) => {
+        const totalDialogs = folders.reduce((sum, f) => sum + (f.dialogs?.length ?? 0), 0);
+        const needInitialLoad = folders.length === 0 || totalDialogs === 0;
+        if (needInitialLoad) {
+          skipOuterFinally = true;
+          apiClient.post(`/api/bd-accounts/${accountId}/folders-refetch`, {}, { timeout: 300000 })
+            .then(() => Promise.all([
+              apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders`, { timeout: 120000 }),
+              apiClient.get(`/api/bd-accounts/${accountId}/sync-chats`),
+            ]))
+            .then(([foldersRes, syncRes]) => {
+              const newFolders = (foldersRes.data?.folders ?? []) as FolderWithDialogs[];
+              const newSyncList = (Array.isArray(syncRes.data) ? syncRes.data : []) as SyncChatRow[];
+              setDialogsByFolders(newFolders);
+              setSyncChatsList(newSyncList);
+              setExpandedFolderId(null);
+              setSelectedChatIds(new Set(newSyncList.map((c) => String(c.telegram_chat_id))));
+            })
+            .catch((e) => {
+              console.error('Initial folders refetch failed:', e);
+              setError(e?.response?.data?.message || e?.response?.data?.error || 'Не удалось загрузить папки и чаты');
+            })
+            .finally(() => setLoadingDialogs(false));
+          return;
+        }
         setDialogsByFolders(folders);
         setSyncChatsList(syncList);
         setExpandedFolderId(null);
@@ -192,7 +218,7 @@ export default function BDAccountsPage() {
         setSelectedChatIds(new Set());
         setError(e?.response?.data?.error || 'Ошибка загрузки');
       })
-      .finally(() => setLoadingDialogs(false));
+      .finally(() => { if (!skipOuterFinally) setLoadingDialogs(false); });
   }, [searchParams, router]);
 
   // Subscribe to bd-account room for sync progress when in select-chats step
@@ -451,12 +477,27 @@ export default function BDAccountsPage() {
             setConnectStep('select-chats');
             setLoadingDialogs(true);
             setSelectChatsSearch('');
-            apiClient.get(`/api/bd-accounts/${data.accountId}/dialogs-by-folders`, { timeout: 120000 }).then((res) => {
-              setDialogsByFolders(res.data?.folders ?? []);
-              setSyncChatsList([]);
-              setExpandedFolderId(null);
-              setSelectedChatIds(new Set());
-            }).catch(() => { setDialogsByFolders([]); setSyncChatsList([]); setExpandedFolderId(null); setSelectedChatIds(new Set()); }).finally(() => setLoadingDialogs(false));
+            const accountId = data.accountId;
+            apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders`, { timeout: 120000 })
+              .then((res) => {
+                const folders = (res.data?.folders ?? []) as FolderWithDialogs[];
+                const totalDialogs = folders.reduce((sum, f) => sum + (f.dialogs?.length ?? 0), 0);
+                const needInitialLoad = folders.length === 0 || totalDialogs === 0;
+                if (needInitialLoad) {
+                  return apiClient.post(`/api/bd-accounts/${accountId}/folders-refetch`, {}, { timeout: 300000 })
+                    .then(() => apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders`, { timeout: 120000 }))
+                    .then((r) => (r.data?.folders ?? []) as FolderWithDialogs[]);
+                }
+                return folders;
+              })
+              .then((folders) => {
+                setDialogsByFolders(folders);
+                setSyncChatsList([]);
+                setExpandedFolderId(null);
+                setSelectedChatIds(new Set());
+              })
+              .catch(() => { setDialogsByFolders([]); setSyncChatsList([]); setExpandedFolderId(null); setSelectedChatIds(new Set()); })
+              .finally(() => setLoadingDialogs(false));
           }, 1800);
         }
         if (data.status === 'error') setQrPendingReason(null);
@@ -995,6 +1036,32 @@ export default function BDAccountsPage() {
                             </button>
                           ))}
                         </div>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!connectingAccountId) return;
+                            setRefetchFoldersLoading(true);
+                            setError(null);
+                            try {
+                              await apiClient.post(`/api/bd-accounts/${connectingAccountId}/folders-refetch`);
+                              const res = await apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders`, { timeout: 120000 });
+                              setDialogsByFolders((res.data?.folders ?? []) as FolderWithDialogs[]);
+                            } catch (err: any) {
+                              setError(err?.response?.data?.message || err?.response?.data?.error || 'Не удалось обновить папки и чаты');
+                            } finally {
+                              setRefetchFoldersLoading(false);
+                            }
+                          }}
+                          disabled={refetchFoldersLoading}
+                          className="ml-auto flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50"
+                        >
+                          {refetchFoldersLoading ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          )}
+                          Обновить папки и чаты
+                        </button>
                       </div>
                       <p className="text-xs text-muted-foreground mb-2 shrink-0">
                         Отметьте папку — выберутся все чаты в ней. Или отметьте только нужные чаты.

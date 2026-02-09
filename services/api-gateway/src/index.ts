@@ -128,13 +128,17 @@ function requireRole(...roles: UserRole[]) {
   };
 }
 
-// Rate limiting
+// Rate limiting: выше лимит для авторизованных пользователей
+const RATE_LIMIT_AUTH = parseInt(String(process.env.RATE_LIMIT_AUTH || 500), 10);
+const RATE_LIMIT_ANON = parseInt(String(process.env.RATE_LIMIT_ANON || 100), 10);
+
 async function rateLimit(req: express.Request, res: express.Response, next: express.NextFunction) {
   const user = (req as any).user;
+  const limit = user?.id ? RATE_LIMIT_AUTH : RATE_LIMIT_ANON;
   const key = `rate_limit:${user?.id || req.ip}:${Date.now() / 60000 | 0}`;
-  
+
   const count = await redis.get<number>(key) || 0;
-  if (count >= 100) { // 100 requests per minute
+  if (count >= limit) {
     return res.status(429).json({ error: 'Too many requests' });
   }
 

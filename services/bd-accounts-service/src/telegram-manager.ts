@@ -1674,6 +1674,8 @@ export class TelegramManager {
 
   /**
    * Все строковые варианты peer id для диалога (dialog.id из GramJS может быть в разных форматах).
+   * Учитывает user (положительный), chat (-id), channel/supergroup (-1000000000 - channel_id).
+   * inputPeerToDialogIds в фильтрах отдаёт channel_id числом — добавляем его для совпадения с dialog.id.
    */
   private static dialogIdToVariants(dialogId: string | number): Set<string> {
     const s = String(dialogId).trim();
@@ -1685,6 +1687,13 @@ export class TelegramManager {
       if (n > 0 && n < 1000000000) {
         out.add(String(-1000000000 - n));
         out.add(String(-1000000000000 - n));
+      }
+      // channel/supergroup: dialog.id = -1000000000 - channel_id; include_peers содержит channel_id
+      if (n < -1000000000) {
+        const channelId = -(n + 1000000000);
+        if (Number.isInteger(channelId)) out.add(String(channelId));
+        const channelIdAlt = -(n + 1000000000000);
+        if (Number.isInteger(channelIdAlt)) out.add(String(channelIdAlt));
       }
     }
     return out;
@@ -2059,10 +2068,23 @@ export class TelegramManager {
       throw new Error(`Account ${accountId} is not connected`);
     }
 
-    const exhaustedRow = await this.pool.query(
+    let exhaustedRow = await this.pool.query(
       'SELECT history_exhausted FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
       [accountId, chatId]
     );
+    if (exhaustedRow.rows.length === 0) {
+      // Чат мог попасть в UI из папки без полного sync — добавляем в sync_chats и пробуем загрузить
+      await this.pool.query(
+        `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
+         VALUES ($1, $2, '', 'user', false, null)
+         ON CONFLICT (bd_account_id, telegram_chat_id) DO NOTHING`,
+        [accountId, chatId]
+      );
+      exhaustedRow = await this.pool.query(
+        'SELECT history_exhausted FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+        [accountId, chatId]
+      );
+    }
     if (exhaustedRow.rows.length === 0) {
       return { added: 0, exhausted: true };
     }
@@ -2078,26 +2100,24 @@ export class TelegramManager {
       [accountId, chatId]
     );
 
-    if (oldestRow.rows.length === 0) {
-      return { added: 0, exhausted: true };
-    }
-
     const client = clientInfo.client;
     const peerIdNum = Number(chatId);
     const peerInput = Number.isNaN(peerIdNum) ? chatId : peerIdNum;
     const peer = await client.getInputEntity(peerInput);
 
-    const row = oldestRow.rows[0] as any;
     let offsetId = 0;
     let offsetDate = 0;
-    if (row.telegram_message_id != null) offsetId = parseInt(String(row.telegram_message_id), 10) || 0;
-    if (row.telegram_date != null || row.created_at != null) {
-      let ts: number;
-      const raw = row.telegram_date ?? row.created_at;
-      if (raw instanceof Date) ts = Math.floor(raw.getTime() / 1000);
-      else if (typeof raw === 'number') ts = raw > 1e12 ? Math.floor(raw / 1000) : Math.floor(raw);
-      else ts = Math.floor(new Date(raw).getTime() / 1000);
-      offsetDate = Math.max(-2147483648, Math.min(2147483647, ts));
+    if (oldestRow.rows.length > 0) {
+      const row = oldestRow.rows[0] as any;
+      if (row.telegram_message_id != null) offsetId = parseInt(String(row.telegram_message_id), 10) || 0;
+      if (row.telegram_date != null || row.created_at != null) {
+        let ts: number;
+        const raw = row.telegram_date ?? row.created_at;
+        if (raw instanceof Date) ts = Math.floor(raw.getTime() / 1000);
+        else if (typeof raw === 'number') ts = raw > 1e12 ? Math.floor(raw / 1000) : Math.floor(raw);
+        else ts = Math.floor(new Date(raw).getTime() / 1000);
+        offsetDate = Math.max(-2147483648, Math.min(2147483647, ts));
+      }
     }
 
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -2132,16 +2152,10 @@ export class TelegramManager {
       for (const msg of list) {
         const hasText = !!getMessageText(msg).trim();
         if (!hasText && !msg.media) continue;
-        let cid = chatId;
         let senderId = '';
-        if (msg.peerId) {
-          if (msg.peerId instanceof Api.PeerUser) cid = String(msg.peerId.userId);
-          else if (msg.peerId instanceof Api.PeerChat) cid = String(msg.peerId.chatId);
-          else if (msg.peerId instanceof Api.PeerChannel) cid = String(msg.peerId.channelId);
-        }
         if (msg.fromId instanceof Api.PeerUser) senderId = String(msg.fromId.userId);
-
-        const contactId = await this.ensureContactForTelegramId(organizationId, senderId || cid);
+        // Используем chatId из запроса, чтобы channel_id в БД совпадал с тем, что шлёт фронт (иначе запрос сообщений возвращает 0)
+        const contactId = await this.ensureContactForTelegramId(organizationId, senderId || chatId);
         const direction = (msg as any).out === true ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
         const serialized = serializeMessage(msg);
         await this.saveMessageToDb({
@@ -2149,7 +2163,7 @@ export class TelegramManager {
           bdAccountId: accountId,
           contactId,
           channel: MessageChannel.TELEGRAM,
-          channelId: cid,
+          channelId: chatId,
           direction,
           status: MessageStatus.DELIVERED,
           unread: false,

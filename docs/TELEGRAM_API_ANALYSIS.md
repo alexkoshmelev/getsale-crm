@@ -27,6 +27,8 @@
 |----------|-------------------|-------------------|
 | GET `/api/bd-accounts/:id/dialogs` | Всегда getDialogs → GetDialogs (limit 100) | По умолчанию: из `bd_account_sync_chats` (формат как у getDialogs). `?refresh=1` — Telegram. |
 | GET `/api/bd-accounts/:id/folders` | Всегда getDialogFilters → GetDialogFilters | По умолчанию: из `bd_account_sync_folders` + дефолт «Все чаты». `?refresh=1` — Telegram. |
+| GET `/api/bd-accounts/:id/sync-folders` | Из БД; при пустом списке папок не было | По умолчанию из БД; **при первичной загрузке** (пустой список и аккаунт подключён) — один раз GetDialogFilters → сохранение в БД → ответ. Дальше всегда из БД. |
+| POST `/api/bd-accounts/:id/folders-refetch` | — | По кнопке «Обновить папки и чаты» в диалоге синхронизации: то же, что при первой синхронизации — GetDialogFilters → сохранение папок в БД → refreshChatsFromFolders (подтягивание чатов по папкам). |
 | GET `/api/bd-accounts/:id/dialogs-by-folders` | Уже: по умолчанию из БД, `?refresh=1` — Telegram | Без изменений. |
 | POST `.../sync-folders-refresh` | refreshChatsFromFolders: GetDialogFilters + GetDialogs 0 + 1 + GetDialogFilterPeerIds на каждую папку | GetDialogFilters один раз (кэш в TM); GetDialogs только здесь и по кнопке. |
 | GET `/api/bd-accounts` | Только БД | Без изменений. |
@@ -52,10 +54,13 @@
 4. **Кэш GetDialogFilters** в TelegramManager (на аккаунт, TTL 90 с) — один запрос на несколько вызовов getDialogFilters / getDialogFilterRaw / getDialogFilterPeerIds. ✅
 5. **GET /folders** — по умолчанию из БД (`bd_account_sync_folders`), `?refresh=1` — Telegram. ✅
 6. **GET /dialogs** — по умолчанию из БД (`bd_account_sync_chats` в формате диалогов), `?refresh=1` — Telegram. ✅
+7. **Папки при первичной синхронизации** — GET /sync-folders при пустом списке и подключённом аккаунте один раз загружает папки из Telegram (GetDialogFilters) и сохраняет в БД; при повторных запросах папки отдаются из БД. ✅
+8. **POST /folders-refetch** — по кнопке «Обновить папки и чаты» в диалоге синхронизации: то же, что при первой синхронизации (папки из Telegram → сохранение в БД → подтягивание чатов по папкам). ✅
 
 ---
 
 ## 5. Рекомендации по использованию на фронте
 
 - Не вызывать `?refresh=1` при каждом открытии экрана; только по явной кнопке «Обновить с Telegram».
-- Список аккаунтов и списки чатов/папок — из БД; при первом подключении аккаунта данные появятся после sync или после одного ручного refresh.
+- Список аккаунтов и списки чатов/папок — из БД; при первом подключении аккаунта папки подгружаются автоматически при первом GET /sync-folders (если список пустой), далее — из БД.
+- В диалоге синхронизации (выбор чатов) кнопка «Обновить папки и чаты» вызывает POST /folders-refetch — подтягиваются папки и чаты из Telegram, как при первой синхронизации.

@@ -24,6 +24,8 @@ interface FolderManageModalProps {
   onFoldersChange: (newFolders: SyncFolderItem[]) => void;
   selectedAccountId: string | null;
   isAccountOwner: boolean;
+  hideEmptyFolders: boolean;
+  onHideEmptyFoldersChange: (value: boolean) => void;
   onCreateFolder: (folder_title: string, icon: string | null) => Promise<SyncFolderItem | null>;
   onReorder: (order: string[]) => Promise<SyncFolderItem[] | null>;
   onUpdateFolder: (folderRowId: string, data: { folder_title?: string; icon?: string | null }) => Promise<SyncFolderItem | null>;
@@ -36,6 +38,8 @@ export function FolderManageModal({
   onFoldersChange,
   selectedAccountId,
   isAccountOwner,
+  hideEmptyFolders,
+  onHideEmptyFoldersChange,
   onCreateFolder,
   onReorder,
   onUpdateFolder,
@@ -131,6 +135,18 @@ export function FolderManageModal({
           <button type="button" onClick={onClose} className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground">
             <X className="w-5 h-5" />
           </button>
+        </div>
+        <div className="mb-4 p-3 rounded-lg bg-muted/50 border border-border shrink-0">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={hideEmptyFolders}
+              onChange={(e) => onHideEmptyFoldersChange(e.target.checked)}
+              className="rounded border-border"
+            />
+            <span className="text-sm text-foreground">{t('messaging.hideEmptyFolders')}</span>
+          </label>
+          <p className="text-xs text-muted-foreground mt-1 ml-6">{t('messaging.hideEmptyFoldersHint')}</p>
         </div>
         {error && (
           <p className="text-sm text-destructive mb-3 rounded-lg bg-destructive/10 px-3 py-2">{error}</p>

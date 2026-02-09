@@ -465,13 +465,19 @@ export default function MessagingPage() {
   const scrollRestoreRef = useRef<{ height: number; top: number } | null>(null);
   const hasUserScrolledUpRef = useRef(false);
   const loadOlderLastCallRef = useRef<number>(0);
+  const skipScrollToBottomAfterPrependRef = useRef(false);
   const LOAD_OLDER_COOLDOWN_MS = 2500;
   const MESSAGES_PAGE_SIZE = 50;
   const VIRTUAL_LIST_THRESHOLD = 200;
   const INITIAL_FIRST_ITEM_INDEX = 1000000;
+  const MAX_CACHED_CHATS = 30;
   const [prependedCount, setPrependedCount] = useState(0);
   const virtuosoRef = useRef<any>(null);
   const virtuosoScrollAfterChatChangeRef = useRef(false);
+  type MessagesCacheEntry = { messages: Message[]; messagesTotal: number; messagesPage: number; historyExhausted: boolean };
+  const messagesCacheRef = useRef<Map<string, MessagesCacheEntry>>(new Map());
+  const messagesCacheOrderRef = useRef<string[]>([]);
+  const getMessagesCacheKey = (accountId: string, chatId: string) => `${accountId}:${chatId}`;
   const hasMoreMessages = messagesPage * MESSAGES_PAGE_SIZE < messagesTotal || !historyExhausted;
   const [showCommandsMenu, setShowCommandsMenu] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
@@ -502,6 +508,7 @@ export default function MessagingPage() {
     accountsPanel: 'messaging.accountsPanelCollapsed',
     chatsPanel: 'messaging.chatsPanelCollapsed',
     aiPanel: 'messaging.aiPanelExpanded',
+    hideEmptyFolders: 'messaging.hideEmptyFolders',
   };
   const getDraftKey = (accountId: string, chatId: string) =>
     `messaging.draft.${accountId}.${chatId}`;
@@ -536,6 +543,17 @@ export default function MessagingPage() {
       return localStorage.getItem(STORAGE_KEYS.aiPanel) !== 'false';
     } catch { return true; }
   });
+
+  const [hideEmptyFolders, setHideEmptyFoldersState] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    try {
+      return localStorage.getItem(STORAGE_KEYS.hideEmptyFolders) !== 'false';
+    } catch { return true; }
+  });
+  const setHideEmptyFolders = useCallback((v: boolean) => {
+    setHideEmptyFoldersState(v);
+    try { localStorage.setItem(STORAGE_KEYS.hideEmptyFolders, String(v)); } catch {}
+  }, []);
 
   const setAccountsCollapsed = useCallback((v: boolean) => {
     setAccountsPanelCollapsed(v);
@@ -671,15 +689,59 @@ export default function MessagingPage() {
     }).catch(() => setPinnedChannelIds([]));
   }, [selectedAccountId]);
 
+  const prevChatCacheKeyRef = useRef<string | null>(null);
+
   useEffect(() => {
     if (selectedChat && selectedAccountId) {
+      const key = getMessagesCacheKey(selectedAccountId, selectedChat.channel_id);
+      // Сохранить предыдущий чат в кеш перед переключением (при первом выборе prevChatCacheKeyRef ещё null)
+      const prevKey = prevChatCacheKeyRef.current;
+      if (prevKey && prevKey !== key) {
+        const order = messagesCacheOrderRef.current;
+        const cache = messagesCacheRef.current;
+        cache.set(prevKey, {
+          messages,
+          messagesTotal,
+          messagesPage,
+          historyExhausted,
+        });
+        const idx = order.indexOf(prevKey);
+        if (idx !== -1) order.splice(idx, 1);
+        order.push(prevKey);
+        while (order.length > MAX_CACHED_CHATS) {
+          const evict = order.shift()!;
+          cache.delete(evict);
+        }
+      }
+      prevChatCacheKeyRef.current = key;
+
+      const cached = messagesCacheRef.current.get(key);
+      if (cached) {
+        // Не брать из кеша пустой список, если история не исчерпана — бэкенд мог подгрузить сообщения при первом открытии
+        if (cached.messages.length === 0 && !cached.historyExhausted) {
+          setMessages([]);
+          fetchMessages(selectedAccountId, selectedChat);
+        } else {
+          setMessages(cached.messages);
+          setMessagesTotal(cached.messagesTotal);
+          setMessagesPage(cached.messagesPage);
+          setHistoryExhausted(cached.historyExhausted);
+          setLoadingMessages(false);
+          setPrependedCount(0);
+          markAsRead();
+          return;
+        }
+        markAsRead();
+        return;
+      }
       setMessages([]);
       fetchMessages(selectedAccountId, selectedChat);
       markAsRead();
     } else {
+      prevChatCacheKeyRef.current = null;
       setMessages([]);
     }
-  }, [selectedChat, selectedAccountId]);
+  }, [selectedChat?.channel_id, selectedChat?.channel, selectedAccountId]);
 
   // Черновики: при смене чата сохраняем текущий текст в localStorage, подставляем черновик нового чата
   useEffect(() => {
@@ -874,18 +936,26 @@ export default function MessagingPage() {
   }, [showCommandsMenu, showAttachMenu, showChatHeaderMenu]);
 
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const run = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    // После отрисовки: два rAF — скролл выполняется после того, как React отрисовал список
+    requestAnimationFrame(() => requestAnimationFrame(run));
   }, []);
 
   useEffect(() => {
+    if (skipScrollToBottomAfterPrependRef.current) {
+      skipScrollToBottomAfterPrependRef.current = false;
+      return;
+    }
     scrollToBottom();
-    const t0 = setTimeout(scrollToBottom, 50);
-    const t1 = setTimeout(scrollToBottom, 150);
-    const t2 = setTimeout(scrollToBottom, 450);
+    const t50 = setTimeout(scrollToBottom, 50);
+    const t150 = setTimeout(scrollToBottom, 150);
+    const t450 = setTimeout(scrollToBottom, 450);
+    const t800 = setTimeout(scrollToBottom, 800);
     return () => {
-      clearTimeout(t0);
-      clearTimeout(t1);
-      clearTimeout(t2);
+      clearTimeout(t50);
+      clearTimeout(t150);
+      clearTimeout(t450);
+      clearTimeout(t800);
     };
   }, [messages, selectedChat?.channel_id, scrollToBottom]);
 
@@ -1038,6 +1108,7 @@ export default function MessagingPage() {
         },
       });
       const list = response.data.messages || [];
+      skipScrollToBottomAfterPrependRef.current = true;
       setMessages((prev) => [...list, ...prev]);
       setPrependedCount((prev) => prev + list.length);
       setMessagesPage(nextPage);
@@ -1639,15 +1710,24 @@ export default function MessagingPage() {
     return { all, byId };
   }, [chats, folders, chatFolderIds]);
 
-  // Одна папка «все чаты»: из Telegram (folder_id 0) или дефолт. Без дублирования All и Все чаты.
+  // Папки с хотя бы одним чатом (для фильтра «скрывать пустые»). Папка 0 «все чаты» всегда непустая при наличии чатов.
+  const nonEmptyFolderIds = useMemo(() => {
+    const set = new Set<number>([0]);
+    chats.forEach((c) => chatFolderIds(c).forEach((fid) => set.add(fid)));
+    return set;
+  }, [chats, chatFolderIds]);
+
+  // Одна папка «все чаты»: из Telegram (folder_id 0) или дефолт. При hideEmptyFolders скрываем папки без чатов (только в Мессенджере).
   const displayFolders = useMemo(() => {
     const hasZero = folders.some((f) => f.folder_id === 0);
     const zero: SyncFolder = hasZero
       ? folders.find((f) => f.folder_id === 0)!
       : { id: '0', folder_id: 0, folder_title: t('messaging.folderAll'), order_index: -1, icon: '📋' };
     const rest = folders.filter((f) => f.folder_id !== 0);
-    return [zero, ...rest];
-  }, [folders, t]);
+    const list = [zero, ...rest];
+    if (hideEmptyFolders) return list.filter((f) => nonEmptyFolderIds.has(f.folder_id));
+    return list;
+  }, [folders, t, hideEmptyFolders, nonEmptyFolderIds]);
 
   const filteredChats = chats
     .filter((chat) => {
@@ -1854,7 +1934,7 @@ export default function MessagingPage() {
                 {/* Левая колонка: Sync + папки + Sync to TG + Edit (как в развёрнутом виде) */}
                 <div className="w-16 flex-shrink-0 flex flex-col border-r border-border bg-muted/30 min-h-0">
                   {/* Кнопка синхронизации сверху */}
-                  <div className="shrink-0 border-b border-border/50 flex items-center justify-center py-2">
+                  <div className="shrink-0 border-b border-border/50 flex items-center justify-center gap-0.5 py-2">
                     <button
                       type="button"
                       onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
@@ -1873,13 +1953,13 @@ export default function MessagingPage() {
                         onClick={() => setSelectedFolderId(f.folder_id)}
                         title={f.folder_title}
                         className={`flex flex-col items-center justify-center py-2 px-1 gap-0.5 min-h-[48px] w-full rounded-none border-b border-border/30 ${
-                          selectedFolderId === f.folder_id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                          selectedFolderId === f.folder_id ? 'bg-primary/10 dark:bg-primary/20 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
                         }`}
                       >
                         <span className="text-lg shrink-0 leading-none">{f.icon || '📁'}</span>
                         <span className="text-[10px] font-medium truncate w-full text-center leading-tight">{f.folder_title}</span>
                         {(unreadByFolder.byId[f.folder_id] ?? 0) > 0 && (
-                          <span className="min-w-[1rem] rounded-full bg-primary/20 px-1 text-[9px] tabular-nums leading-none">
+                          <span className={`min-w-[1rem] rounded-full px-1 text-[9px] tabular-nums leading-none ${selectedFolderId === f.folder_id ? 'bg-primary/30 text-primary-foreground' : 'bg-primary/20'}`}>
                             {unreadByFolder.byId[f.folder_id]! > 99 ? '99+' : unreadByFolder.byId[f.folder_id]}
                           </span>
                         )}
@@ -1989,32 +2069,32 @@ export default function MessagingPage() {
             {selectedAccountId && (
               <div className="w-16 flex-shrink-0 flex flex-col border-r border-border bg-muted/30 min-h-0">
                 {/* Sync/Re-sync — на одном уровне с переключателем Все/Личные/Группы справа. Ширина w-16 = как свернутая навигация, не меняется при сворачивании панели чатов */}
-                <div className="shrink-0 border-b border-border/50 flex items-center justify-center py-2">
-                  <button
-                    type="button"
-                    onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
-                    className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-                    title={t('messaging.syncChatsTitle')}
-                    aria-label={t('messaging.syncChatsTitle')}
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                  </button>
-                </div>
-                <div className="flex-1 min-h-0 overflow-y-auto py-1 flex flex-col scroll-thin-overlay">
-                  {displayFolders.map((f) => (
+<div className="shrink-0 border-b border-border/50 flex items-center justify-center py-2">
+                    <button
+                      type="button"
+                      onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
+                      className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                      title={t('messaging.syncChatsTitle')}
+                      aria-label={t('messaging.syncChatsTitle')}
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto pt-2 pb-1 flex flex-col scroll-thin-overlay">
+                    {displayFolders.map((f) => (
                     <button
                       key={f.id}
                       type="button"
                       onClick={() => setSelectedFolderId(f.folder_id)}
                       title={f.folder_title}
                       className={`flex flex-col items-center justify-center py-2 px-1 gap-0.5 min-h-[48px] w-full rounded-none border-b border-border/30 ${
-                        selectedFolderId === f.folder_id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                        selectedFolderId === f.folder_id ? 'bg-primary/10 dark:bg-primary/20 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
                       }`}
                     >
                       <span className="text-lg shrink-0">{f.icon || '📁'}</span>
                       <span className="text-[10px] font-medium truncate w-full text-center leading-tight">{f.folder_title}</span>
                       {(unreadByFolder.byId[f.folder_id] ?? 0) > 0 && (
-                        <span className="min-w-[1rem] rounded-full bg-primary/20 px-1 text-[9px] tabular-nums">
+                        <span className={`min-w-[1rem] rounded-full px-1 text-[9px] tabular-nums ${selectedFolderId === f.folder_id ? 'bg-primary/30 text-primary-foreground' : 'bg-primary/20'}`}>
                           {unreadByFolder.byId[f.folder_id]! > 99 ? '99+' : unreadByFolder.byId[f.folder_id]}
                         </span>
                       )}
@@ -2392,6 +2472,8 @@ export default function MessagingPage() {
               onFoldersChange={setFolders}
               selectedAccountId={selectedAccountId}
               isAccountOwner={!!isSelectedAccountMine}
+              hideEmptyFolders={hideEmptyFolders}
+              onHideEmptyFoldersChange={setHideEmptyFolders}
               onCreateFolder={handleCreateFolder}
               onReorder={handleReorderFolders}
               onUpdateFolder={handleUpdateFolder}

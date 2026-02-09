@@ -70,6 +70,42 @@ app.get('/api/messaging/messages', async (req, res) => {
     const bdId = bdAccountId && String(bdAccountId).trim() ? String(bdAccountId).trim() : null;
     const chId = channelId && String(channelId).trim() ? String(channelId).trim() : null;
 
+    // Если чат Telegram и в БД 0 сообщений — один раз подгрузить первую страницу из Telegram (load-older-history при 0 сообщений)
+    if (bdId && chId && channel === 'telegram' && pageNum === 1) {
+      const countRes = await pool.query(
+        'SELECT COUNT(*) FROM messages WHERE organization_id = $1 AND channel = $2 AND channel_id = $3 AND bd_account_id = $4',
+        [user.organizationId, channel || 'telegram', chId, bdId]
+      );
+      const totalForChat = parseInt(countRes.rows[0].count);
+      if (totalForChat === 0) {
+        const exhaustedRow = await pool.query(
+          'SELECT history_exhausted FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+          [bdId, chId]
+        );
+        const exhausted = exhaustedRow.rows.length > 0 && (exhaustedRow.rows[0] as any).history_exhausted === true;
+        if (!exhausted) {
+          try {
+            const loadRes = await fetch(
+              `${BD_ACCOUNTS_SERVICE_URL}/api/bd-accounts/${bdId}/chats/${chId}/load-older-history`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-user-id': user.id || '',
+                  'x-organization-id': user.organizationId || '',
+                },
+              }
+            );
+            if (loadRes.ok) {
+              await loadRes.json(); // дождаться полного ответа (сохранение в БД на стороне bd-accounts уже завершено)
+            }
+          } catch (err) {
+            console.warn('Load initial history (0 messages) request failed:', err);
+          }
+        }
+      }
+    }
+
     // Если нужна более старая страница и чат из Telegram — попробовать догрузить из Telegram
     if (bdId && chId && channel === 'telegram' && pageNum > 1) {
       let countResult = await pool.query(

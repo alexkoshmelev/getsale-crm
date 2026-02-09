@@ -791,13 +791,17 @@ app.get('/api/bd-accounts/:id/dialogs-by-folders', async (req, res) => {
       );
       const chatsByFolder = new Map<number, { id: string; name: string; isUser: boolean; isGroup: boolean; isChannel: boolean }[]>();
       const folder0Dialogs: { id: string; name: string; isUser: boolean; isGroup: boolean; isChannel: boolean }[] = [];
+      const seenInFolder0 = new Set<string>();
       for (const r of chatsRows.rows) {
         const chatId = String(r.telegram_chat_id);
         const name = (r.title || '').trim() || chatId;
         const pt = (r.peer_type || 'user').toLowerCase();
         const item = { id: chatId, name, isUser: pt === 'user', isGroup: pt === 'chat', isChannel: pt === 'channel' };
         if (accountTelegramId && item.isUser && chatId === accountTelegramId) continue;
-        folder0Dialogs.push(item);
+        if (!seenInFolder0.has(chatId)) {
+          seenInFolder0.add(chatId);
+          folder0Dialogs.push(item);
+        }
         const fid = r.folder_id != null ? Number(r.folder_id) : 0;
         if (!chatsByFolder.has(fid)) chatsByFolder.set(fid, []);
         if (!chatsByFolder.get(fid)!.some((d) => d.id === chatId)) chatsByFolder.get(fid)!.push(item);
@@ -863,7 +867,7 @@ app.get('/api/bd-accounts/:id/dialogs-by-folders', async (req, res) => {
   }
 });
 
-// Get selected sync folders for an account (ensures folders from sync_chats are present)
+// Get selected sync folders for an account. По умолчанию из БД; при первичной загрузке (пустой список) — подтянуть из Telegram и сохранить.
 app.get('/api/bd-accounts/:id/sync-folders', async (req, res) => {
   try {
     const user = getUser(req);
@@ -876,13 +880,46 @@ app.get('/api/bd-accounts/:id/sync-folders', async (req, res) => {
       return res.status(404).json({ error: 'BD account not found' });
     }
     await ensureFoldersFromSyncChats(pool, telegramManager, id);
-    const result = await pool.query(
+    let result = await pool.query(
       'SELECT id, folder_id, folder_title, order_index, COALESCE(is_user_created, false) AS is_user_created, icon FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index, folder_id',
       [id]
     );
+    // При первичной синхронизации папок ещё нет — загружаем из Telegram и сохраняем
+    if (result.rows.length === 0 && telegramManager.isConnected(id)) {
+      try {
+        const rows = await fetchFoldersFromTelegramAndSave(pool, telegramManager, id);
+        return res.json(rows);
+      } catch (err: any) {
+        console.warn('Initial folders fetch from Telegram failed:', err?.message);
+      }
+    }
     res.json(result.rows);
   } catch (error: any) {
     console.error('Error fetching sync folders:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Обновить папки и чаты из Telegram (как при первой синхронизации). По кнопке «Обновить папки» в диалоге синхронизации.
+app.post('/api/bd-accounts/:id/folders-refetch', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    if (!telegramManager.isConnected(id)) {
+      return res.status(400).json({ error: 'Account is not connected to Telegram' });
+    }
+    const rows = await fetchFoldersFromTelegramAndSave(pool, telegramManager, id);
+    await refreshChatsFromFolders(pool, telegramManager, id);
+    res.json({ folders: rows, success: true });
+  } catch (error: any) {
+    console.error('Error refetching folders:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
   }
 });
@@ -1135,6 +1172,46 @@ app.post('/api/bd-accounts/:id/sync-folders-push-to-telegram', async (req, res) 
 });
 
 /**
+ * Загрузить папки из Telegram и сохранить в bd_account_sync_folders.
+ * Используется при первичной загрузке (пустой список) и по кнопке «Обновить папки».
+ * Всегда добавляет папку 0 «Все чаты», затем кастомные фильтры из getDialogFilters (2, 3, …).
+ */
+async function fetchFoldersFromTelegramAndSave(
+  pool: Pool,
+  telegramManager: TelegramManager,
+  accountId: string
+): Promise<{ id: string; folder_id: number; folder_title: string; order_index: number; is_user_created: boolean; icon: string | null }[]> {
+  const filters = await telegramManager.getDialogFilters(accountId);
+  const toSave: { folder_id: number; folder_title: string; icon: string | null }[] = [
+    { folder_id: 0, folder_title: 'Все чаты', icon: '💬' },
+    ...filters.map((f) => ({ folder_id: f.id, folder_title: f.title, icon: f.emoticon ?? null })),
+  ];
+  // Убираем дубликаты по folder_id (оставляем первое вхождение)
+  const seen = new Set<number>();
+  const unique = toSave.filter((f) => {
+    if (seen.has(f.folder_id)) return false;
+    seen.add(f.folder_id);
+    return true;
+  });
+
+  await pool.query('DELETE FROM bd_account_sync_folders WHERE bd_account_id = $1', [accountId]);
+  for (let i = 0; i < unique.length; i++) {
+    const f = unique[i];
+    await pool.query(
+      `INSERT INTO bd_account_sync_folders (bd_account_id, folder_id, folder_title, order_index, is_user_created, icon)
+       VALUES ($1, $2, $3, $4, false, $5)`,
+      [accountId, f.folder_id, (f.folder_title || '').trim().slice(0, 255) || `Папка ${f.folder_id}`, i, f.icon]
+    );
+  }
+
+  const result = await pool.query(
+    'SELECT id, folder_id, folder_title, order_index, COALESCE(is_user_created, false) AS is_user_created, icon FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index, folder_id',
+    [accountId]
+  );
+  return result.rows;
+}
+
+/**
  * Ensure bd_account_sync_folders has a row for every distinct folder_id that appears in bd_account_sync_chats.
  * Used when chats were saved with folder_id (e.g. from POST sync-chats or partial selection) but folders table was empty.
  */
@@ -1226,7 +1303,6 @@ async function refreshChatsFromFolders(
   }
   const merged = Array.from(mergedById.values());
 
-  const seenChatIds = new Set<string>();
   for (const row of foldersRows.rows) {
     const folderId = Number(row.folder_id);
     let dialogs: any[] = [];
@@ -1234,13 +1310,13 @@ async function refreshChatsFromFolders(
       if (folderId === 0) dialogs = allDialogs0;
       else if (folderId === 1) dialogs = allDialogs1;
       else {
-        const peerIds = await telegramManager.getDialogFilterPeerIds(accountId, folderId);
-        if (peerIds.size > 0) dialogs = merged.filter((d: any) => peerIds.has(String(d.id)));
+        const filterRaw = await telegramManager.getDialogFilterRaw(accountId, folderId);
+        const { include: includePeerIds, exclude: excludePeerIds } = TelegramManager.getFilterIncludeExcludePeerIds(filterRaw);
+        dialogs = merged.filter((d: any) => TelegramManager.dialogMatchesFilter(d, filterRaw, includePeerIds, excludePeerIds));
       }
       for (const d of dialogs) {
         const chatId = String(d.id ?? '').trim();
-        if (!chatId || seenChatIds.has(chatId)) continue;
-        seenChatIds.add(chatId);
+        if (!chatId) continue;
         let peerType = 'user';
         if (d.isChannel) peerType = 'channel';
         else if (d.isGroup) peerType = 'chat';
@@ -1251,7 +1327,7 @@ async function refreshChatsFromFolders(
            ON CONFLICT (bd_account_id, telegram_chat_id) DO UPDATE SET
              title = EXCLUDED.title,
              peer_type = EXCLUDED.peer_type,
-             folder_id = EXCLUDED.folder_id`,
+             folder_id = COALESCE(bd_account_sync_chats.folder_id, EXCLUDED.folder_id)`,
           [accountId, chatId, title, peerType, folderId]
         );
         await pool.query(
