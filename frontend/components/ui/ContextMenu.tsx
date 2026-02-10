@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 
 export interface ContextMenuProps {
   open: boolean;
@@ -9,19 +9,55 @@ export interface ContextMenuProps {
   y: number;
   className?: string;
   children: React.ReactNode;
+  /** Оценка высоты меню в px (для расчёта позиции до измерения). Если не задано, используется ref. */
+  estimatedHeight?: number;
 }
+
+const MENU_PADDING = 8;
+const DEFAULT_ESTIMATED_HEIGHT = 280;
 
 /**
  * Переиспользуемое контекстное меню: позиция по клику (x, y), закрытие по onClose.
- * Рендерит контейнер с фиксированной позицией; содержимое задаётся через children
- * (ContextMenuSection, ContextMenuItem или произвольные узлы).
+ * Меню не выходит за пределы экрана: при необходимости открывается вверх и/или сдвигается по горизонтали.
  */
-export function ContextMenu({ open, onClose, x, y, className = '', children }: ContextMenuProps) {
+export function ContextMenu({
+  open,
+  onClose,
+  x,
+  y,
+  className = '',
+  children,
+  estimatedHeight = DEFAULT_ESTIMATED_HEIGHT,
+}: ContextMenuProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ left: x, top: y });
+
+  useEffect(() => {
+    if (!open) return;
+    const el = ref.current;
+    const height = el ? el.getBoundingClientRect().height : estimatedHeight;
+    const width = el ? el.getBoundingClientRect().width : 200;
+    const winH = window.innerHeight;
+    const winW = window.innerWidth;
+
+    let left = x;
+    let top = y;
+
+    if (top + height + MENU_PADDING > winH) top = Math.max(MENU_PADDING, winH - height - MENU_PADDING);
+    else if (top < MENU_PADDING) top = MENU_PADDING;
+
+    if (left + width + MENU_PADDING > winW) left = Math.max(MENU_PADDING, winW - width - MENU_PADDING);
+    else if (left < MENU_PADDING) left = MENU_PADDING;
+
+    setPosition({ left, top });
+  }, [open, x, y, estimatedHeight]);
+
   if (!open) return null;
   return (
     <div
+      ref={ref}
       className={`fixed z-[100] min-w-[140px] py-1 bg-popover border border-border rounded-lg shadow-lg ${className}`}
-      style={{ left: x, top: y }}
+      style={{ left: position.left, top: position.top }}
       onClick={(e) => e.stopPropagation()}
       role="menu"
     >

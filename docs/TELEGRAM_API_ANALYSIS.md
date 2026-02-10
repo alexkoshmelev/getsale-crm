@@ -64,3 +64,35 @@
 - Не вызывать `?refresh=1` при каждом открытии экрана; только по явной кнопке «Обновить с Telegram».
 - Список аккаунтов и списки чатов/папок — из БД; при первом подключении аккаунта папки подгружаются автоматически при первом GET /sync-folders (если список пустой), далее — из БД.
 - В диалоге синхронизации (выбор чатов) кнопка «Обновить папки и чаты» вызывает POST /folders-refetch — подтягиваются папки и чаты из Telegram, как при первой синхронизации.
+
+---
+
+## 6. Что подтягиваем из Telegram (картинка «как в Telegram»)
+
+### 6.1 Диалоги (при GetDialogs / iterDialogs, refreshChatsFromFolders, dialogs-by-folders?refresh=1)
+
+| Поле Telegram (Dialog) | У нас | Где хранится / как отображаем |
+|------------------------|-------|-------------------------------|
+| peer / id | ✅ | `mapDialogToItem.id`, список чатов |
+| name / title | ✅ | `mapDialogToItem.name`, sync_chats.title |
+| unread_count | ✅ | `mapDialogToItem.unreadCount` (из диалога); в мессенджере считаем по messages.unread |
+| top_message / lastMessage | ✅ | `mapDialogToItem.lastMessage`, lastMessageDate |
+| isUser / isGroup / isChannel | ✅ | peer_type в sync_chats, отображение иконок |
+| **pinned** | ✅ | `mapDialogToItem.pinned`; порядок закреплённых — из порядка диалогов (folder 0). При «Обновить папки и чаты» синхронизируем в `user_chat_pins` для владельца аккаунта. При GET dialogs-by-folders?refresh=1 в ответе отдаём `pinned_chat_ids` (для возможного вызова POST /api/messaging/pinned-chats/sync). |
+| folder_id | ✅ | Учитывается при разборе папок и фильтров |
+
+### 6.2 Сообщения (GetHistory, входящие через updates)
+
+| Поле Telegram (Message) | У нас | Где хранится |
+|-------------------------|-------|--------------|
+| id, date, message (text) | ✅ | messages.telegram_message_id, telegram_date, content |
+| reply_to.replyToMsgId | ✅ | messages.reply_to_telegram_id + отображение reply-превью, скролл к сообщению |
+| reactions (results, chosen_order) | ✅ | messages.reactions (сводка), messages.our_reactions (наши до 3 эмодзи); отправка в TG через SendReaction полным списком |
+| views, forwards, edit_date | ✅ | telegram_extra (JSONB) |
+| fwd_from | ✅ | telegram_extra.fwd_from |
+| pinned (сообщение закреплено в чате) | ✅ | telegram_extra.pinned |
+| entities, media | ✅ | telegram_entities, telegram_media; контент в content / вложения |
+| reply_markup, replies | ✅ | telegram_extra |
+| post_author, grouped_id, via_bot_id, silent, noforwards, mentioned, media_unread | ✅ | telegram_extra |
+
+Синхронизация: при сохранении сообщения из Telegram всегда вызываются `serializeMessage` и `saveMessageToDb`, так что все перечисленные поля попадают в БД. На фронте: превью ответа, реакции, скролл к сообщению по клику на reply, порядок чатов по закреплённым (user_chat_pins) и по last_message_at.

@@ -160,11 +160,32 @@
   background-color: hsl(var(--muted) / 0.8);
 }
 
-/* Тонкие кастомные скроллбары (ширина скролла = 6px для выравнивания отступов) */
+/* Тонкие кастомные скроллбары (ширина 6px) — по умолчанию для всего сайта */
 :root {
   --scrollbar-w: 6px;
 }
-/* Всегда видимый — для панели истории сообщений */
+
+/* Глобальный скроллбар: один и тот же узкий скролл во всех областях (панели, модалки, списки) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground) / 0.4) transparent;
+}
+*::-webkit-scrollbar {
+  width: var(--scrollbar-w);
+  height: var(--scrollbar-w);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: hsl(var(--muted-foreground) / 0.4);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.6);
+}
+
+/* Доп. опция: стабильный отступ под скролл (например, лента сообщений) */
 .scroll-thin {
   scrollbar-gutter: stable;
   scrollbar-width: thin;
@@ -185,7 +206,7 @@
   background: hsl(var(--muted-foreground) / 0.6);
 }
 
-/* Появляется при наведении. Симметричные отступы: слева и справа по --scrollbar-w; скролл рисуется в правых 6px (без scrollbar-gutter, чтобы не зависеть от разной ширины gutter в браузерах). */
+/* Вариант «поверх контента»: скролл виден только при наведении на область */
 .scroll-thin-overlay {
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;

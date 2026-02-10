@@ -12,7 +12,8 @@ import {
   Mic, Paperclip, FileText, Image, Video, File,
   Sparkles, Zap, History, FileCode, Bot, Workflow,
   ChevronDown, ChevronRight, ChevronLeft, X, Clock, UserCircle, Tag, BarChart3,
-  Music, Film, Users, Check, CheckCheck, RefreshCw, Pin, PinOff, Smile, Pencil
+  Music, Film, Users, Check, CheckCheck, RefreshCw, Pin, PinOff, Smile, Pencil,
+  Reply, Forward, Copy, Heart
 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -140,6 +141,7 @@ interface Message {
   channel: string;
   channel_id: string;
   telegram_message_id?: string | null;  // id сообщения в Telegram (для прокси медиа)
+  reply_to_telegram_id?: string | null; // id сообщения в Telegram, на которое ответили
   telegram_media?: Record<string, unknown> | null;
   telegram_entities?: Array<Record<string, unknown>> | null;
   telegram_date?: string | null;  // оригинальное время отправки в Telegram
@@ -466,6 +468,9 @@ export default function MessagingPage() {
   const hasUserScrolledUpRef = useRef(false);
   const loadOlderLastCallRef = useRef<number>(0);
   const skipScrollToBottomAfterPrependRef = useRef(false);
+  /** Для обычного списка: пользователь у нижнего края — новые сообщения показываем внизу без принудительного скролла вверх */
+  const isAtBottomRef = useRef(true);
+  const scrollToBottomRef = useRef<() => void>(() => {});
   const LOAD_OLDER_COOLDOWN_MS = 2500;
   const MESSAGES_PAGE_SIZE = 50;
   const VIRTUAL_LIST_THRESHOLD = 200;
@@ -487,7 +492,11 @@ export default function MessagingPage() {
   const [accountSyncReady, setAccountSyncReady] = useState<boolean>(true);
   const [accountSyncProgress, setAccountSyncProgress] = useState<{ done: number; total: number } | null>(null);
   const [accountSyncError, setAccountSyncError] = useState<string | null>(null);
-  const [messageContextMenu, setMessageContextMenu] = useState<{ x: number; y: number; messageId: string } | null>(null);
+  const [messageContextMenu, setMessageContextMenu] = useState<{ x: number; y: number; message: Message } | null>(null);
+  const [replyToMessage, setReplyToMessage] = useState<Message | null>(null);
+  const [forwardModal, setForwardModal] = useState<Message | null>(null);
+  const [forwardingToChatId, setForwardingToChatId] = useState<string | null>(null);
+  const [dragOverFolderId, setDragOverFolderId] = useState<number | null>(null);
   const [deletingMessageId, setDeletingMessageId] = useState<string | null>(null);
   const [folders, setFolders] = useState<SyncFolder[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<number>(0); // 0 = «все чаты» (одна папка из Telegram или дефолт)
@@ -743,7 +752,7 @@ export default function MessagingPage() {
     }
   }, [selectedChat?.channel_id, selectedChat?.channel, selectedAccountId]);
 
-  // Черновики: при смене чата сохраняем текущий текст в localStorage, подставляем черновик нового чата
+  // Черновики: при смене чата сохраняем текущий текст в localStorage, подставляем черновик нового чата; сброс ответа
   useEffect(() => {
     const prev = prevChatRef.current;
     if (prev) {
@@ -751,6 +760,7 @@ export default function MessagingPage() {
         localStorage.setItem(getDraftKey(prev.accountId, prev.chatId), newMessageRef.current);
       } catch (_) {}
     }
+    setReplyToMessage(null);
     if (selectedAccountId && selectedChat) {
       try {
         const draft = localStorage.getItem(getDraftKey(selectedAccountId, selectedChat.channel_id)) || '';
@@ -872,7 +882,7 @@ export default function MessagingPage() {
             },
           ];
         });
-        scrollToBottom();
+        if (isAtBottomRef.current) scrollToBottomRef.current();
       }
     };
     on('new-message', handler);
@@ -902,10 +912,15 @@ export default function MessagingPage() {
       setChatContextMenu(null);
       setAccountContextMenu(null);
     };
-    window.addEventListener('click', close, true);
+    const handleWindowClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target?.closest?.('[role="menu"]')) return;
+      close();
+    };
+    window.addEventListener('click', handleWindowClick, true);
     window.addEventListener('scroll', close, true);
     return () => {
-      window.removeEventListener('click', close, true);
+      window.removeEventListener('click', handleWindowClick, true);
       window.removeEventListener('scroll', close, true);
     };
   }, [messageContextMenu, chatContextMenu, accountContextMenu]);
@@ -937,9 +952,9 @@ export default function MessagingPage() {
 
   const scrollToBottom = useCallback(() => {
     const run = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    // После отрисовки: два rAF — скролл выполняется после того, как React отрисовал список
     requestAnimationFrame(() => requestAnimationFrame(run));
   }, []);
+  scrollToBottomRef.current = scrollToBottom;
 
   useEffect(() => {
     if (skipScrollToBottomAfterPrependRef.current) {
@@ -1135,19 +1150,22 @@ export default function MessagingPage() {
     });
   }, [messages.length]);
 
-  // Сброс «пользователь скроллил вверх» и счётчика prepend при смене чата
+  // Сброс при смене чата: скролл к последнему сообщению, сброс подгрузки и флага «внизу»
   useEffect(() => {
     hasUserScrolledUpRef.current = false;
     setPrependedCount(0);
     virtuosoScrollAfterChatChangeRef.current = true;
+    isAtBottomRef.current = true;
   }, [selectedChat?.channel_id]);
 
-  // Отслеживание скролла вверх — подгрузка только после явного скролла (избегаем 429)
+  // Отслеживание скролла: вверх — для подгрузки; внизу — чтобы новые сообщения скроллили только если пользователь уже внизу (как в Telegram)
   useEffect(() => {
     const container = messagesScrollRef.current;
     if (!container) return;
     const onScroll = () => {
       if (container.scrollTop < 150) hasUserScrolledUpRef.current = true;
+      const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+      isAtBottomRef.current = nearBottom;
     };
     container.addEventListener('scroll', onScroll, { passive: true });
     return () => container.removeEventListener('scroll', onScroll);
@@ -1303,8 +1321,10 @@ export default function MessagingPage() {
 
     const messageText = newMessage.trim();
     const fileToSend = pendingFile;
+    const replyTo = replyToMessage;
     setNewMessage('');
     setPendingFile(null);
+    setReplyToMessage(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (selectedAccountId && selectedChat) {
       try {
@@ -1339,20 +1359,34 @@ export default function MessagingPage() {
         body.fileBase64 = await fileToBase64(fileToSend);
         body.fileName = fileToSend.name;
       }
+      if (replyTo?.telegram_message_id) {
+        body.replyToMessageId = replyTo.telegram_message_id;
+      }
 
       const response = await apiClient.post('/api/messaging/send', body);
+      const serverMessage = response.data as Record<string, unknown>;
+      const tgDate = serverMessage.telegram_date;
+      const telegramDateStr =
+        tgDate != null
+          ? typeof tgDate === 'string'
+            ? tgDate
+            : typeof tgDate === 'number'
+              ? new Date(tgDate * 1000).toISOString()
+              : undefined
+          : undefined;
+
+      const merged: Message = {
+        ...tempMessage,
+        id: String(serverMessage.id ?? tempMessage.id),
+        status: String(serverMessage.status ?? tempMessage.status),
+        created_at: String(serverMessage.created_at ?? tempMessage.created_at),
+        telegram_message_id: serverMessage.telegram_message_id != null ? String(serverMessage.telegram_message_id) : tempMessage.telegram_message_id,
+        telegram_date: telegramDateStr ?? tempMessage.telegram_date,
+        reply_to_telegram_id: serverMessage.reply_to_telegram_id != null ? String(serverMessage.reply_to_telegram_id) : (tempMessage.reply_to_telegram_id ?? replyTo?.telegram_message_id ?? undefined),
+      };
 
       setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === tempMessage.id
-            ? {
-                ...msg,
-                id: response.data.id,
-                status: response.data.status,
-                created_at: response.data.created_at,
-              }
-            : msg
-        )
+        prev.map((msg) => (msg.id === tempMessage.id ? merged : msg))
       );
       await fetchChats();
     } catch (error: any) {
@@ -1556,6 +1590,21 @@ export default function MessagingPage() {
     }
   };
 
+  const scrollToMessageByTelegramId = useCallback((telegramMessageId: string) => {
+    const id = String(telegramMessageId).trim();
+    if (!id) return;
+    const index = messages.findIndex((m) => String(m.telegram_message_id) === id);
+    if (index < 0) return;
+    if (messages.length > VIRTUAL_LIST_THRESHOLD && virtuosoRef.current) {
+      virtuosoRef.current.scrollToIndex({ index, align: 'center', behavior: 'smooth' });
+      return;
+    }
+    const container = messagesScrollRef.current;
+    if (!container) return;
+    const el = container.querySelector(`[data-telegram-message-id="${id}"]`);
+    if (el) (el as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [messages]);
+
   const renderMessageRow = useCallback(
     (msg: Message, index: number) => {
       const isOutbound = msg.direction === 'outbound';
@@ -1563,8 +1612,18 @@ export default function MessagingPage() {
       const prevMsgTime = messages[index - 1]?.telegram_date ?? messages[index - 1]?.created_at;
       const showDateSeparator =
         index === 0 || new Date(msgTime).toDateString() !== new Date(prevMsgTime).toDateString();
+      const replyToTgId = (msg.reply_to_telegram_id ?? (msg as any).replyToTelegramId) != null
+        ? String(msg.reply_to_telegram_id ?? (msg as any).replyToTelegramId).trim()
+        : null;
+      const repliedToMsg = replyToTgId ? messages.find((m) => String(m.telegram_message_id ?? (m as any).telegramMessageId) === replyToTgId) : null;
+      const replyPreviewText = repliedToMsg
+        ? (repliedToMsg.content ?? '').trim().slice(0, 60) || t('messaging.replyPreviewMedia')
+        : replyToTgId
+          ? t('messaging.replyPreviewMedia')
+          : '';
+
       return (
-        <div>
+        <div data-telegram-message-id={msg.telegram_message_id ?? ''}>
           {showDateSeparator && (
             <div className="flex justify-center my-4">
               <span className="text-xs text-muted-foreground bg-muted px-3 py-1 rounded-full">
@@ -1580,10 +1639,28 @@ export default function MessagingPage() {
             className={`flex items-end gap-2 ${isOutbound ? 'flex-row-reverse' : 'flex-row'}`}
             onContextMenu={(e) => {
               e.preventDefault();
-              setMessageContextMenu({ x: e.clientX, y: e.clientY, messageId: msg.id });
+              setMessageContextMenu({ x: e.clientX, y: e.clientY, message: msg });
             }}
           >
             <div className={`max-w-[70%] ${isOutbound ? 'msg-bubble-out' : 'msg-bubble-in'}`}>
+              {replyToTgId && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    scrollToMessageByTelegramId(replyToTgId);
+                  }}
+                  className={`w-full text-left border-l-2 rounded pl-2 py-1 mb-1.5 text-xs truncate transition-colors ${
+                    isOutbound
+                      ? 'border-primary-foreground/50 text-primary-foreground/90 hover:bg-primary-foreground/10'
+                      : 'border-primary text-muted-foreground hover:bg-muted/60'
+                  }`}
+                  title={t('messaging.scrollToMessage')}
+                >
+                  <Reply className="w-3.5 h-3.5 inline-block mr-1 align-middle shrink-0" />
+                  <span className="align-middle">{replyPreviewText}{replyPreviewText.length >= 60 ? '…' : ''}</span>
+                </button>
+              )}
               <MessageContent
                 msg={msg}
                 isOutbound={isOutbound}
@@ -1618,7 +1695,7 @@ export default function MessagingPage() {
         </div>
       );
     },
-    [messages, selectedAccountId, selectedChat, setMediaViewer, t]
+    [messages, selectedAccountId, selectedChat, setMediaViewer, t, scrollToMessageByTelegramId]
   );
 
   useEffect(() => {
@@ -1650,6 +1727,55 @@ export default function MessagingPage() {
       alert(err?.response?.data?.message || err?.response?.data?.error || 'Не удалось удалить сообщение');
     } finally {
       setDeletingMessageId(null);
+    }
+  };
+
+  const handleCopyMessageText = (msg: Message) => {
+    setMessageContextMenu(null);
+    const text = (msg.content ?? (msg as any).body ?? '').trim() || '';
+    if (text) {
+      navigator.clipboard.writeText(text).then(
+        () => { /* optional: toast t('common.copied') */ },
+        () => alert(t('messaging.copyFailed'))
+      );
+    }
+  };
+
+  const handleReplyToMessage = (msg: Message) => {
+    setMessageContextMenu(null);
+    setReplyToMessage(msg);
+    messageInputRef.current?.focus();
+  };
+
+  const handleForwardMessage = (msg: Message) => {
+    setMessageContextMenu(null);
+    setForwardModal(msg);
+  };
+
+  const handleForwardToChat = async (toChatId: string) => {
+    if (!forwardModal || !selectedAccountId || !selectedChat) return;
+    const telegramId = forwardModal.telegram_message_id ? Number(forwardModal.telegram_message_id) : null;
+    if (telegramId == null) {
+      alert(t('messaging.forwardError'));
+      return;
+    }
+    setForwardingToChatId(toChatId);
+    try {
+      await apiClient.post(`/api/bd-accounts/${selectedAccountId}/forward`, {
+        fromChatId: selectedChat.channel_id,
+        toChatId,
+        telegramMessageId: telegramId,
+      });
+      setForwardModal(null);
+      setForwardingToChatId(null);
+      if (toChatId === selectedChat.channel_id) {
+        await fetchMessages(selectedAccountId, selectedChat);
+      }
+    } catch (err: any) {
+      console.error('Error forwarding message:', err);
+      alert(err?.response?.data?.message || err?.response?.data?.error || t('messaging.forwardError'));
+    } finally {
+      setForwardingToChatId(null);
     }
   };
 
@@ -1696,6 +1822,21 @@ export default function MessagingPage() {
 
   // Счётчики непрочитанных по папкам (для бейджей на кнопках папок)
   const chatFolderIds = useCallback((c: Chat) => (c.folder_ids && c.folder_ids.length > 0 ? c.folder_ids : (c.folder_id != null ? [Number(c.folder_id)] : [])), []);
+
+  const handleFolderDrop = useCallback(
+    (folderId: number, e: React.DragEvent) => {
+      e.preventDefault();
+      setDragOverFolderId(null);
+      try {
+        const raw = e.dataTransfer.getData('application/json');
+        if (!raw) return;
+        const { bdAccountId, chat } = JSON.parse(raw) as { bdAccountId: string; chat: Chat };
+        if (bdAccountId !== selectedAccountId) return;
+        if (!chatFolderIds(chat).includes(folderId)) handleChatFoldersToggle(chat, folderId);
+      } catch (_) {}
+    },
+    [selectedAccountId, chatFolderIds, handleChatFoldersToggle]
+  );
 
   const unreadByFolder = useMemo(() => {
     const all = chats.reduce((s, c) => s + (c.unread_count || 0), 0);
@@ -1952,9 +2093,12 @@ export default function MessagingPage() {
                         type="button"
                         onClick={() => setSelectedFolderId(f.folder_id)}
                         title={f.folder_title}
-                        className={`flex flex-col items-center justify-center py-2 px-1 gap-0.5 min-h-[48px] w-full rounded-none border-b border-border/30 ${
+                        onDragOver={(e) => { e.preventDefault(); setDragOverFolderId(f.folder_id); }}
+                        onDragLeave={() => setDragOverFolderId(null)}
+                        onDrop={(e) => handleFolderDrop(f.folder_id, e)}
+                        className={`flex flex-col items-center justify-center py-2 px-1 gap-0.5 min-h-[48px] w-full rounded-none border-b border-border/30 transition-colors ${
                           selectedFolderId === f.folder_id ? 'bg-primary/10 dark:bg-primary/20 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
-                        }`}
+                        } ${dragOverFolderId === f.folder_id ? 'ring-2 ring-primary bg-primary/20' : ''}`}
                       >
                         <span className="text-lg shrink-0 leading-none">{f.icon || '📁'}</span>
                         <span className="text-[10px] font-medium truncate w-full text-center leading-tight">{f.folder_title}</span>
@@ -2087,9 +2231,12 @@ export default function MessagingPage() {
                       type="button"
                       onClick={() => setSelectedFolderId(f.folder_id)}
                       title={f.folder_title}
-                      className={`flex flex-col items-center justify-center py-2 px-1 gap-0.5 min-h-[48px] w-full rounded-none border-b border-border/30 ${
+                      onDragOver={(e) => { e.preventDefault(); setDragOverFolderId(f.folder_id); }}
+                      onDragLeave={() => setDragOverFolderId(null)}
+                      onDrop={(e) => handleFolderDrop(f.folder_id, e)}
+                      className={`flex flex-col items-center justify-center py-2 px-1 gap-0.5 min-h-[48px] w-full rounded-none border-b border-border/30 transition-colors ${
                         selectedFolderId === f.folder_id ? 'bg-primary/10 dark:bg-primary/20 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
-                      }`}
+                      } ${dragOverFolderId === f.folder_id ? 'ring-2 ring-primary bg-primary/20' : ''}`}
                     >
                       <span className="text-lg shrink-0">{f.icon || '📁'}</span>
                       <span className="text-[10px] font-medium truncate w-full text-center leading-tight">{f.folder_title}</span>
@@ -2236,6 +2383,11 @@ export default function MessagingPage() {
                 )}
               <div
                 key={`${chat.channel}-${chat.channel_id}`}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.setData('application/json', JSON.stringify({ bdAccountId: selectedAccountId, chat }));
+                  e.dataTransfer.effectAllowed = 'move';
+                }}
                 onClick={() => setSelectedChat(chat)}
                 onContextMenu={(e) => {
                   e.preventDefault();
@@ -2408,6 +2560,7 @@ export default function MessagingPage() {
               x={chatContextMenu?.x ?? 0}
               y={chatContextMenu?.y ?? 0}
               className="min-w-[180px]"
+              estimatedHeight={320}
             >
               {chatContextMenu && selectedAccountId && (
                 <>
@@ -2499,24 +2652,49 @@ export default function MessagingPage() {
               )}
             </ContextMenu>
 
-            {/* Context menu: message — reactions + delete */}
+            {/* Context menu: message — Reply, Forward, Copy, Like, Reaction, Delete */}
             <ContextMenu
               open={!!messageContextMenu}
               onClose={() => setMessageContextMenu(null)}
               x={messageContextMenu?.x ?? 0}
               y={messageContextMenu?.y ?? 0}
-              className="min-w-[160px]"
+              className="min-w-[180px]"
+              estimatedHeight={320}
             >
               {messageContextMenu && (
                 <>
-                  <ContextMenuSection label={t('messaging.reaction')} noTopBorder>
+                  <ContextMenuItem
+                    icon={<Reply className="w-4 h-4" />}
+                    label={t('messaging.reply')}
+                    onClick={() => handleReplyToMessage(messageContextMenu.message)}
+                  />
+                  <ContextMenuItem
+                    icon={<Forward className="w-4 h-4" />}
+                    label={t('messaging.forward')}
+                    onClick={() => handleForwardMessage(messageContextMenu.message)}
+                  />
+                  <ContextMenuItem
+                    icon={<Copy className="w-4 h-4" />}
+                    label={t('messaging.copyText')}
+                    onClick={() => handleCopyMessageText(messageContextMenu.message)}
+                  />
+                  <ContextMenuItem
+                    icon={<Heart className="w-4 h-4" />}
+                    label={
+                      messageContextMenu.message.reactions?.['❤️']
+                        ? t('messaging.unlike')
+                        : t('messaging.like')
+                    }
+                    onClick={() => handleReaction(messageContextMenu.message.id, '❤️')}
+                  />
+                  <ContextMenuSection label={t('messaging.reaction')}>
                     <div className="flex flex-wrap gap-1 px-2 pb-2">
                       {REACTION_EMOJI.map((emoji) => (
                         <button
                           key={emoji}
                           type="button"
                           className="p-1.5 rounded hover:bg-accent text-lg leading-none"
-                          onClick={() => handleReaction(messageContextMenu.messageId, emoji)}
+                          onClick={() => handleReaction(messageContextMenu.message.id, emoji)}
                           title={emoji}
                         >
                           {emoji}
@@ -2526,11 +2704,11 @@ export default function MessagingPage() {
                   </ContextMenuSection>
                   <div className="border-t border-border my-1" />
                   <ContextMenuItem
-                    icon={deletingMessageId === messageContextMenu.messageId ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                    icon={deletingMessageId === messageContextMenu.message.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                     label={t('messaging.deleteMessage')}
                     destructive
-                    onClick={() => handleDeleteMessage(messageContextMenu.messageId)}
-                    disabled={deletingMessageId === messageContextMenu.messageId}
+                    onClick={() => handleDeleteMessage(messageContextMenu.message.id)}
+                    disabled={deletingMessageId === messageContextMenu.message.id}
                   />
                 </>
               )}
@@ -2683,6 +2861,24 @@ export default function MessagingPage() {
                   <Mic className="w-5 h-5" />
                 </button>
 
+                {/* Превью ответа (reply) — как в Telegram */}
+                {replyToMessage && (
+                  <div className="flex items-center gap-2 mb-2 py-1.5 px-3 rounded-lg bg-muted/60 border-l-2 border-primary text-sm">
+                    <Reply className="w-4 h-4 text-primary shrink-0" />
+                    <span className="text-muted-foreground truncate flex-1 min-w-0">
+                      {(replyToMessage.content ?? '').trim().slice(0, 80) || t('messaging.replyPreviewMedia')}
+                      {(replyToMessage.content ?? '').trim().length > 80 ? '…' : ''}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setReplyToMessage(null)}
+                      className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground shrink-0"
+                      title={t('common.close')}
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
                 {/* Поле ввода как в Telegram: textarea с авто-высотой, Enter — отправить, Shift+Enter — новая строка */}
                 <div className="flex-1 relative flex items-end min-h-[40px]">
                   <textarea
@@ -2847,6 +3043,46 @@ export default function MessagingPage() {
           type={mediaViewer.type}
           onClose={() => setMediaViewer(null)}
         />
+      )}
+
+      {/* Модалка пересылки сообщения в чат */}
+      {forwardModal && selectedAccountId && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          onClick={() => !forwardingToChatId && setForwardModal(null)}
+        >
+          <div
+            className="bg-card rounded-xl shadow-xl border border-border max-w-md w-full mx-4 max-h-[70vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-3 border-b border-border font-semibold">{t('messaging.forwardToChat')}</div>
+            <div className="overflow-y-auto flex-1 min-h-0 p-2">
+              {displayChats
+                .filter((c) => c.channel_id !== selectedChat?.channel_id)
+                .map((chat) => (
+                  <button
+                    key={chat.channel_id}
+                    type="button"
+                    onClick={() => handleForwardToChat(chat.channel_id)}
+                    disabled={!!forwardingToChatId}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-accent text-left disabled:opacity-50"
+                  >
+                    <ChatAvatar bdAccountId={selectedAccountId} chatId={chat.channel_id} chat={chat} className="w-10 h-10" />
+                    <span className="truncate flex-1">{getChatName(chat)}</span>
+                    {forwardingToChatId === chat.channel_id && <Loader2 className="w-4 h-4 animate-spin shrink-0" />}
+                  </button>
+                ))}
+              {displayChats.filter((c) => c.channel_id !== selectedChat?.channel_id).length === 0 && (
+                <p className="text-sm text-muted-foreground py-4 text-center">{t('messaging.noChats')}</p>
+              )}
+            </div>
+            <div className="p-2 border-t border-border">
+              <Button variant="outline" onClick={() => setForwardModal(null)} disabled={!!forwardingToChatId}>
+                {t('common.cancel')}
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

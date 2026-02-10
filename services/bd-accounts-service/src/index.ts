@@ -860,7 +860,9 @@ app.get('/api/bd-accounts/:id/dialogs-by-folders', async (req, res) => {
       );
       folderList.push({ id: f.id, title: f.title, emoticon: f.emoticon, dialogs: excludeSelf(dialogs) });
     }
-    res.json({ folders: folderList });
+    // Pinned order from Telegram (folder 0: pinned dialogs first, then unpinned)
+    const pinned_chat_ids = allDialogs0.filter((d: any) => d.pinned === true).map((d: any) => String(d.id));
+    res.json({ folders: folderList, pinned_chat_ids });
   } catch (error: any) {
     console.error('Error fetching dialogs by folders:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
@@ -1340,6 +1342,39 @@ async function refreshChatsFromFolders(
       console.warn(`[BD Accounts] refreshChatsFromFolders folder ${folderId} failed:`, err?.message);
     }
   }
+
+  // Sync pinned chats from Telegram to account owner's user_chat_pins (order from folder 0: pinned first)
+  const pinnedChatIds = allDialogs0.filter((d: any) => d.pinned === true).map((d: any) => String(d.id));
+  if (pinnedChatIds.length > 0) {
+    try {
+      const acc = await pool.query(
+        'SELECT created_by_user_id, organization_id FROM bd_accounts WHERE id = $1 LIMIT 1',
+        [accountId]
+      );
+      if (acc.rows.length > 0) {
+        const ownerId = acc.rows[0].created_by_user_id;
+        const orgId = acc.rows[0].organization_id;
+        if (ownerId) {
+          await pool.query(
+            `DELETE FROM user_chat_pins WHERE user_id = $1 AND organization_id = $2 AND bd_account_id = $3`,
+            [ownerId, orgId, accountId]
+          );
+          for (let i = 0; i < pinnedChatIds.length; i++) {
+            await pool.query(
+              `INSERT INTO user_chat_pins (user_id, organization_id, bd_account_id, channel_id, order_index)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (user_id, organization_id, bd_account_id, channel_id) DO UPDATE SET order_index = EXCLUDED.order_index`,
+              [ownerId, orgId, accountId, pinnedChatIds[i], i]
+            );
+          }
+          console.log(`[BD Accounts] Synced ${pinnedChatIds.length} pinned chats from Telegram for account ${accountId}`);
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[BD Accounts] Sync pinned chats from Telegram failed:`, err?.message);
+    }
+  }
+
   console.log(`[BD Accounts] Refreshed chats from ${foldersRows.rows.length} folders for account ${accountId}`);
 }
 
@@ -1884,7 +1919,7 @@ app.post('/api/bd-accounts/:id/send', async (req, res) => {
   try {
     const user = getUser(req);
     const { id } = req.params;
-    const { chatId, text, fileBase64, fileName } = req.body;
+    const { chatId, text, fileBase64, fileName, replyToMessageId } = req.body;
 
     if (!chatId) {
       return res.status(400).json({ error: 'Missing required field: chatId' });
@@ -1913,9 +1948,11 @@ app.post('/api/bd-accounts/:id/send', async (req, res) => {
       message = await telegramManager.sendFile(id, chatId, buf, {
         caption: typeof text === 'string' ? text : '',
         filename: typeof fileName === 'string' ? fileName.trim() || 'file' : 'file',
+        replyTo: replyToMessageId != null ? Number(replyToMessageId) : undefined,
       });
     } else {
-      message = await telegramManager.sendMessage(id, chatId, typeof text === 'string' ? text : '');
+      const replyTo = replyToMessageId != null && String(replyToMessageId).trim() ? Number(replyToMessageId) : undefined;
+      message = await telegramManager.sendMessage(id, chatId, typeof text === 'string' ? text : '', { replyTo });
     }
 
     res.json({
@@ -1928,6 +1965,98 @@ app.post('/api/bd-accounts/:id/send', async (req, res) => {
     res.status(500).json({
       error: 'Internal server error',
       message: error.message || 'Failed to send message',
+    });
+  }
+});
+
+// Forward message to another chat (Telegram)
+app.post('/api/bd-accounts/:id/forward', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { fromChatId, toChatId, telegramMessageId } = req.body;
+
+    if (!fromChatId || !toChatId || telegramMessageId == null) {
+      return res.status(400).json({ error: 'Missing required fields: fromChatId, toChatId, telegramMessageId' });
+    }
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    if (!telegramManager.isConnected(id)) {
+      return res.status(400).json({ error: 'BD account is not connected' });
+    }
+
+    const message = await telegramManager.forwardMessage(
+      id,
+      String(fromChatId),
+      String(toChatId),
+      Number(telegramMessageId)
+    );
+
+    res.json({
+      success: true,
+      messageId: String(message.id),
+      date: message.date,
+    });
+  } catch (error: any) {
+    console.error('Error forwarding message:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message || 'Failed to forward message',
+    });
+  }
+});
+
+// Установить реакции на сообщение в Telegram (полный список до 3, как требует API)
+app.post('/api/bd-accounts/:id/messages/:telegramMessageId/reaction', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id: accountId, telegramMessageId } = req.params;
+    const { chatId, reaction: reactionBody } = req.body;
+
+    if (!chatId) {
+      return res.status(400).json({ error: 'Missing required field: chatId' });
+    }
+    const reactionList = Array.isArray(reactionBody)
+      ? reactionBody.map((e) => String(e)).filter(Boolean)
+      : [];
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [accountId, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    if (!telegramManager.isConnected(accountId)) {
+      return res.status(400).json({ error: 'BD account is not connected' });
+    }
+
+    await telegramManager.sendReaction(
+      accountId,
+      String(chatId),
+      Number(telegramMessageId),
+      reactionList
+    );
+
+    res.json({ success: true });
+  } catch (error: any) {
+    const isReactionInvalid =
+      error?.errorMessage === 'REACTION_INVALID' ||
+      error?.message?.includes('REACTION_INVALID');
+    if (isReactionInvalid) {
+      console.warn('Reaction not applied in Telegram (REACTION_INVALID), local state kept:', error?.message);
+      return res.json({ success: true, skipped: 'REACTION_INVALID' });
+    }
+    console.error('Error sending reaction:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message || 'Failed to send reaction',
     });
   }
 });

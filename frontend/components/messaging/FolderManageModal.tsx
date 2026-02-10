@@ -151,7 +151,7 @@ export function FolderManageModal({
         {error && (
           <p className="text-sm text-destructive mb-3 rounded-lg bg-destructive/10 px-3 py-2">{error}</p>
         )}
-        <div className="flex-1 min-h-0 overflow-y-auto space-y-2 mb-4">
+        <div className="flex-1 min-h-0 overflow-y-auto space-y-2 mb-4 scroll-thin">
           {folders.map((f) => (
             <div
               key={f.id}

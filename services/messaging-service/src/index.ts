@@ -475,6 +475,36 @@ app.delete('/api/messaging/pinned-chats/:channelId', async (req, res) => {
   }
 });
 
+// Sync pinned chats from Telegram: replace current user's pins for this bd_account with the ordered list from Telegram.
+app.post('/api/messaging/pinned-chats/sync', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { bdAccountId, pinned_chat_ids: pinnedChatIds } = req.body;
+    if (!bdAccountId || String(bdAccountId).trim() === '') {
+      return res.status(400).json({ error: 'bdAccountId is required' });
+    }
+    const bdId = String(bdAccountId).trim();
+    const ids = Array.isArray(pinnedChatIds) ? pinnedChatIds.map((x: any) => String(x)).filter(Boolean) : [];
+    await pool.query(
+      `DELETE FROM user_chat_pins
+       WHERE user_id = $1 AND organization_id = $2 AND bd_account_id = $3`,
+      [user.id, user.organizationId, bdId]
+    );
+    for (let i = 0; i < ids.length; i++) {
+      await pool.query(
+        `INSERT INTO user_chat_pins (user_id, organization_id, bd_account_id, channel_id, order_index)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (user_id, organization_id, bd_account_id, channel_id) DO UPDATE SET order_index = EXCLUDED.order_index`,
+        [user.id, user.organizationId, bdId, ids[i], i]
+      );
+    }
+    res.json({ success: true, count: ids.length });
+  } catch (error) {
+    console.error('Error syncing pinned chats:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get messaging statistics
 app.get('/api/messaging/stats', async (req, res) => {
   try {
@@ -527,7 +557,7 @@ const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
 app.post('/api/messaging/send', async (req, res) => {
   try {
     const user = getUser(req);
-    const { contactId, channel, channelId, content, bdAccountId, fileBase64, fileName } = req.body;
+    const { contactId, channel, channelId, content, bdAccountId, fileBase64, fileName, replyToMessageId } = req.body;
 
     if (!contactId || !channel || !channelId) {
       return res.status(400).json({ error: 'Missing required fields: contactId, channel, channelId' });
@@ -556,10 +586,11 @@ app.post('/api/messaging/send', async (req, res) => {
 
     const captionOrContent = typeof content === 'string' ? content : '';
     const contentForDb = captionOrContent || (fileName ? `[Файл: ${fileName}]` : '[Медиа]');
+    const replyToTgId = replyToMessageId != null && String(replyToMessageId).trim() ? String(replyToMessageId).trim() : null;
 
     const result = await pool.query(
-      `INSERT INTO messages (organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      `INSERT INTO messages (organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata, reply_to_telegram_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
       [
         user.organizationId,
         bdAccountId || null,
@@ -571,6 +602,7 @@ app.post('/api/messaging/send', async (req, res) => {
         MessageStatus.PENDING,
         false,
         JSON.stringify({ sentBy: user.id }),
+        replyToTgId,
       ]
     );
     const message = result.rows[0];
@@ -589,6 +621,9 @@ app.post('/api/messaging/send', async (req, res) => {
           body.fileBase64 = fileBase64;
           body.fileName = typeof fileName === 'string' ? fileName : 'file';
         }
+        if (replyToTgId) {
+          body.replyToMessageId = replyToTgId;
+        }
         const response = await fetch(`${BD_ACCOUNTS_SERVICE_URL}/api/bd-accounts/${bdAccountId}/send`, {
           method: 'POST',
           headers: {
@@ -600,10 +635,13 @@ app.post('/api/messaging/send', async (req, res) => {
         });
 
         if (response.ok) {
-          await pool.query('UPDATE messages SET status = $1 WHERE id = $2', [
-            MessageStatus.DELIVERED,
-            message.id,
-          ]);
+          const resJson = (await response.json().catch(() => ({}))) as { messageId?: string; date?: number };
+          const tgMessageId = resJson.messageId != null ? String(resJson.messageId).trim() : null;
+          const tgDate = resJson.date != null ? new Date(resJson.date * 1000) : null;
+          await pool.query(
+            `UPDATE messages SET status = $1, telegram_message_id = $2, telegram_date = $3 WHERE id = $4`,
+            [MessageStatus.DELIVERED, tgMessageId, tgDate, message.id]
+          );
           sent = true;
         } else {
           const errJson = await response.json().catch(() => ({})) as { message?: string; error?: string };
@@ -766,7 +804,7 @@ app.patch('/api/messaging/messages/:id/reaction', async (req, res) => {
     }
 
     const msgResult = await pool.query(
-      'SELECT id, reactions FROM messages WHERE id = $1 AND organization_id = $2',
+      'SELECT id, reactions, our_reactions, bd_account_id, channel_id, telegram_message_id FROM messages WHERE id = $1 AND organization_id = $2',
       [id, user.organizationId]
     );
     if (msgResult.rows.length === 0) {
@@ -774,13 +812,46 @@ app.patch('/api/messaging/messages/:id/reaction', async (req, res) => {
     }
     const row = msgResult.rows[0];
     const current = (row.reactions as Record<string, number>) || {};
-    const count = (current[trimmed] || 0) + 1;
-    const next = { ...current, [trimmed]: count };
+    const prevCount = current[trimmed] || 0;
+    const next: Record<string, number> = { ...current };
+    const currentOurs: string[] = Array.isArray(row.our_reactions) ? row.our_reactions : [];
+    let newOurs: string[];
+    if (prevCount > 0) {
+      if (prevCount === 1) delete next[trimmed];
+      else next[trimmed] = prevCount - 1;
+      newOurs = currentOurs.filter((e) => e !== trimmed);
+    } else {
+      next[trimmed] = prevCount + 1;
+      newOurs = [...currentOurs.filter((e) => e !== trimmed), trimmed].slice(0, 3);
+    }
 
     await pool.query(
-      'UPDATE messages SET reactions = $1, updated_at = NOW() WHERE id = $2 AND organization_id = $3',
-      [JSON.stringify(next), id, user.organizationId]
+      'UPDATE messages SET reactions = $1, our_reactions = $2, updated_at = NOW() WHERE id = $3 AND organization_id = $4',
+      [JSON.stringify(next), JSON.stringify(newOurs), id, user.organizationId]
     );
+
+    const bdAccountId = row.bd_account_id;
+    const channelId = row.channel_id;
+    const telegramMessageId = row.telegram_message_id;
+    if (bdAccountId && channelId && telegramMessageId) {
+      try {
+        await fetch(
+          `${BD_ACCOUNTS_SERVICE_URL}/api/bd-accounts/${bdAccountId}/messages/${telegramMessageId}/reaction`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-User-Id': user.id,
+              'X-Organization-Id': user.organizationId,
+            },
+            body: JSON.stringify({ chatId: channelId, reaction: newOurs }),
+          }
+        );
+      } catch (err) {
+        console.warn('Failed to sync reaction to Telegram:', err);
+      }
+    }
+
     const updated = await pool.query('SELECT * FROM messages WHERE id = $1', [id]);
     res.json(updated.rows[0]);
   } catch (error: any) {

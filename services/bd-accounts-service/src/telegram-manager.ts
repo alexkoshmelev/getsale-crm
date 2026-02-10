@@ -19,6 +19,46 @@ import {
 import { MessageChannel, MessageDirection, MessageStatus } from '@getsale/types';
 import { serializeMessage, getMessageText, SerializedTelegramMessage } from './telegram-serialize';
 
+/** Преобразует реакции из telegram_extra.reactions в наш JSONB { "👍": 2, "❤️": 1 }. */
+function reactionsFromTelegramExtra(telegram_extra: Record<string, unknown> | undefined): Record<string, number> | null {
+  if (!telegram_extra || typeof telegram_extra !== 'object') return null;
+  const raw = telegram_extra.reactions as any;
+  if (!raw || typeof raw !== 'object') return null;
+  const results = Array.isArray(raw.results) ? raw.results : [];
+  const out: Record<string, number> = {};
+  for (const r of results) {
+    if (!r || typeof r !== 'object') continue;
+    const count = typeof r.count === 'number' ? r.count : 0;
+    const reaction = r.reaction;
+    const emoji = reaction?.emoticon ?? reaction?.emoji;
+    if (typeof emoji === 'string' && emoji.length > 0 && count > 0) {
+      out[emoji] = (out[emoji] || 0) + count;
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** Реакции, поставленные текущим пользователем (по chosen_order в results). До 3. */
+function ourReactionsFromTelegramExtra(telegram_extra: Record<string, unknown> | undefined): string[] | null {
+  if (!telegram_extra || typeof telegram_extra !== 'object') return null;
+  const raw = telegram_extra.reactions as any;
+  if (!raw || typeof raw !== 'object') return null;
+  const results = Array.isArray(raw.results) ? raw.results : [];
+  const withOrder: { order: number; emoji: string }[] = [];
+  for (const r of results) {
+    const order = r?.chosen_order ?? r?.chosenOrder;
+    if (order == null || typeof order !== 'number') continue;
+    const reaction = r.reaction;
+    const emoji = reaction?.emoticon ?? reaction?.emoji;
+    if (typeof emoji === 'string' && emoji.length > 0) {
+      withOrder.push({ order, emoji });
+    }
+  }
+  if (withOrder.length === 0) return null;
+  withOrder.sort((a, b) => a.order - b.order);
+  return withOrder.map((x) => x.emoji).slice(0, 3);
+}
+
 interface TelegramClientInfo {
   client: TelegramClient;
   accountId: string;
@@ -1078,17 +1118,24 @@ export class TelegramManager {
       telegram_extra,
     } = serialized;
 
+    const reactionsFromTg = reactionsFromTelegramExtra(telegram_extra);
+    const reactionsJson = reactionsFromTg ? JSON.stringify(reactionsFromTg) : null;
+    const ourReactionsFromTg = ourReactionsFromTelegramExtra(telegram_extra);
+    const ourReactionsJson = ourReactionsFromTg?.length ? JSON.stringify(ourReactionsFromTg) : null;
+
     const result = await this.pool.query(
       `INSERT INTO messages (
         organization_id, bd_account_id, contact_id, channel, channel_id, direction, content, status, unread,
-        metadata, telegram_message_id, telegram_date, loaded_at, reply_to_telegram_id, telegram_entities, telegram_media, telegram_extra
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13, $14, $15, $16)
+        metadata, telegram_message_id, telegram_date, loaded_at, reply_to_telegram_id, telegram_entities, telegram_media, telegram_extra, reactions, our_reactions
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13, $14, $15, $16, $17, $18)
       ON CONFLICT (bd_account_id, channel_id, telegram_message_id) WHERE (telegram_message_id IS NOT NULL)
       DO UPDATE SET
         content = EXCLUDED.content,
         telegram_entities = EXCLUDED.telegram_entities,
         telegram_media = EXCLUDED.telegram_media,
         telegram_extra = EXCLUDED.telegram_extra,
+        reactions = COALESCE(EXCLUDED.reactions, messages.reactions),
+        our_reactions = COALESCE(EXCLUDED.our_reactions, messages.our_reactions),
         updated_at = NOW()
       RETURNING id`,
       [
@@ -1108,6 +1155,8 @@ export class TelegramManager {
         telegram_entities ? JSON.stringify(telegram_entities) : null,
         telegram_media ? JSON.stringify(telegram_media) : null,
         Object.keys(telegram_extra).length ? JSON.stringify(telegram_extra) : null,
+        reactionsJson,
+        ourReactionsJson,
       ]
     );
     return result.rows[0];
@@ -1518,6 +1567,7 @@ export class TelegramManager {
   }
 
   private static mapDialogToItem(dialog: any): any {
+    const pinned = !!(dialog.pinned ?? dialog.dialog?.pinned);
     return {
       id: String(dialog.id),
       name: dialog.name || dialog.title || 'Unknown',
@@ -1527,6 +1577,7 @@ export class TelegramManager {
       isUser: dialog.isUser,
       isGroup: dialog.isGroup,
       isChannel: dialog.isChannel,
+      pinned,
     };
   }
 
@@ -2231,12 +2282,13 @@ export class TelegramManager {
   }
 
   /**
-   * Send message via Telegram
+   * Send message via Telegram (optional reply to message by Telegram message id).
    */
   async sendMessage(
     accountId: string,
     chatId: string,
-    text: string
+    text: string,
+    opts: { replyTo?: number } = {}
   ): Promise<Api.Message> {
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo || !clientInfo.isConnected) {
@@ -2244,7 +2296,10 @@ export class TelegramManager {
     }
 
     try {
-      const message = await clientInfo.client.sendMessage(chatId, { message: text });
+      const message = await clientInfo.client.sendMessage(chatId, {
+        message: text,
+        ...(opts.replyTo != null ? { replyTo: opts.replyTo } : {}),
+      });
       
       // Update last activity
       clientInfo.lastActivity = new Date();
@@ -2270,7 +2325,7 @@ export class TelegramManager {
     accountId: string,
     chatId: string,
     fileBuffer: Buffer,
-    opts: { caption?: string; filename?: string } = {}
+    opts: { caption?: string; filename?: string; replyTo?: number } = {}
   ): Promise<Api.Message> {
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo || !clientInfo.isConnected) {
@@ -2284,6 +2339,7 @@ export class TelegramManager {
       const message = await client.sendFile(chatId, {
         file,
         caption: opts.caption || '',
+        ...(opts.replyTo != null ? { replyTo: opts.replyTo } : {}),
       });
       clientInfo.lastActivity = new Date();
       await this.pool.query(
@@ -2295,6 +2351,97 @@ export class TelegramManager {
       console.error(`[TelegramManager] Error sending file:`, error);
       throw error;
     }
+  }
+
+  /**
+   * Forward a message from one chat to another (Telegram ForwardMessages).
+   */
+  async forwardMessage(
+    accountId: string,
+    fromChatId: string,
+    toChatId: string,
+    telegramMessageId: number
+  ): Promise<Api.Message> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const client = clientInfo.client;
+    const fromPeer = await client.getInputEntity(fromChatId);
+    const toPeer = await client.getInputEntity(toChatId);
+    const randomId = BigInt(Math.floor(Math.random() * 1e15)) * BigInt(1e5) + BigInt(Math.floor(Math.random() * 1e5));
+    const result = await client.invoke(
+      new Api.messages.ForwardMessages({
+        fromPeer,
+        toPeer,
+        id: [telegramMessageId],
+        randomId: [randomId],
+      })
+    );
+    clientInfo.lastActivity = new Date();
+    await this.pool.query(
+      'UPDATE bd_accounts SET last_activity = NOW() WHERE id = $1',
+      [accountId]
+    );
+    const updates = result as any;
+    const message = updates?.updates?.[0]?.message ?? updates?.updates?.find((u: any) => u.message)?.message;
+    if (!message) throw new Error('Forward succeeded but no message in response');
+    return message;
+  }
+
+  /**
+   * Эмодзи, которые Telegram принимает как ReactionEmoji (стандартный набор).
+   * Храним в NFC, чтобы сравнивать после normalise — иначе возможен REACTION_INVALID.
+   */
+  private static readonly REACTION_EMOJI_ALLOWED_NFC = new Set(
+    ['👍', '👎', '❤️', '🔥', '👏', '😄', '😮', '😢', '🙏'].map((e) => e.normalize('NFC'))
+  );
+
+  /**
+   * Нормализует строку эмодзи в NFC и проверяет, что она в разрешённом списке.
+   * Возвращает нормализованную строку для отправки или null, если не разрешена.
+   */
+  private static normalizeReactionEmoji(emoji: string): string | null {
+    if (typeof emoji !== 'string' || !emoji.trim()) return null;
+    const normalized = emoji.trim().normalize('NFC');
+    return TelegramManager.REACTION_EMOJI_ALLOWED_NFC.has(normalized) ? normalized : null;
+  }
+
+  /**
+   * Установить реакции на сообщение в Telegram (messages.SendReaction).
+   * Передаётся полный список реакций пользователя (до 3), не одна — Telegram так требует.
+   * Эмодзи нормализуются (NFC) и фильтруются по разрешённому списку, чтобы избежать REACTION_INVALID.
+   */
+  async sendReaction(
+    accountId: string,
+    chatId: string,
+    telegramMessageId: number,
+    reactionEmojis: string[]
+  ): Promise<void> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const client = clientInfo.client;
+    const peer = await client.getInputEntity(chatId);
+    const reaction = (reactionEmojis || [])
+      .map((e) => TelegramManager.normalizeReactionEmoji(e))
+      .filter((e): e is string => e != null)
+      .filter((e, i, a) => a.indexOf(e) === i)
+      .slice(0, 3)
+      .map((emoticon) => new Api.ReactionEmoji({ emoticon }));
+    await client.invoke(
+      new Api.messages.SendReaction({
+        peer,
+        msgId: telegramMessageId,
+        reaction,
+      })
+    );
+    clientInfo.lastActivity = new Date();
+    await this.pool.query(
+      'UPDATE bd_accounts SET last_activity = NOW() WHERE id = $1',
+      [accountId]
+    );
   }
 
   /**
