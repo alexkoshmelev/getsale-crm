@@ -5,6 +5,8 @@
 
 Документ отражает **что делать дальше** после завершения Telegram-интеграции, WebSocket и Messaging. Детали по доменам — в [CURRENT_STATE_ANALYSIS.md](./CURRENT_STATE_ANALYSIS.md), план по фазам — в [ACTION_PLAN.md](./ACTION_PLAN.md).
 
+**Для фокуса «Telegram-like CRM»** актуальные приоритеты и бэклог см. в **[MASTER_PLAN_MESSAGING_FIRST_CRM.md](./MASTER_PLAN_MESSAGING_FIRST_CRM.md)** — Часть 6 (текущее состояние и приоритеты).
+
 ---
 
 ## 1. Критично (MVP)

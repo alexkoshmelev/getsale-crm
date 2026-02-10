@@ -355,7 +355,9 @@ function MessageContent({
   const { t } = useTranslation();
   const mediaType = getMessageMediaType(msg);
   const label = mediaType === 'text' ? '' : t('messaging.' + MEDIA_TYPE_I18N_KEYS[mediaType]);
-  const hasCaption = !!((msg.content ?? (msg as any).body ?? '')?.trim());
+  const rawContent = (msg.content ?? (msg as any).body ?? '') || '';
+  const isFilePlaceholderOnly = /^\[(Файл|File):\s*.+\]$/i.test(rawContent.trim());
+  const hasCaption = !!rawContent.trim() && !(mediaType === 'photo' && isFilePlaceholderOnly);
   const textCls = 'text-sm leading-relaxed whitespace-pre-wrap break-words';
   const iconCls = isOutbound ? 'text-primary-foreground/80' : 'text-muted-foreground';
   const canLoadMedia =
@@ -366,7 +368,7 @@ function MessageContent({
     : null;
   const mediaUrl = useMediaUrl(mediaApiUrl);
 
-  const contentText = (msg.content ?? (msg as any).body ?? '') || '';
+  const contentText = hasCaption ? rawContent : '';
 
   const textBlock = (
     <div className={textCls}>
@@ -1383,6 +1385,8 @@ export default function MessagingPage() {
         telegram_message_id: serverMessage.telegram_message_id != null ? String(serverMessage.telegram_message_id) : tempMessage.telegram_message_id,
         telegram_date: telegramDateStr ?? tempMessage.telegram_date,
         reply_to_telegram_id: serverMessage.reply_to_telegram_id != null ? String(serverMessage.reply_to_telegram_id) : (tempMessage.reply_to_telegram_id ?? replyTo?.telegram_message_id ?? undefined),
+        telegram_media: (serverMessage.telegram_media != null && typeof serverMessage.telegram_media === 'object') ? serverMessage.telegram_media as Record<string, unknown> : tempMessage.telegram_media,
+        telegram_entities: Array.isArray(serverMessage.telegram_entities) ? serverMessage.telegram_entities as Array<Record<string, unknown>> : tempMessage.telegram_entities,
       };
 
       setMessages((prev) =>

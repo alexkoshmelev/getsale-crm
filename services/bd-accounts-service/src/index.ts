@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { RabbitMQClient, RedisClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
 import { TelegramManager } from './telegram-manager';
+import { serializeMessage } from './telegram-serialize';
 
 const app = express();
 const PORT = parseInt(String(process.env.PORT || 3007), 10);
@@ -1955,11 +1956,15 @@ app.post('/api/bd-accounts/:id/send', async (req, res) => {
       message = await telegramManager.sendMessage(id, chatId, typeof text === 'string' ? text : '', { replyTo });
     }
 
-    res.json({
+    const serialized = serializeMessage(message);
+    const payload: Record<string, unknown> = {
       success: true,
       messageId: String(message.id),
       date: message.date,
-    });
+    };
+    if (serialized.telegram_media) payload.telegram_media = serialized.telegram_media;
+    if (serialized.telegram_entities) payload.telegram_entities = serialized.telegram_entities;
+    res.json(payload);
   } catch (error: any) {
     console.error('Error sending message:', error);
     res.status(500).json({

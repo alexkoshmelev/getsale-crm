@@ -635,13 +635,34 @@ app.post('/api/messaging/send', async (req, res) => {
         });
 
         if (response.ok) {
-          const resJson = (await response.json().catch(() => ({}))) as { messageId?: string; date?: number };
+          const resJson = (await response.json().catch(() => ({}))) as {
+            messageId?: string;
+            date?: number;
+            telegram_media?: Record<string, unknown> | null;
+            telegram_entities?: Record<string, unknown>[] | null;
+          };
           const tgMessageId = resJson.messageId != null ? String(resJson.messageId).trim() : null;
           const tgDate = resJson.date != null ? new Date(resJson.date * 1000) : null;
-          await pool.query(
-            `UPDATE messages SET status = $1, telegram_message_id = $2, telegram_date = $3 WHERE id = $4`,
-            [MessageStatus.DELIVERED, tgMessageId, tgDate, message.id]
-          );
+          const hasMedia = resJson.telegram_media != null && typeof resJson.telegram_media === 'object';
+          const hasEntities = Array.isArray(resJson.telegram_entities);
+          if (hasMedia || hasEntities) {
+            await pool.query(
+              `UPDATE messages SET status = $1, telegram_message_id = $2, telegram_date = $3, telegram_media = $4, telegram_entities = $5 WHERE id = $6`,
+              [
+                MessageStatus.DELIVERED,
+                tgMessageId,
+                tgDate,
+                hasMedia ? JSON.stringify(resJson.telegram_media) : null,
+                hasEntities ? JSON.stringify(resJson.telegram_entities) : null,
+                message.id,
+              ]
+            );
+          } else {
+            await pool.query(
+              `UPDATE messages SET status = $1, telegram_message_id = $2, telegram_date = $3 WHERE id = $4`,
+              [MessageStatus.DELIVERED, tgMessageId, tgDate, message.id]
+            );
+          }
           sent = true;
         } else {
           const errJson = await response.json().catch(() => ({})) as { message?: string; error?: string };
