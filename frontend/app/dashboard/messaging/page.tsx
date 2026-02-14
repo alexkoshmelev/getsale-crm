@@ -1856,7 +1856,7 @@ export default function MessagingPage() {
   );
 
   const handleFolderDeleted = useCallback((folderId: number) => {
-    setSelectedFolderId((prev) => (prev === folderId ? null : prev));
+    setSelectedFolderId((prev) => (prev === folderId ? 0 : prev));
   }, []);
 
   const handlePinChat = async (chat: Chat) => {

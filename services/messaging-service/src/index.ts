@@ -847,7 +847,10 @@ app.post('/api/messaging/send', async (req, res) => {
         channelId: updatedRow ? String(updatedRow.channel_id ?? '') : undefined,
         content: updatedRow && typeof updatedRow.content === 'string' ? updatedRow.content : undefined,
         direction: 'outbound',
-        telegramMessageId: updatedRow?.telegram_message_id != null ? updatedRow.telegram_message_id : undefined,
+        telegramMessageId: (() => {
+          const v = updatedRow?.telegram_message_id;
+          return v != null && (typeof v === 'string' || typeof v === 'number') ? v : undefined;
+        })(),
         createdAt: updatedRow && updatedRow.created_at != null ? String(updatedRow.created_at) : undefined,
       },
     };
@@ -924,7 +927,12 @@ app.delete('/api/messaging/messages/:id', async (req, res) => {
         messageId: msg.id,
         bdAccountId: msg.bd_account_id || '',
         channelId: msg.channel_id,
-        telegramMessageId: msg.telegram_message_id ?? undefined,
+        telegramMessageId:
+          msg.telegram_message_id != null
+            ? typeof msg.telegram_message_id === 'string'
+              ? (Number.isNaN(parseInt(msg.telegram_message_id, 10)) ? undefined : parseInt(msg.telegram_message_id, 10))
+              : msg.telegram_message_id
+            : undefined,
       },
     };
     await rabbitmq.publishEvent(ev);
