@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useTranslation } from 'react-i18next';
 import {
   Plus,
@@ -13,6 +14,7 @@ import {
   Mail,
   Phone,
   Briefcase,
+  Filter,
 } from 'lucide-react';
 import { apiClient } from '@/lib/api/client';
 import {
@@ -37,6 +39,7 @@ import { SlideOver } from '@/components/ui/SlideOver';
 import { CompanyFormModal } from '@/components/crm/CompanyFormModal';
 import { ContactFormModal } from '@/components/crm/ContactFormModal';
 import { DealFormModal } from '@/components/crm/DealFormModal';
+import { AddToFunnelModal } from '@/components/crm/AddToFunnelModal';
 import { clsx } from 'clsx';
 
 type TabId = 'companies' | 'contacts' | 'deals';
@@ -64,8 +67,12 @@ const TABS: { id: TabId; i18nKey: string; icon: typeof Building2 }[] = [
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 10;
 
+const VALID_TABS: TabId[] = ['companies', 'contacts', 'deals'];
+
 export default function CRMPage() {
   const { t } = useTranslation();
+  const searchParams = useSearchParams();
+  const urlOpenApplied = useRef(false);
   const [activeTab, setActiveTab] = useState<TabId>('companies');
   const [search, setSearch] = useState('');
   const [searchDebounced, setSearchDebounced] = useState('');
@@ -88,11 +95,25 @@ export default function CRMPage() {
   const [companyEdit, setCompanyEdit] = useState<Company | null>(null);
   const [contactModalOpen, setContactModalOpen] = useState(false);
   const [contactEdit, setContactEdit] = useState<Contact | null>(null);
+  const [addToFunnelContact, setAddToFunnelContact] = useState<Contact | null>(null);
   const [dealModalOpen, setDealModalOpen] = useState(false);
   const [dealEdit, setDealEdit] = useState<Deal | null>(null);
 
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: TabId; id: string; name: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // Open entity from URL (e.g. from command palette: /dashboard/crm?tab=companies&open=uuid)
+  useEffect(() => {
+    if (urlOpenApplied.current) return;
+    const tab = searchParams.get('tab');
+    const open = searchParams.get('open');
+    if (tab && open && VALID_TABS.includes(tab as TabId)) {
+      urlOpenApplied.current = true;
+      setActiveTab(tab as TabId);
+      setDetailType(tab as TabId);
+      setDetailId(open);
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     const t = setTimeout(() => setSearchDebounced(search), 300);
@@ -416,6 +437,15 @@ export default function CRMPage() {
                         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
                             type="button"
+                            onClick={(e) => { e.stopPropagation(); setAddToFunnelContact(c); }}
+                            className="p-2 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground"
+                            title={t('pipeline.addToFunnel')}
+                            aria-label={t('pipeline.addToFunnel')}
+                          >
+                            <Filter className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
                             onClick={(e) => { e.stopPropagation(); setContactEdit(c); setContactModalOpen(true); }}
                             className="p-2 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground"
                             aria-label={t('crm.editAction')}
@@ -574,6 +604,7 @@ export default function CRMPage() {
             contact={detailData as Contact}
             onEdit={() => { setContactEdit(detailData as Contact); setContactModalOpen(true); setDetailId(null); }}
             onDelete={() => setDeleteConfirm({ type: 'contacts', id: (detailData as Contact).id, name: getContactDisplayName(detailData as Contact) || (detailData as Contact).email || '' })}
+            onAddToFunnel={() => setAddToFunnelContact(detailData as Contact)}
             t={t}
           />
         )}
@@ -599,6 +630,12 @@ export default function CRMPage() {
         onClose={() => { setContactModalOpen(false); setContactEdit(null); }}
         onSuccess={() => { refresh(); setContactModalOpen(false); setContactEdit(null); }}
         edit={contactEdit}
+      />
+      <AddToFunnelModal
+        isOpen={!!addToFunnelContact}
+        onClose={() => setAddToFunnelContact(null)}
+        contactId={addToFunnelContact?.id ?? ''}
+        contactName={addToFunnelContact ? getContactDisplayName(addToFunnelContact) : undefined}
       />
       <DealFormModal
         isOpen={dealModalOpen}
@@ -675,11 +712,13 @@ function ContactDetail({
   contact,
   onEdit,
   onDelete,
+  onAddToFunnel,
   t,
 }: {
   contact: Contact & { companyName?: string | null };
   onEdit: () => void;
   onDelete: () => void;
+  onAddToFunnel?: () => void;
   t: (key: string) => string;
 }) {
   const name = getContactDisplayName(contact);
@@ -725,7 +764,13 @@ function ContactDetail({
           </div>
         )}
       </div>
-      <div className="flex gap-2 pt-4 border-t border-border">
+      <div className="flex flex-wrap gap-2 pt-4 border-t border-border">
+        {onAddToFunnel && (
+          <Button variant="outline" size="sm" onClick={onAddToFunnel} className="gap-1.5">
+            <Filter className="w-4 h-4" />
+            {t('pipeline.addToFunnel')}
+          </Button>
+        )}
         <Button variant="outline" size="sm" onClick={onEdit}>{t('crm.editAction')}</Button>
         <Button variant="danger" size="sm" onClick={onDelete}>{t('crm.deleteAction')}</Button>
       </div>

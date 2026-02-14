@@ -166,7 +166,12 @@ app.post('/api/team/members/invite', async (req, res) => {
     const user = getUser(req);
     const { teamId, email, role } = req.body;
 
-    if (!email) {
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    if (!normalizedEmail) {
       return res.status(400).json({ error: 'Email is required' });
     }
 
@@ -183,10 +188,25 @@ app.post('/api/team/members/invite', async (req, res) => {
       actualTeamId = defaultTeamResult.rows[0].id;
     }
 
-    // Check if user exists by email
+    // Duplicate check: pending invitation for this email in this organization (any team)
+    const pendingInvite = await pool.query(
+      `SELECT 1 FROM team_invitations ti
+       JOIN teams t ON t.id = ti.team_id AND t.organization_id = $1
+       WHERE LOWER(TRIM(ti.email)) = $2 AND ti.accepted_at IS NULL AND ti.expires_at > NOW()
+       LIMIT 1`,
+      [user.organizationId, normalizedEmail]
+    );
+    if (pendingInvite.rows.length > 0) {
+      return res.status(409).json({
+        error: 'User is already invited',
+        code: 'ALREADY_INVITED',
+      });
+    }
+
+    // Check if user exists by email in this organization
     const userResult = await pool.query(
-      `SELECT id FROM users WHERE email = $1 AND organization_id = $2`,
-      [email, user.organizationId]
+      `SELECT id FROM users WHERE LOWER(TRIM(email)) = $1 AND organization_id = $2`,
+      [normalizedEmail, user.organizationId]
     );
 
     if (userResult.rows.length > 0) {
@@ -233,7 +253,7 @@ app.post('/api/team/members/invite', async (req, res) => {
       const newUserResult = await pool.query(
         `INSERT INTO users (email, password_hash, organization_id, role)
          VALUES ($1, $2, $3, $4) RETURNING *`,
-        [email, passwordHash, user.organizationId, normalizedRole]
+        [normalizedEmail, passwordHash, user.organizationId, normalizedRole]
       );
       const newUser = newUserResult.rows[0];
 
@@ -260,7 +280,7 @@ app.post('/api/team/members/invite', async (req, res) => {
       await pool.query(
         `INSERT INTO team_invitations (team_id, email, role, invited_by, token, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [actualTeamId, email, normalizedRole, user.id, invitationToken, expiresAt]
+        [actualTeamId, normalizedEmail, normalizedRole, user.id, invitationToken, expiresAt]
       );
 
       // TODO: Send invitation email with token and temp password

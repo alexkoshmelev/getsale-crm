@@ -173,6 +173,56 @@ app.post('/api/ai/drafts/generate', async (req, res) => {
   }
 });
 
+// Summarize chat messages (for AI panel in messenger)
+app.post('/api/ai/chat/summarize', async (req, res) => {
+  try {
+    getUser(req);
+    const { messages } = req.body as { messages?: Array<{ content?: string; role?: string }> };
+    const list = Array.isArray(messages) ? messages : [];
+    const texts = list
+      .map((m) => (typeof m.content === 'string' ? m.content.trim() : ''))
+      .filter(Boolean)
+      .slice(-50); // last 50 messages
+    if (texts.length === 0) {
+      return res.json({ summary: '', empty: true });
+    }
+    const conversation = texts.join('\n');
+    if (!isOpenAIKeyConfigured || !openai) {
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        code: 'OPENAI_NOT_CONFIGURED',
+        message: OPENAI_NOT_CONFIGURED_MSG,
+      });
+    }
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a concise assistant. Summarize the following chat conversation in 2-4 short sentences. Focus on: main topic, key decisions or requests, and next steps if any. Use the same language as the conversation.',
+        },
+        { role: 'user', content: conversation.slice(-8000) },
+      ],
+      temperature: 0.3,
+      max_tokens: 300,
+    });
+    const summary = completion.choices[0].message.content?.trim() || '';
+    res.json({ summary });
+  } catch (error: unknown) {
+    const err = error as Error & { statusCode?: number };
+    if (err.statusCode === 503 || err.message === OPENAI_NOT_CONFIGURED_MSG) {
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        code: 'OPENAI_NOT_CONFIGURED',
+        message: OPENAI_NOT_CONFIGURED_MSG,
+      });
+    }
+    console.error('Error summarizing chat:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get draft
 app.get('/api/ai/drafts/:id', async (req, res) => {
   try {

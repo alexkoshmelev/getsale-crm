@@ -139,38 +139,46 @@ export function serializeMessage(msg: Api.Message): SerializedTelegramMessage {
   const text = getMessageText(msg);
 
   let replyToTelegramId: string | null = null;
-  const replyTo = msg.replyTo ?? (msg as any).replyTo;
+  // Support both Api.Message (replyTo getter) and raw TL from push (reply_to object)
+  const replyTo = msg.replyTo ?? (msg as any).replyTo ?? (msg as any).reply_to;
   if (replyTo) {
     const replyHeader = replyTo as any;
-    replyToTelegramId = replyHeader.replyToMsgId != null ? String(replyHeader.replyToMsgId) : null;
+    replyToTelegramId =
+      replyHeader.replyToMsgId != null ? String(replyHeader.replyToMsgId)
+        : replyHeader.reply_to_msg_id != null ? String(replyHeader.reply_to_msg_id) : null;
   }
+  if (!replyToTelegramId && (msg as any).reply_to?.reply_to_msg_id != null)
+    replyToTelegramId = String((msg as any).reply_to.reply_to_msg_id);
+  if (!replyToTelegramId && (msg as any).reply_to_msg_id != null)
+    replyToTelegramId = String((msg as any).reply_to_msg_id);
 
+  const raw = msg as any;
   const extra: Record<string, unknown> = {};
-  if (msg.views != null) extra.views = msg.views;
-  if (msg.forwards != null) extra.forwards = msg.forwards;
-  if (msg.editDate != null) extra.edit_date = msg.editDate;
-  if (msg.postAuthor != null) extra.post_author = msg.postAuthor;
-  if (msg.groupedId != null) extra.grouped_id = String(msg.groupedId);
-  if (msg.viaBotId != null) extra.via_bot_id = String(msg.viaBotId);
-  if (msg.post !== undefined) extra.post = msg.post;
-  if (msg.silent !== undefined) extra.silent = msg.silent;
-  if (msg.pinned !== undefined) extra.pinned = msg.pinned;
-  if (msg.noforwards !== undefined) extra.noforwards = msg.noforwards;
-  if (msg.mentioned !== undefined) extra.mentioned = msg.mentioned;
-  if (msg.mediaUnread !== undefined) extra.media_unread = msg.mediaUnread;
-  const fwd = serializeFwdFrom(msg.fwdFrom ?? (msg as any).fwdFrom);
+  if (msg.views != null || raw.views != null) extra.views = msg.views ?? raw.views;
+  if (msg.forwards != null || raw.forwards != null) extra.forwards = msg.forwards ?? raw.forwards;
+  if (msg.editDate != null || raw.editDate != null || raw.edit_date != null) extra.edit_date = msg.editDate ?? raw.editDate ?? raw.edit_date;
+  if (msg.postAuthor != null || raw.postAuthor != null) extra.post_author = msg.postAuthor ?? raw.postAuthor;
+  if (msg.groupedId != null || raw.groupedId != null) extra.grouped_id = String(msg.groupedId ?? raw.groupedId ?? '');
+  if (msg.viaBotId != null || raw.viaBotId != null) extra.via_bot_id = String(msg.viaBotId ?? raw.viaBotId ?? '');
+  if (msg.post !== undefined || raw.post !== undefined) extra.post = msg.post ?? raw.post;
+  if (msg.silent !== undefined || raw.silent !== undefined) extra.silent = msg.silent ?? raw.silent;
+  if (msg.pinned !== undefined || raw.pinned !== undefined) extra.pinned = msg.pinned ?? raw.pinned;
+  if (msg.noforwards !== undefined || raw.noforwards !== undefined) extra.noforwards = msg.noforwards ?? raw.noforwards;
+  if (msg.mentioned !== undefined || raw.mentioned !== undefined) extra.mentioned = msg.mentioned ?? raw.mentioned;
+  if (msg.mediaUnread !== undefined || raw.mediaUnread !== undefined) extra.media_unread = msg.mediaUnread ?? raw.mediaUnread;
+  const fwd = serializeFwdFrom(msg.fwdFrom ?? raw.fwdFrom ?? raw.fwd_from);
   if (fwd) extra.fwd_from = fwd;
-  const reactions = serializeReactions(msg.reactions ?? (msg as any).reactions);
+  const reactions = serializeReactions(msg.reactions ?? raw.reactions);
   if (reactions) extra.reactions = reactions;
-  if (msg.replyMarkup) extra.reply_markup = toJsonSafe(msg.replyMarkup);
-  if (msg.replies) extra.replies = toJsonSafe(msg.replies);
+  if (msg.replyMarkup || raw.replyMarkup || raw.reply_markup) extra.reply_markup = toJsonSafe(msg.replyMarkup ?? raw.replyMarkup ?? raw.reply_markup);
+  if (msg.replies || raw.replies) extra.replies = toJsonSafe(msg.replies ?? raw.replies);
 
   return {
     telegram_message_id: id,
     telegram_date: date,
     content: text,
-    telegram_entities: serializeEntities(msg.entities ?? (msg as any).entities ?? undefined),
-    telegram_media: serializeMedia(msg.media ?? (msg as any).media ?? undefined),
+    telegram_entities: serializeEntities(msg.entities ?? raw.entities ?? undefined),
+    telegram_media: serializeMedia(msg.media ?? raw.media ?? undefined),
     reply_to_telegram_id: replyToTelegramId,
     telegram_extra: Object.keys(extra).length ? extra : {},
   };

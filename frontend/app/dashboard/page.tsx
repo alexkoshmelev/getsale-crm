@@ -7,7 +7,6 @@ import axios from 'axios';
 import { Building2, Users, MessageSquare, TrendingUp, ArrowRight } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
-import { OnboardingBanner } from '@/components/layout/OnboardingBanner';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -66,7 +65,6 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-8">
-      <OnboardingBanner />
       <div>
         <h1 className="font-heading text-3xl font-bold text-foreground tracking-tight mb-1.5">
           {t('dashboard.title')}

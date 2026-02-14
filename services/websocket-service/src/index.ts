@@ -118,17 +118,34 @@ async function subscribeToEvents() {
       EventType.BD_ACCOUNT_SYNC_PROGRESS,
       EventType.BD_ACCOUNT_SYNC_COMPLETED,
       EventType.BD_ACCOUNT_SYNC_FAILED,
+      EventType.BD_ACCOUNT_TELEGRAM_UPDATE,
       EventType.CONTACT_CREATED,
     ],
     async (event) => {
       try {
-        // Broadcast to organization room (except message.received/sent — только подписчики bd-account получают, чтобы не слать уведомления по чужим чатам)
-        if (event.type !== EventType.MESSAGE_RECEIVED && event.type !== EventType.MESSAGE_SENT) {
+        // Broadcast to organization room (except message.received/sent и telegram_update — они только в bd-account)
+        if (
+          event.type !== EventType.MESSAGE_RECEIVED &&
+          event.type !== EventType.MESSAGE_SENT &&
+          event.type !== EventType.BD_ACCOUNT_TELEGRAM_UPDATE
+        ) {
           io.to(`org:${event.organizationId}`).emit('event', {
             type: event.type,
             data: event.data,
             timestamp: event.timestamp,
           });
+        }
+
+        // Telegram presence: typing, user status, read receipt, draft — в комнату bd-account для Messaging
+        if (event.type === EventType.BD_ACCOUNT_TELEGRAM_UPDATE) {
+          const data = event.data as any;
+          if (data?.bdAccountId) {
+            io.to(`bd-account:${data.bdAccountId}`).emit('event', {
+              type: event.type,
+              data: event.data,
+              timestamp: event.timestamp,
+            });
+          }
         }
 
         // Сообщения — только в комнаты bd-account и чата (подписчики аккаунта = те, кто отображает чаты этого аккаунта)
@@ -160,6 +177,18 @@ async function subscribeToEvents() {
                 timestamp: event.timestamp,
               });
             }
+          }
+        }
+
+        // Удаление и редактирование сообщений — в комнату bd-account, чтобы Messaging обновлял список
+        if (event.type === EventType.MESSAGE_DELETED || event.type === EventType.MESSAGE_EDITED) {
+          const data = event.data as any;
+          if (data?.bdAccountId) {
+            io.to(`bd-account:${data.bdAccountId}`).emit('event', {
+              type: event.type,
+              data: event.data,
+              timestamp: event.timestamp,
+            });
           }
         }
 
@@ -248,9 +277,9 @@ const RATE_LIMIT_WINDOW = 60000; // 1 minute
 const RATE_LIMIT_MAX = 100; // max events per window
 const eventCounts = new Map<string, { count: number; resetAt: number }>();
 
-// Heartbeat/ping mechanism
+// Heartbeat/ping mechanism (увеличен timeout, чтобы вкладка в фоне / тормоза не рвали соединение)
 const HEARTBEAT_INTERVAL = 30000; // 30 seconds
-const HEARTBEAT_TIMEOUT = 60000; // 60 seconds
+const HEARTBEAT_TIMEOUT = 90000; // 90 seconds — ждём pong дольше при медленном клиенте или фоновой вкладке
 
 io.on('connection', (socket) => {
   const user = (socket as any).user;

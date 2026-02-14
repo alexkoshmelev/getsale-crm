@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { GripVertical, Plus, X } from 'lucide-react';
+import { GripVertical, Plus, X, Trash2 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 
@@ -29,6 +29,8 @@ interface FolderManageModalProps {
   onCreateFolder: (folder_title: string, icon: string | null) => Promise<SyncFolderItem | null>;
   onReorder: (order: string[]) => Promise<SyncFolderItem[] | null>;
   onUpdateFolder: (folderRowId: string, data: { folder_title?: string; icon?: string | null }) => Promise<SyncFolderItem | null>;
+  onDeleteFolder?: (folderRowId: string) => Promise<void>;
+  onFolderDeleted?: (folderId: number) => void;
 }
 
 export function FolderManageModal({
@@ -43,6 +45,8 @@ export function FolderManageModal({
   onCreateFolder,
   onReorder,
   onUpdateFolder,
+  onDeleteFolder,
+  onFolderDeleted,
 }: FolderManageModalProps) {
   const { t } = useTranslation();
   const [draggedId, setDraggedId] = useState<string | null>(null);
@@ -130,12 +134,13 @@ export function FolderManageModal({
     <>
       <div className="fixed inset-0 bg-black/50 z-50" aria-hidden onClick={onClose} />
       <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md bg-card border border-border rounded-xl shadow-xl p-6 max-h-[85vh] flex flex-col">
-        <div className="flex items-center justify-between mb-4 shrink-0">
+        <div className="flex items-center justify-between mb-1 shrink-0">
           <h2 className="font-heading text-lg font-semibold text-foreground">{t('messaging.folderManageTitle')}</h2>
           <button type="button" onClick={onClose} className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground">
             <X className="w-5 h-5" />
           </button>
         </div>
+        <p className="text-xs text-muted-foreground mb-4 shrink-0">{t('messaging.folderManageSafetyHint')}</p>
         <div className="mb-4 p-3 rounded-lg bg-muted/50 border border-border shrink-0">
           <label className="flex items-center gap-2 cursor-pointer">
             <input
@@ -177,6 +182,29 @@ export function FolderManageModal({
                 <span className="text-sm truncate flex-1">{f.folder_title}</span>
               )}
               <span className="text-[10px] text-muted-foreground shrink-0">{f.is_user_created ? 'CRM' : 'TG'}</span>
+              {isAccountOwner && f.is_user_created && onDeleteFolder && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!window.confirm(t('messaging.folderDeleteConfirm', { name: f.folder_title }))) return;
+                    setSaving(true);
+                    setError('');
+                    try {
+                      await onDeleteFolder(f.id);
+                      onFoldersChange(folders.filter((x) => x.id !== f.id));
+                      onFolderDeleted?.(f.folder_id);
+                    } catch (err: any) {
+                      setError(err?.response?.data?.error || t('common.error'));
+                    } finally {
+                      setSaving(false);
+                    }
+                  }}
+                  className="p-1.5 rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors shrink-0"
+                  title={t('messaging.folderDelete')}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              )}
             </div>
           ))}
         </div>

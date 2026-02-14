@@ -212,6 +212,7 @@ const messagingProxy = createProxyMiddleware({
     if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
+      if (user.role) proxyReq.setHeader('X-User-Role', user.role);
     }
   },
   onProxyRes: (proxyRes, req, res) => {
@@ -294,6 +295,7 @@ const bdAccountsProxy = createProxyMiddleware({
     if (user && user.id && user.organizationId) {
       proxyReq.setHeader('X-User-Id', user.id);
       proxyReq.setHeader('X-Organization-Id', user.organizationId);
+      if (user.role) proxyReq.setHeader('X-User-Role', user.role);
     } else {
       console.error(`[API Gateway] ❌ User not found in request for ${req.url}`);
     }

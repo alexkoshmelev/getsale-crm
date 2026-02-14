@@ -55,6 +55,8 @@ export enum EventType {
   BD_ACCOUNT_SYNC_PROGRESS = 'bd_account.sync.progress',
   BD_ACCOUNT_SYNC_COMPLETED = 'bd_account.sync.completed',
   BD_ACCOUNT_SYNC_FAILED = 'bd_account.sync.failed',
+  /** Telegram presence/UI updates: typing, user status, read receipt, draft. Forwarded to frontend via WebSocket. */
+  BD_ACCOUNT_TELEGRAM_UPDATE = 'bd_account.telegram_update',
   
   // Subscription
   SUBSCRIPTION_CREATED = 'subscription.created',
@@ -111,6 +113,12 @@ export interface MessageReceivedEvent extends BaseEvent {
     bdAccountId?: string;
     content: string;
     direction?: 'inbound' | 'outbound';
+    telegramMessageId?: string | number;
+    replyToTelegramId?: string | number;
+    /** Для отображения реплая и медиа на фронте без доп. запроса */
+    telegramMedia?: Record<string, unknown> | null;
+    telegramEntities?: Array<Record<string, unknown>> | null;
+    createdAt?: string;
   };
 }
 
@@ -119,8 +127,13 @@ export interface MessageSentEvent extends BaseEvent {
   data: {
     messageId: string;
     channel: string;
+    channelId?: string;
     contactId?: string;
     bdAccountId?: string;
+    content?: string;
+    direction?: 'inbound' | 'outbound';
+    telegramMessageId?: string | number;
+    createdAt?: string;
   };
 }
 
@@ -218,6 +231,84 @@ export interface BDAccountSyncFailedEvent extends BaseEvent {
   data: {
     bdAccountId: string;
     error: string;
+  };
+}
+
+/** Telegram update kinds forwarded to frontend via bd_account.telegram_update. */
+export type TelegramUpdateKind =
+  | 'typing'
+  | 'user_status'
+  | 'read_inbox'
+  | 'read_channel_inbox'
+  | 'read_outbox'
+  | 'read_channel_outbox'
+  | 'draft'
+  | 'message_id_confirmed'
+  | 'dialog_pinned'
+  | 'pinned_dialogs'
+  | 'notify_settings'
+  | 'user_name'
+  | 'user_phone'
+  | 'chat_participant_add'
+  | 'chat_participant_delete'
+  | 'scheduled_message'
+  | 'delete_scheduled_messages'
+  | 'message_poll'
+  | 'message_poll_vote'
+  | 'config'
+  | 'dc_options'
+  | 'lang_pack'
+  | 'theme'
+  | 'phone_call'
+  | 'callback_query'
+  | 'channel_too_long';
+
+/** Telegram presence/UI update. Payload depends on updateKind. */
+export interface BDAccountTelegramUpdateEvent extends BaseEvent {
+  type: EventType.BD_ACCOUNT_TELEGRAM_UPDATE;
+  data: {
+    bdAccountId: string;
+    organizationId: string;
+    updateKind: TelegramUpdateKind;
+    channelId?: string;
+    userId?: string;
+    action?: string;
+    status?: string;
+    expires?: number;
+    maxId?: number;
+    draftText?: string;
+    replyToMsgId?: number;
+    /** updateMessageID: confirmed telegram message id */
+    telegramMessageId?: number;
+    randomId?: string;
+    /** dialog_pinned / pinned_dialogs */
+    pinned?: boolean;
+    folderId?: number;
+    order?: string[];
+    /** user_name */
+    firstName?: string;
+    lastName?: string;
+    usernames?: string[];
+    /** user_phone */
+    phone?: string;
+    /** chat_participant_add/delete */
+    inviterId?: string;
+    version?: number;
+    /** scheduled_message / delete_scheduled_messages */
+    messageIds?: number[];
+    /** message_poll / message_poll_vote */
+    pollId?: string;
+    poll?: Record<string, unknown>;
+    results?: Record<string, unknown>;
+    options?: string[];
+    qts?: number;
+    /** channel_too_long: pts hint */
+    pts?: number;
+    /** callback_query / phone_call: id */
+    queryId?: string;
+    phoneCallId?: string;
+    /** notify_settings: optional JSON-serializable */
+    notifySettings?: Record<string, unknown>;
   };
 }
 
@@ -436,6 +527,7 @@ export type Event =
   | BDAccountSyncProgressEvent
   | BDAccountSyncCompletedEvent
   | BDAccountSyncFailedEvent
+  | BDAccountTelegramUpdateEvent
   | SubscriptionCreatedEvent
   | SubscriptionUpdatedEvent
   | SubscriptionCancelledEvent

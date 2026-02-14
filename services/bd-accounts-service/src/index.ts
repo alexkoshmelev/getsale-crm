@@ -90,7 +90,25 @@ function getUser(req: express.Request) {
   return {
     id: req.headers['x-user-id'] as string,
     organizationId: req.headers['x-organization-id'] as string,
+    role: (req.headers['x-user-role'] as string) || '',
   };
+}
+
+/** Проверка права по role_permissions (owner всегда true). */
+async function canPermission(pool: Pool, role: string, resource: string, action: string): Promise<boolean> {
+  const roleLower = (role || '').toLowerCase();
+  try {
+    const r = await pool.query(
+      `SELECT 1 FROM role_permissions WHERE role = $1 AND resource = $2 AND (action = $3 OR action = '*') LIMIT 1`,
+      [roleLower, resource, action]
+    );
+    if (r.rows.length > 0) return true;
+    if (roleLower === 'owner') return true;
+    return false;
+  } catch {
+    if (roleLower === 'owner') return true;
+    return false;
+  }
 }
 
 /** Telegram API credentials from env. */
@@ -1130,6 +1148,49 @@ app.patch('/api/bd-accounts/:id/sync-folders/:folderRowId', async (req, res) => 
   }
 });
 
+// Delete user-created folder (move chats to "no folder", then delete folder row)
+app.delete('/api/bd-accounts/:id/sync-folders/:folderRowId', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id: accountId, folderRowId } = req.params;
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [accountId, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    const isOwner = await requireAccountOwner(accountId, user);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Only the account owner can delete folders' });
+    }
+    const folderRow = await pool.query(
+      'SELECT id, folder_id, is_user_created FROM bd_account_sync_folders WHERE id = $1 AND bd_account_id = $2',
+      [folderRowId, accountId]
+    );
+    if (folderRow.rows.length === 0) {
+      return res.status(404).json({ error: 'Folder not found' });
+    }
+    const folder = folderRow.rows[0];
+    if (!folder.is_user_created) {
+      return res.status(400).json({ error: 'Only user-created folders can be deleted. Telegram folders are read-only.' });
+    }
+    const folderIdNum = Number(folder.folder_id);
+    await pool.query(
+      'UPDATE bd_account_sync_chats SET folder_id = NULL WHERE bd_account_id = $1 AND folder_id = $2',
+      [accountId, folderIdNum]
+    );
+    await pool.query(
+      'DELETE FROM bd_account_sync_folders WHERE id = $1 AND bd_account_id = $2',
+      [folderRowId, accountId]
+    );
+    res.status(204).send();
+  } catch (error: any) {
+    console.error('Error deleting folder:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
 // Refresh chats from selected folders (no change to folder selection)
 app.post('/api/bd-accounts/:id/sync-folders-refresh', async (req, res) => {
   try {
@@ -1509,8 +1570,9 @@ app.delete('/api/bd-accounts/:id/chats/:chatId', async (req, res) => {
       return res.status(404).json({ error: 'BD account not found' });
     }
     const isOwner = await requireAccountOwner(accountId, user);
-    if (!isOwner) {
-      return res.status(403).json({ error: 'Only the account owner can remove a chat from the list' });
+    const canDeleteChat = await canPermission(pool, user.role, 'bd_accounts', 'chat.delete');
+    if (!isOwner && !canDeleteChat) {
+      return res.status(403).json({ error: 'No permission to remove a chat from the list' });
     }
 
     await pool.query('DELETE FROM bd_account_sync_chat_folders WHERE bd_account_id = $1 AND telegram_chat_id = $2', [accountId, chatId]);
@@ -1759,7 +1821,7 @@ app.get('/api/bd-accounts/:id/media', async (req, res) => {
   }
 });
 
-// Disconnect account (temporarily disable) — только владелец
+// Disconnect account (temporarily disable) — владелец или право bd_accounts.settings
 app.post('/api/bd-accounts/:id/disconnect', async (req, res) => {
   try {
     const user = getUser(req);
@@ -1773,8 +1835,9 @@ app.post('/api/bd-accounts/:id/disconnect', async (req, res) => {
       return res.status(404).json({ error: 'BD account not found' });
     }
     const isOwner = await requireAccountOwner(id, user);
-    if (!isOwner) {
-      return res.status(403).json({ error: 'Only the account owner can disconnect' });
+    const canSettings = await canPermission(pool, user.role, 'bd_accounts', 'settings');
+    if (!isOwner && !canSettings) {
+      return res.status(403).json({ error: 'No permission to disconnect account' });
     }
 
     await telegramManager.disconnectAccount(id);
@@ -1794,7 +1857,7 @@ app.post('/api/bd-accounts/:id/disconnect', async (req, res) => {
   }
 });
 
-// Enable account (reconnect after disconnect) — только владелец
+// Enable account (reconnect after disconnect) — владелец или право bd_accounts.settings
 app.post('/api/bd-accounts/:id/enable', async (req, res) => {
   try {
     const user = getUser(req);
@@ -1809,8 +1872,9 @@ app.post('/api/bd-accounts/:id/enable', async (req, res) => {
       return res.status(404).json({ error: 'BD account not found' });
     }
     const isOwner = await requireAccountOwner(id, user);
-    if (!isOwner) {
-      return res.status(403).json({ error: 'Only the account owner can enable' });
+    const canSettings = await canPermission(pool, user.role, 'bd_accounts', 'settings');
+    if (!isOwner && !canSettings) {
+      return res.status(403).json({ error: 'No permission to enable account' });
     }
 
     const row = accountResult.rows[0] as any;
@@ -1843,7 +1907,7 @@ app.post('/api/bd-accounts/:id/enable', async (req, res) => {
   }
 });
 
-// Delete account permanently — только владелец. Сообщения остаются, bd_account_id обнуляется.
+// Delete account permanently — владелец или право bd_accounts.settings. Сообщения остаются, bd_account_id обнуляется.
 app.delete('/api/bd-accounts/:id', async (req, res) => {
   try {
     const user = getUser(req);
@@ -1857,8 +1921,9 @@ app.delete('/api/bd-accounts/:id', async (req, res) => {
       return res.status(404).json({ error: 'BD account not found' });
     }
     const isOwner = await requireAccountOwner(id, user);
-    if (!isOwner) {
-      return res.status(403).json({ error: 'Only the account owner can delete' });
+    const canSettings = await canPermission(pool, user.role, 'bd_accounts', 'settings');
+    if (!isOwner && !canSettings) {
+      return res.status(403).json({ error: 'No permission to delete account' });
     }
 
     await telegramManager.disconnectAccount(id);
@@ -1970,6 +2035,49 @@ app.post('/api/bd-accounts/:id/send', async (req, res) => {
     res.status(500).json({
       error: 'Internal server error',
       message: error.message || 'Failed to send message',
+    });
+  }
+});
+
+// Save draft in Telegram (messages.SaveDraft). Body: { channelId, text?, replyToMsgId? }. Empty text clears draft.
+app.post('/api/bd-accounts/:id/draft', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { channelId, text, replyToMsgId } = req.body;
+
+    if (!channelId) {
+      return res.status(400).json({ error: 'Missing required field: channelId' });
+    }
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    if (!telegramManager.isConnected(id)) {
+      return res.status(400).json({ error: 'BD account is not connected' });
+    }
+
+    const syncCheck = await pool.query(
+      'SELECT 1 FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2',
+      [id, String(channelId)]
+    );
+    if (syncCheck.rows.length === 0) {
+      return res.status(403).json({ error: 'Chat is not in sync list for this account' });
+    }
+
+    await telegramManager.saveDraft(id, String(channelId), typeof text === 'string' ? text : '', {
+      replyToMsgId: replyToMsgId != null && String(replyToMsgId).trim() ? Number(replyToMsgId) : undefined,
+    });
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Error saving draft:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message || 'Failed to save draft',
     });
   }
 });

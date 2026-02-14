@@ -2,8 +2,8 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { HelpCircle, BookOpen, Mail } from 'lucide-react';
-import { clsx } from 'clsx';
+import { HelpCircle, BookOpen, Mail, Sparkles } from 'lucide-react';
+import { ONBOARDING_RESTART_EVENT } from '@/components/layout/OnboardingModal';
 
 export function HelpDropdown() {
   const { t } = useTranslation();
@@ -31,6 +31,17 @@ export function HelpDropdown() {
       {open && (
         <div className="absolute right-0 top-full mt-1 w-56 rounded-xl border border-border bg-card shadow-soft-lg overflow-hidden z-50 animate-in fade-in slide-in-from-top-2 duration-150">
           <div className="p-2">
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                window.dispatchEvent(new CustomEvent(ONBOARDING_RESTART_EVENT));
+              }}
+              className="flex w-full items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-accent transition-colors text-sm text-foreground"
+            >
+              <Sparkles className="w-4 h-4 text-muted-foreground shrink-0" />
+              {t('onboarding.runAgain')}
+            </button>
             <a
               href="#"
               onClick={(e) => e.preventDefault()}

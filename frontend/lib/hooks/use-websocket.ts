@@ -46,8 +46,8 @@ export function useWebSocket() {
         transports: ['websocket', 'polling'],
         reconnection: true,
         reconnectionDelay: 1000,
-        reconnectionDelayMax: 5000,
-        reconnectionAttempts: 5,
+        reconnectionDelayMax: 10000,
+        reconnectionAttempts: 100,
       });
       socketRef.current = socket;
     } else {
@@ -164,6 +164,30 @@ export function useWebSocket() {
       subscribe(`user:${user.id}`);
     }
   }, [isConnected, user?.organizationId, user?.id, subscribe]);
+
+  // При возврате на вкладку — переподключаемся, если сокет отвалился (браузер мог закрыть соединение в фоне)
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      const s = socketRef.current;
+      if (!s || !accessToken) return;
+      if (s.connected) return;
+      s.connect();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [accessToken]);
+
+  // Периодическая попытка переподключения при длительном отключении (на случай исчерпания попыток Socket.IO или «тихого» обрыва)
+  useEffect(() => {
+    if (!accessToken) return;
+    const interval = setInterval(() => {
+      const s = socketRef.current;
+      if (!s || s.connected || (s as Socket & { connecting?: boolean }).connecting) return;
+      s.connect();
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [accessToken]);
 
   return {
     isConnected,

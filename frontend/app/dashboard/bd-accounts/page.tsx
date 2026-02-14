@@ -3,9 +3,10 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useSearchParams, useRouter } from 'next/navigation';
+import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
 import { useWebSocketContext } from '@/lib/contexts/websocket-context';
-import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Power, PowerOff, Search, FolderOpen, ChevronRight, ChevronDown, User, RefreshCw } from 'lucide-react';
+import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Power, PowerOff, Search, FolderOpen, ChevronRight, ChevronDown, User, RefreshCw, ShieldCheck } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
@@ -114,6 +115,7 @@ interface SyncChatRow {
 }
 
 export default function BDAccountsPage() {
+  const { t } = useTranslation();
   const searchParams = useSearchParams();
   const router = useRouter();
   const { subscribe, unsubscribe, on, off, isConnected } = useWebSocketContext();
@@ -134,6 +136,7 @@ export default function BDAccountsPage() {
   const [qrPendingReason, setQrPendingReason] = useState<'password' | null>(null);
   const [qrJustConnected, setQrJustConnected] = useState(false);
   const [startingQr, setStartingQr] = useState(false);
+  const qrPasswordSubmittedRef = useRef(false);
   const [selectedChatIds, setSelectedChatIds] = useState<Set<string>>(new Set());
   const [selectChatsSearch, setSelectChatsSearch] = useState('');
   const [expandedFolderId, setExpandedFolderId] = useState<number | null>(null);
@@ -419,6 +422,7 @@ export default function BDAccountsPage() {
     setQrState(null);
     setQr2faPassword('');
     setQrPendingReason(null);
+    qrPasswordSubmittedRef.current = false;
     setQrJustConnected(false);
     setError(null);
     setSelectedChatIds(new Set());
@@ -431,11 +435,14 @@ export default function BDAccountsPage() {
     setSubmittingQrPassword(true);
     setError(null);
     setQrPendingReason('password');
+    qrPasswordSubmittedRef.current = true;
+    setQrState((prev) => (prev ? { ...prev, status: 'pending' } : null));
     try {
       await apiClient.post('/api/bd-accounts/qr-login-password', { sessionId: qrSessionId, password: qr2faPassword.trim() });
       setQr2faPassword('');
-      setQrState((prev) => (prev ? { ...prev, status: 'pending' } : null));
     } catch (err: any) {
+      qrPasswordSubmittedRef.current = false;
+      setQrPendingReason(null);
       setError(err?.response?.data?.error || 'Не удалось отправить пароль');
     } finally {
       setSubmittingQrPassword(false);
@@ -463,6 +470,12 @@ export default function BDAccountsPage() {
       try {
         const res = await apiClient.get('/api/bd-accounts/qr-login-status', { params: { sessionId: qrSessionId } });
         const data = res.data;
+        if (data.status === 'need_password' && qrPasswordSubmittedRef.current) {
+          return;
+        }
+        if (data.status === 'success' || data.status === 'error') {
+          qrPasswordSubmittedRef.current = false;
+        }
         setQrState({ status: data.status, loginTokenUrl: data.loginTokenUrl, accountId: data.accountId, error: data.error, passwordHint: data.passwordHint });
         if (data.status === 'success' && data.accountId) {
           setQrPendingReason(null);
@@ -502,6 +515,7 @@ export default function BDAccountsPage() {
         }
         if (data.status === 'error') setQrPendingReason(null);
       } catch (_) {
+        qrPasswordSubmittedRef.current = false;
         setQrState((prev) => (prev ? { ...prev, status: 'error', error: 'Сессия истекла' } : null));
       }
     }, 1500);
@@ -839,11 +853,11 @@ export default function BDAccountsPage() {
               {/* Step QR: показать QR и ждать сканирования */}
               {connectStep === 'qr' && qrState && (
                 <>
-                  {qrState.status === 'pending' && !qrJustConnected && (
+                  {(qrState.status === 'pending' || (qrState.status === 'need_password' && (submittingQrPassword || qrPendingReason === 'password'))) && !qrJustConnected && (
                     <div className="flex flex-col items-center justify-center py-8">
                       <Loader2 className="w-12 h-12 animate-spin text-blue-600 mb-4" />
                       <p className="text-sm text-gray-600 dark:text-gray-400">
-                        {qrPendingReason === 'password' ? 'Проверка пароля и подключение аккаунта…' : 'Генерация QR-кода…'}
+                        {qrPendingReason === 'password' || submittingQrPassword ? 'Проверка пароля и подключение аккаунта…' : 'Генерация QR-кода…'}
                       </p>
                     </div>
                   )}
@@ -871,7 +885,7 @@ export default function BDAccountsPage() {
                       <p className="text-xs text-gray-500 mt-2">Код обновляется автоматически каждые ~30 сек.</p>
                     </div>
                   )}
-                  {qrState.status === 'need_password' && (
+                  {qrState.status === 'need_password' && !submittingQrPassword && qrPendingReason !== 'password' && (
                     <div className="py-4 space-y-3">
                       <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
                         <p className="text-sm text-amber-800 dark:text-amber-200 font-medium">Требуется пароль 2FA</p>
@@ -965,11 +979,30 @@ export default function BDAccountsPage() {
               {connectStep === 'select-chats' && (
                 <div className="flex flex-col min-h-0 flex-1">
                   {connectingAccountId && (
-                    <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl p-4 mb-4 shrink-0">
-                      <p className="text-sm text-green-800 dark:text-green-200 font-medium">Аккаунт подключён</p>
+                    <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl p-4 mb-3 shrink-0">
+                      <p className="text-sm text-green-800 dark:text-green-200 font-medium">{t('bdAccounts.accountConnected')}</p>
                       <p className="text-xs text-green-700 dark:text-green-300 mt-1">
-                        Выберите папки или отдельные чаты — они будут отображаться в Мессенджере. Можно настроить позже.
+                        {t('bdAccounts.accountConnectedHint')}
                       </p>
+                    </div>
+                  )}
+                  {connectingAccountId && !loadingDialogs && syncProgress === null && (
+                    <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-xl p-4 mb-4 shrink-0">
+                      <div className="flex items-start gap-3">
+                        <div className="p-1.5 rounded-lg bg-blue-100 dark:bg-blue-800/50 shrink-0">
+                          <ShieldCheck className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-blue-900 dark:text-blue-100">{t('bdAccounts.syncSafetyTitle')}</p>
+                          <p className="text-xs text-blue-800 dark:text-blue-200 mt-1">{t('bdAccounts.syncSafetyIntro')}</p>
+                          <ul className="mt-2 space-y-1 text-xs text-blue-700 dark:text-blue-300 list-disc list-inside">
+                            <li>{t('bdAccounts.syncSafetyOnlySelected')}</li>
+                            <li>{t('bdAccounts.syncSafetyNoChangesInTg')}</li>
+                            <li>{t('bdAccounts.syncSafetyDataSecure')}</li>
+                            <li>{t('bdAccounts.syncSafetyChangeAnytime')}</li>
+                          </ul>
+                        </div>
+                      </div>
                     </div>
                   )}
                   {syncProgress !== null ? (
@@ -1240,12 +1273,17 @@ export default function BDAccountsPage() {
                 <>
                   <Button
                     variant="outline"
-                    onClick={() => { setConnectStep('credentials'); setQrSessionId(null); setQrState(null); setQr2faPassword(''); }}
+                    onClick={() => { setConnectStep('credentials'); setQrSessionId(null); setQrState(null); setQr2faPassword(''); qrPasswordSubmittedRef.current = false; }}
                     className="flex-1"
                   >
                     Назад
                   </Button>
-                  {qrState?.status === 'need_password' ? (
+                  {qrPendingReason === 'password' ? (
+                    <Button disabled className="flex-1">
+                      <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                      Проверка пароля…
+                    </Button>
+                  ) : qrState?.status === 'need_password' ? (
                     <Button
                       onClick={handleSubmitQr2faPassword}
                       disabled={submittingQrPassword || !qr2faPassword.trim()}
@@ -1255,7 +1293,7 @@ export default function BDAccountsPage() {
                     </Button>
                   ) : qrState?.status === 'error' ? (
                     <Button
-                      onClick={() => { setQrSessionId(null); setQrState({ status: 'pending' }); setError(null); handleStartQrLogin(); }}
+                      onClick={() => { setQrSessionId(null); setQrState({ status: 'pending' }); setError(null); qrPasswordSubmittedRef.current = false; handleStartQrLogin(); }}
                       disabled={startingQr}
                       className="flex-1"
                     >

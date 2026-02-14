@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
 import { useAuthStore } from '@/lib/stores/auth-store';
@@ -13,15 +15,18 @@ import {
   Sparkles, Zap, History, FileCode, Bot, Workflow,
   ChevronDown, ChevronRight, ChevronLeft, X, Clock, UserCircle, Tag, BarChart3,
   Music, Film, Users, Check, CheckCheck, RefreshCw, Pin, PinOff, Smile, Pencil,
-  Reply, Forward, Copy, Heart
+  Reply, Forward, Copy, Heart, Filter
 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { ContextMenu, ContextMenuSection, ContextMenuItem } from '@/components/ui/ContextMenu';
 import { Virtuoso } from 'react-virtuoso';
 import { LinkifyText } from '@/components/messaging/LinkifyText';
+import { LinkPreview, extractFirstUrl } from '@/components/messaging/LinkPreview';
 import { MediaViewer } from '@/components/messaging/MediaViewer';
 import { FolderManageModal } from '@/components/messaging/FolderManageModal';
+import { AddToFunnelModal } from '@/components/crm/AddToFunnelModal';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { blobUrlCache, avatarAccountKey, avatarChatKey, mediaKey } from '@/lib/cache/blob-url-cache';
 
 interface BDAccount {
@@ -145,6 +150,7 @@ interface Message {
   telegram_media?: Record<string, unknown> | null;
   telegram_entities?: Array<Record<string, unknown>> | null;
   telegram_date?: string | null;  // оригинальное время отправки в Telegram
+  telegram_extra?: Record<string, unknown> | null;  // fwd_from, reactions, views и т.д.
   reactions?: Record<string, number> | null;  // { "👍": 2, "❤️": 1 }
 }
 
@@ -184,6 +190,26 @@ const MEDIA_TYPE_I18N_KEYS: Record<MessageMediaType, string> = {
   sticker: 'mediaSticker',
   unknown: 'mediaUnknown',
 };
+
+/** Подпись «Переслано из …» из telegram_extra.fwd_from (from_name, post_author и т.д.). */
+function getForwardedFromLabel(msg: Message): string | null {
+  const extra = msg.telegram_extra;
+  if (!extra || typeof extra !== 'object') return null;
+  const fwd = extra.fwd_from as Record<string, unknown> | undefined;
+  if (!fwd || typeof fwd !== 'object') return null;
+  const fromName =
+    (typeof (fwd.from_name ?? (fwd as any).fromName) === 'string' && (fwd.from_name ?? (fwd as any).fromName).trim())
+      ? (fwd.from_name ?? (fwd as any).fromName).trim()
+      : null;
+  if (fromName) return fromName;
+  const postAuthor =
+    (typeof (fwd.post_author ?? (fwd as any).postAuthor) === 'string' && (fwd.post_author ?? (fwd as any).postAuthor).trim())
+      ? (fwd.post_author ?? (fwd as any).postAuthor).trim()
+      : null;
+  if (postAuthor) return postAuthor;
+  if (fwd.saved_from_peer || fwd.from_id || fwd.channel_post != null) return null;
+  return null;
+}
 
 function getChatDisplayName(chat: Chat): string {
   if (chat.display_name?.trim()) return chat.display_name.trim();
@@ -369,12 +395,16 @@ function MessageContent({
   const mediaUrl = useMediaUrl(mediaApiUrl);
 
   const contentText = hasCaption ? rawContent : '';
+  const firstUrl = contentText.trim() ? extractFirstUrl(contentText) : null;
 
   const textBlock = (
-    <div className={textCls}>
-      {contentText.trim() ? (
-        <LinkifyText text={contentText} className="break-words" />
-      ) : mediaType === 'text' ? '\u00A0' : null}
+    <div>
+      <div className={textCls}>
+        {contentText.trim() ? (
+          <LinkifyText text={contentText} className="break-words" />
+        ) : mediaType === 'text' ? '\u00A0' : null}
+      </div>
+      {firstUrl && <LinkPreview url={firstUrl} />}
     </div>
   );
 
@@ -446,6 +476,8 @@ function MessageContent({
 export default function MessagingPage() {
   const { t } = useTranslation();
   const { user: currentUser } = useAuthStore();
+  const searchParams = useSearchParams();
+  const urlOpenAppliedRef = useRef(false);
   const { on, off, subscribe, unsubscribe, isConnected } = useWebSocketContext();
   const [accounts, setAccounts] = useState<BDAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
@@ -461,6 +493,8 @@ export default function MessagingPage() {
   const [messagesPage, setMessagesPage] = useState(1);
   const [messagesTotal, setMessagesTotal] = useState(0);
   const [historyExhausted, setHistoryExhausted] = useState(false);
+  /** channel_id чата, для которого сейчас загружены messages. Нужно, чтобы Virtuoso монтировался только с правильными данными и сразу показывал низ. */
+  const [lastLoadedChannelId, setLastLoadedChannelId] = useState<string | null>(null);
   const [accountSearch, setAccountSearch] = useState('');
   const [chatSearch, setChatSearch] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -475,12 +509,14 @@ export default function MessagingPage() {
   const scrollToBottomRef = useRef<() => void>(() => {});
   const LOAD_OLDER_COOLDOWN_MS = 2500;
   const MESSAGES_PAGE_SIZE = 50;
+  /** Два режима списка сообщений: до 200 — обычный div + map, свыше 200 — Virtuoso (виртуализация). Оба при открытии чата показывают низ без анимации (behavior: 'auto'). */
   const VIRTUAL_LIST_THRESHOLD = 200;
   const INITIAL_FIRST_ITEM_INDEX = 1000000;
   const MAX_CACHED_CHATS = 30;
   const [prependedCount, setPrependedCount] = useState(0);
   const virtuosoRef = useRef<any>(null);
-  const virtuosoScrollAfterChatChangeRef = useRef(false);
+  /** Показывать кнопку «вниз», когда пользователь проскроллил вверх (не у последнего сообщения). */
+  const [showScrollToBottomButton, setShowScrollToBottomButton] = useState(false);
   type MessagesCacheEntry = { messages: Message[]; messagesTotal: number; messagesPage: number; historyExhausted: boolean };
   const messagesCacheRef = useRef<Map<string, MessagesCacheEntry>>(new Map());
   const messagesCacheOrderRef = useRef<string[]>([]);
@@ -510,11 +546,34 @@ export default function MessagingPage() {
   const [chatContextMenu, setChatContextMenu] = useState<{ x: number; y: number; chat: Chat } | null>(null);
   const [accountContextMenu, setAccountContextMenu] = useState<{ x: number; y: number; account: BDAccount } | null>(null);
   const [showEditNameModal, setShowEditNameModal] = useState(false);
+  /** Telegram presence: «печатает» в текущем чате (сбрасывается через 6 сек по спецификации Telegram). */
+  const [typingChannelId, setTypingChannelId] = useState<string | null>(null);
+  const typingClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Черновики по channelId (из updateDraftMessage). */
+  const [draftByChannel, setDraftByChannel] = useState<Record<string, { text: string; replyToMsgId?: number }>>({});
+  /** Статусы пользователей (userId -> { status, expires? }) для отображения онлайн. */
+  const [userStatusByUserId, setUserStatusByUserId] = useState<Record<string, { status: string; expires?: number }>>({});
+  /** Макс. id прочитанных исходящих по чату (read_outbox / read_channel_outbox) — для галочек «прочитано». */
+  const [readOutboxMaxIdByChannel, setReadOutboxMaxIdByChannel] = useState<Record<string, number>>({});
+  /** Переопределения имени/телефона из апдейтов user_name, user_phone (userId → поля). */
+  const [contactDisplayOverrides, setContactDisplayOverrides] = useState<Record<string, { firstName?: string; lastName?: string; usernames?: string[]; phone?: string }>>({});
+  /** channel_too_long: channelId, для которого нужно показать «Обновить историю». */
+  const [channelNeedsRefresh, setChannelNeedsRefresh] = useState<string | null>(null);
   const [editDisplayNameValue, setEditDisplayNameValue] = useState('');
   const [savingDisplayName, setSavingDisplayName] = useState(false);
   const [showChatHeaderMenu, setShowChatHeaderMenu] = useState(false);
+  const [addToFunnelFromChat, setAddToFunnelFromChat] = useState<{ contactId: string; contactName: string } | null>(null);
   const chatHeaderMenuRef = useRef<HTMLDivElement>(null);
   const [mediaViewer, setMediaViewer] = useState<{ url: string; type: 'image' | 'video' } | null>(null);
+  const [aiSummaryText, setAiSummaryText] = useState<string | null>(null);
+  const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
+  const [aiSummaryError, setAiSummaryError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAiSummaryText(null);
+    setAiSummaryError(null);
+  }, [selectedChat?.channel_id]);
+
   const STORAGE_KEYS = {
     accountsPanel: 'messaging.accountsPanelCollapsed',
     chatsPanel: 'messaging.chatsPanelCollapsed',
@@ -527,6 +586,7 @@ export default function MessagingPage() {
   const prevChatRef = useRef<{ accountId: string; chatId: string } | null>(null);
   const newMessageRef = useRef(newMessage);
   newMessageRef.current = newMessage;
+  const fetchChatsRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     const el = messageInputRef.current;
@@ -585,6 +645,58 @@ export default function MessagingPage() {
   useEffect(() => {
     fetchAccounts();
   }, []);
+
+  // Open account and chat from URL (e.g. from command palette: ?bdAccountId=...&open=channelId)
+  const urlBdAccountId = searchParams.get('bdAccountId');
+  const urlOpenChannelId = searchParams.get('open');
+  useEffect(() => {
+    if (!urlBdAccountId || accounts.length === 0) return;
+    const exists = accounts.some((a) => a.id === urlBdAccountId);
+    if (exists) setSelectedAccountId(urlBdAccountId);
+  }, [urlBdAccountId, accounts]);
+
+  useEffect(() => {
+    if (urlOpenAppliedRef.current || !urlOpenChannelId || !selectedAccountId || chats.length === 0) return;
+    const chat = chats.find((c) => c.channel_id === urlOpenChannelId);
+    if (chat) {
+      urlOpenAppliedRef.current = true;
+      setSelectedChat(chat);
+    }
+  }, [urlOpenChannelId, selectedAccountId, chats]);
+
+  // При открытии чата подставляем черновик из Telegram (updateDraftMessage). Только при смене чата, чтобы не затирать ввод при приходе черновика для другого чата.
+  useEffect(() => {
+    if (!selectedChat) return;
+    setNewMessage(draftByChannel[selectedChat.channel_id]?.text ?? '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- только при смене чата
+  }, [selectedChat?.channel_id]);
+
+  // Сброс баннера «История устарела» при смене аккаунта (контекст другого аккаунта).
+  useEffect(() => {
+    setChannelNeedsRefresh(null);
+  }, [selectedAccountId]);
+
+  // Сохранение черновика в Telegram (messages.saveDraft) с debounce 1.5 с.
+  const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!selectedAccountId || !selectedChat) return;
+    const channelId = selectedChat.channel_id;
+    const text = newMessage.trim();
+    const replyToMsgId = replyToMessage?.telegram_message_id ? Number(replyToMessage.telegram_message_id) : undefined;
+    if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = setTimeout(() => {
+      draftSaveTimerRef.current = null;
+      apiClient
+        .post(`/api/bd-accounts/${selectedAccountId}/draft`, { channelId, text, replyToMsgId })
+        .catch(() => {});
+    }, 1500);
+    return () => {
+      if (draftSaveTimerRef.current) {
+        clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+      }
+    };
+  }, [selectedAccountId, selectedChat?.channel_id, newMessage, replyToMessage?.telegram_message_id]);
 
   // Проверяем статус синхронизации выбранного аккаунта. Синхронизацию не запускаем без выбора чатов — показываем CTA.
   useEffect(() => {
@@ -739,6 +851,7 @@ export default function MessagingPage() {
           setHistoryExhausted(cached.historyExhausted);
           setLoadingMessages(false);
           setPrependedCount(0);
+          setLastLoadedChannelId(selectedChat.channel_id);
           markAsRead();
           return;
         }
@@ -751,6 +864,7 @@ export default function MessagingPage() {
     } else {
       prevChatCacheKeyRef.current = null;
       setMessages([]);
+      setLastLoadedChannelId(null);
     }
   }, [selectedChat?.channel_id, selectedChat?.channel, selectedAccountId]);
 
@@ -831,28 +945,29 @@ export default function MessagingPage() {
     const handler = (payload: { message?: any; timestamp?: string }) => {
       const msg = payload?.message;
       if (!msg?.bdAccountId) return;
-      const ts = payload?.timestamp ?? new Date().toISOString();
+      const isOutbound = msg?.direction === 'outbound';
+      const ts = payload?.timestamp ?? msg?.createdAt ?? new Date().toISOString();
       const contentPreview = (msg?.content && String(msg.content).trim()) ? String(msg.content).trim().slice(0, 200) : null;
-      const isCurrentChat = selectedAccountId === msg.bdAccountId && selectedChat?.channel_id === String(msg.channelId);
-      // Суммарный непрочитанный по аккаунту: +1 если сообщение не в открытом чате
-      if (!isCurrentChat) {
+      const isCurrentChat = selectedAccountId === msg.bdAccountId && selectedChat?.channel_id === String(msg.channelId ?? '');
+      // Не увеличивать счётчик непрочитанных для исходящих (свои сообщения из ТГ или только что отправленные)
+      if (!isCurrentChat && !isOutbound) {
         setAccounts((prev) =>
           prev.map((a) =>
             a.id === msg.bdAccountId ? { ...a, unread_count: (a.unread_count ?? 0) + 1 } : a
           )
         );
       }
-      // Обновить только нужный чат в списке: превью, время, счётчик непрочитанных. Не перезагружать весь список.
+      // Обновить чат в списке: превью, время; счётчик непрочитанных только для входящих
       if (msg.bdAccountId === selectedAccountId && msg.channelId) {
-        const isCurrentChat = selectedChat?.channel_id === String(msg.channelId);
+        const isCurrentChatForChat = selectedChat?.channel_id === String(msg.channelId);
         setChats((prev) => {
           const chatId = String(msg.channelId);
           const idx = prev.findIndex((c) => c.channel_id === chatId);
           if (idx < 0) return prev;
           const updated = prev.map((c, i) => {
             if (i !== idx) return c;
-            const unread = isCurrentChat ? 0 : (c.unread_count || 0) + 1;
-            return { ...c, last_message_at: ts, last_message: contentPreview ?? c.last_message, unread_count: unread };
+            const unread = isCurrentChatForChat ? 0 : (c.unread_count || 0) + (isOutbound ? 0 : 1);
+            return { ...c, last_message_at: ts, last_message: contentPreview ?? c.last_message, unread_count: Math.max(0, unread) };
           });
           return [...updated].sort((a, b) => {
             const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
@@ -863,10 +978,15 @@ export default function MessagingPage() {
           });
         });
       }
-      if (msg.bdAccountId === selectedAccountId && selectedChat && msg.channelId === selectedChat.channel_id) {
+      if (msg.bdAccountId === selectedAccountId && selectedChat && (msg.channelId === selectedChat.channel_id || msg.channelId == null)) {
         setMessages((prev) => {
           const existing = prev.find((m) => m.id === msg.messageId);
-          if (existing) return prev;
+          if (existing) {
+            // Обновить существующее (например temp → с telegram_message_id)
+            if (msg.telegramMessageId != null && !existing.telegram_message_id)
+              return prev.map((m) => m.id === msg.messageId ? { ...m, telegram_message_id: String(msg.telegramMessageId), status: 'delivered' } : m);
+            return prev;
+          }
           return [
             ...prev,
             {
@@ -878,8 +998,10 @@ export default function MessagingPage() {
               contact_id: msg.contactId ?? null,
               channel: selectedChat.channel,
               channel_id: selectedChat.channel_id,
-              telegram_message_id: msg.telegramMessageId ?? null,
+              telegram_message_id: msg.telegramMessageId != null ? String(msg.telegramMessageId) : null,
+              reply_to_telegram_id: msg.replyToTelegramId != null ? String(msg.replyToTelegramId) : null,
               telegram_media: msg.telegramMedia ?? null,
+              telegram_entities: msg.telegramEntities ?? null,
               telegram_date: ts,
             },
           ];
@@ -895,17 +1017,179 @@ export default function MessagingPage() {
   }, [accounts, isConnected, selectedAccountId, selectedChat, subscribe, unsubscribe, on, off]);
 
   useEffect(() => {
-    const handler = (payload: { type?: string; data?: { messageId?: string; channelId?: string; bdAccountId?: string } }) => {
-      if (payload?.type !== 'message.deleted') return;
-      const d = payload.data;
+    const handler = (payload: {
+      type?: string;
+      data?: {
+        messageId?: string;
+        channelId?: string;
+        bdAccountId?: string;
+        content?: string;
+      };
+    }) => {
+      const d = payload?.data;
       if (!d?.messageId) return;
-      if (selectedChat && selectedAccountId && d.channelId === selectedChat.channel_id && d.bdAccountId === selectedAccountId) {
-        setMessages((prev) => prev.filter((m) => m.id !== d.messageId));
+      if (selectedAccountId && d.bdAccountId !== selectedAccountId) return;
+
+      if (payload?.type === 'message.deleted') {
+        if (selectedChat && d.channelId === selectedChat.channel_id) {
+          setMessages((prev) => prev.filter((m) => m.id !== d.messageId));
+        }
+        return;
+      }
+
+      if (payload?.type === 'message.edited' && d.content !== undefined) {
+        if (selectedChat && d.channelId === selectedChat.channel_id) {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === d.messageId ? { ...m, content: d.content ?? m.content } : m))
+          );
+        }
       }
     };
     on('event', handler);
     return () => off('event', handler);
   }, [on, off, selectedChat, selectedAccountId]);
+
+  // Telegram presence: typing, user status, read receipt, draft
+  useEffect(() => {
+    const handler = (payload: {
+      type?: string;
+      data?: {
+        bdAccountId?: string;
+        updateKind?: string;
+        channelId?: string;
+        userId?: string;
+        status?: string;
+        expires?: number;
+        maxId?: number;
+        draftText?: string;
+        replyToMsgId?: number;
+        pinned?: boolean;
+        order?: string[];
+        firstName?: string;
+        lastName?: string;
+        usernames?: string[];
+        phone?: string;
+      };
+    }) => {
+      if (payload?.type !== 'bd_account.telegram_update' || !payload?.data) return;
+      const d = payload.data;
+      if (selectedAccountId && d.bdAccountId !== selectedAccountId) return;
+
+      switch (d.updateKind) {
+        case 'typing':
+          if (d.channelId) {
+            setTypingChannelId(d.channelId);
+            if (typingClearTimerRef.current) clearTimeout(typingClearTimerRef.current);
+            typingClearTimerRef.current = setTimeout(() => {
+              setTypingChannelId((prev) => (prev === d.channelId ? null : prev));
+              typingClearTimerRef.current = null;
+            }, 6000);
+          }
+          break;
+        case 'user_status':
+          if (d.userId != null) {
+            setUserStatusByUserId((prev) => ({
+              ...prev,
+              [d.userId!]: { status: d.status ?? '', expires: d.expires },
+            }));
+          }
+          break;
+        case 'read_inbox':
+        case 'read_channel_inbox':
+          if (d.channelId) {
+            setChats((prev) =>
+              prev.map((c) => (c.channel_id === d.channelId ? { ...c, unread_count: 0 } : c))
+            );
+          }
+          break;
+        case 'read_outbox':
+        case 'read_channel_outbox':
+          if (d.channelId != null && typeof d.maxId === 'number') {
+            setReadOutboxMaxIdByChannel((prev) => ({
+              ...prev,
+              [d.channelId!]: Math.max(prev[d.channelId!] ?? 0, d.maxId!),
+            }));
+          }
+          break;
+        case 'draft':
+          if (d.channelId != null) {
+            setDraftByChannel((prev) => ({
+              ...prev,
+              [d.channelId!]: {
+                text: d.draftText ?? '',
+                replyToMsgId: d.replyToMsgId,
+              },
+            }));
+          }
+          break;
+        case 'dialog_pinned':
+          if (d.channelId != null) {
+            setPinnedChannelIds((prev) =>
+              d.pinned
+                ? prev.includes(d.channelId!)
+                  ? prev
+                  : [...prev, d.channelId!]
+                : prev.filter((id) => id !== d.channelId)
+            );
+          }
+          break;
+        case 'pinned_dialogs':
+          if (Array.isArray(d.order) && d.order.length >= 0) {
+            setPinnedChannelIds(d.order);
+          }
+          break;
+        case 'user_name':
+          if (d.userId != null) {
+            setContactDisplayOverrides((prev) => ({
+              ...prev,
+              [d.userId!]: {
+                ...prev[d.userId!],
+                firstName: d.firstName ?? prev[d.userId!]?.firstName,
+                lastName: d.lastName ?? prev[d.userId!]?.lastName,
+                usernames: d.usernames ?? prev[d.userId!]?.usernames,
+              },
+            }));
+          }
+          break;
+        case 'user_phone':
+          if (d.userId != null) {
+            setContactDisplayOverrides((prev) => ({
+              ...prev,
+              [d.userId!]: { ...prev[d.userId!], phone: d.phone ?? prev[d.userId!]?.phone },
+            }));
+          }
+          break;
+        case 'chat_participant_add':
+        case 'chat_participant_delete':
+          fetchChatsRef.current?.();
+          break;
+        case 'channel_too_long':
+          if (d.channelId) setChannelNeedsRefresh(d.channelId);
+          break;
+        case 'message_id_confirmed':
+        case 'notify_settings':
+        case 'scheduled_message':
+        case 'delete_scheduled_messages':
+        case 'message_poll':
+        case 'message_poll_vote':
+        case 'config':
+        case 'dc_options':
+        case 'lang_pack':
+        case 'theme':
+        case 'phone_call':
+        case 'callback_query':
+          break;
+      }
+    };
+    on('event', handler);
+    return () => {
+      off('event', handler);
+      if (typingClearTimerRef.current) {
+        clearTimeout(typingClearTimerRef.current);
+        typingClearTimerRef.current = null;
+      }
+    };
+  }, [on, off, selectedAccountId]);
 
   useEffect(() => {
     if (!messageContextMenu && !chatContextMenu && !accountContextMenu) return;
@@ -953,27 +1237,30 @@ export default function MessagingPage() {
   }, [showCommandsMenu, showAttachMenu, showChatHeaderMenu]);
 
   const scrollToBottom = useCallback(() => {
-    const run = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    requestAnimationFrame(() => requestAnimationFrame(run));
+    messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
   }, []);
   scrollToBottomRef.current = scrollToBottom;
 
+  /** Скролл к самому последнему сообщению (мгновенно, без анимации). Для кнопки «вниз» и при открытии чата. */
+  const scrollToLastMessage = useCallback(() => {
+    if (messages.length === 0) return;
+    if (messages.length > VIRTUAL_LIST_THRESHOLD && virtuosoRef.current) {
+      virtuosoRef.current.scrollToIndex({ index: messages.length - 1, align: 'end', behavior: 'auto' });
+      setShowScrollToBottomButton(false);
+      return;
+    }
+    messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+    setShowScrollToBottomButton(false);
+  }, [messages.length]);
+
+  // Один раз показать низ для обычного списка (не Virtuoso): мгновенно, без отложенных вызовов.
   useEffect(() => {
+    if (messages.length > VIRTUAL_LIST_THRESHOLD || messages.length === 0) return;
     if (skipScrollToBottomAfterPrependRef.current) {
       skipScrollToBottomAfterPrependRef.current = false;
       return;
     }
-    scrollToBottom();
-    const t50 = setTimeout(scrollToBottom, 50);
-    const t150 = setTimeout(scrollToBottom, 150);
-    const t450 = setTimeout(scrollToBottom, 450);
-    const t800 = setTimeout(scrollToBottom, 800);
-    return () => {
-      clearTimeout(t50);
-      clearTimeout(t150);
-      clearTimeout(t450);
-      clearTimeout(t800);
-    };
+    requestAnimationFrame(() => scrollToBottom());
   }, [messages, selectedChat?.channel_id, scrollToBottom]);
 
   const fetchAccounts = async () => {
@@ -1067,6 +1354,7 @@ export default function MessagingPage() {
       setLoadingChats(false);
     }
   };
+  fetchChatsRef.current = fetchChats;
 
   const fetchMessages = async (accountId: string, chat: Chat) => {
     setLoadingMessages(true);
@@ -1087,11 +1375,13 @@ export default function MessagingPage() {
       setMessages(list);
       setMessagesTotal(response.data.pagination?.total ?? list.length);
       setHistoryExhausted(response.data.historyExhausted === true);
+      setLastLoadedChannelId(chat.channel_id);
     } catch (error: any) {
       console.error('Error fetching messages:', error);
       setMessages([]);
       setMessagesTotal(0);
       setHistoryExhausted(false);
+      setLastLoadedChannelId(chat.channel_id);
     } finally {
       setLoadingMessages(false);
     }
@@ -1138,7 +1428,7 @@ export default function MessagingPage() {
     }
   }, [selectedAccountId, selectedChat, loadingOlder, hasMoreMessages, messagesPage, messagesTotal, historyExhausted]);
 
-  // Восстановить позицию скролла после подгрузки старых сообщений (prepend), без фризов
+  // Восстановить позицию скролла после подгрузки старых сообщений (prepend), без фризов. Не применять при смене чата (scrollRestoreRef сбрасывается в эффекте смены чата).
   useEffect(() => {
     const restore = scrollRestoreRef.current;
     if (!restore || !messagesScrollRef.current) return;
@@ -1152,12 +1442,13 @@ export default function MessagingPage() {
     });
   }, [messages.length]);
 
-  // Сброс при смене чата: скролл к последнему сообщению, сброс подгрузки и флага «внизу»
+  // Сброс при смене чата: сброс подгрузки, флага «внизу» и сохранённой позиции скролла (иначе эффект восстановления применит старую позицию и скролл дёрнется в середину).
   useEffect(() => {
     hasUserScrolledUpRef.current = false;
     setPrependedCount(0);
-    virtuosoScrollAfterChatChangeRef.current = true;
     isAtBottomRef.current = true;
+    setShowScrollToBottomButton(false);
+    scrollRestoreRef.current = null;
   }, [selectedChat?.channel_id]);
 
   // Отслеживание скролла: вверх — для подгрузки; внизу — чтобы новые сообщения скроллили только если пользователь уже внизу (как в Telegram)
@@ -1392,6 +1683,10 @@ export default function MessagingPage() {
       setMessages((prev) =>
         prev.map((msg) => (msg.id === tempMessage.id ? merged : msg))
       );
+      // Очистить черновик в Telegram после успешной отправки
+      if (selectedAccountId && selectedChat) {
+        apiClient.post(`/api/bd-accounts/${selectedAccountId}/draft`, { channelId: selectedChat.channel_id, text: '' }).catch(() => {});
+      }
       await fetchChats();
     } catch (error: any) {
       console.error('Error sending message:', error);
@@ -1411,20 +1706,25 @@ export default function MessagingPage() {
     }
   };
 
-  const getChatName = (chat: Chat) => {
+  const getChatName = (chat: Chat, overrides?: { firstName?: string; lastName?: string; usernames?: string[] }) => {
     if (chat.display_name?.trim()) return chat.display_name.trim();
-    const firstLast = `${chat.first_name || ''} ${chat.last_name || ''}`.trim();
+    const first = (overrides?.firstName ?? chat.first_name ?? '').trim();
+    const last = (overrides?.lastName ?? chat.last_name ?? '').trim();
+    const firstLast = `${first} ${last}`.trim();
     if (firstLast && !/^Telegram\s+\d+$/.test(firstLast)) return firstLast;
-    if (chat.username) return chat.username.startsWith('@') ? chat.username : `@${chat.username}`;
+    const username = overrides?.usernames?.[0] ?? chat.username;
+    if (username) return username.startsWith('@') ? username : `@${username}`;
     if (chat.name?.trim()) return chat.name.trim();
     if (chat.email?.trim()) return chat.email.trim();
     if (chat.telegram_id) return chat.telegram_id;
     return 'Unknown';
   };
 
+  const getChatNameWithOverrides = (chat: Chat) => getChatName(chat, contactDisplayOverrides[chat.channel_id]);
+
   const openEditNameModal = () => {
     if (!selectedChat) return;
-    setEditDisplayNameValue(selectedChat.display_name ?? getChatName(selectedChat) ?? '');
+    setEditDisplayNameValue(selectedChat.display_name ?? getChatNameWithOverrides(selectedChat) ?? '');
     setShowEditNameModal(true);
     setShowChatHeaderMenu(false);
   };
@@ -1545,6 +1845,20 @@ export default function MessagingPage() {
     [selectedAccountId]
   );
 
+  const handleDeleteFolder = useCallback(
+    async (folderRowId: string) => {
+      if (!selectedAccountId) return;
+      await apiClient.delete(
+        `/api/bd-accounts/${selectedAccountId}/sync-folders/${folderRowId}`
+      );
+    },
+    [selectedAccountId]
+  );
+
+  const handleFolderDeleted = useCallback((folderId: number) => {
+    setSelectedFolderId((prev) => (prev === folderId ? null : prev));
+  }, []);
+
   const handlePinChat = async (chat: Chat) => {
     if (!selectedAccountId) return;
     setChatContextMenu(null);
@@ -1600,13 +1914,13 @@ export default function MessagingPage() {
     const index = messages.findIndex((m) => String(m.telegram_message_id) === id);
     if (index < 0) return;
     if (messages.length > VIRTUAL_LIST_THRESHOLD && virtuosoRef.current) {
-      virtuosoRef.current.scrollToIndex({ index, align: 'center', behavior: 'smooth' });
+      virtuosoRef.current.scrollToIndex({ index, align: 'center', behavior: 'auto' });
       return;
     }
     const container = messagesScrollRef.current;
     if (!container) return;
     const el = container.querySelector(`[data-telegram-message-id="${id}"]`);
-    if (el) (el as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (el) (el as HTMLElement).scrollIntoView({ behavior: 'auto', block: 'center' });
   }, [messages]);
 
   const renderMessageRow = useCallback(
@@ -1665,6 +1979,22 @@ export default function MessagingPage() {
                   <span className="align-middle">{replyPreviewText}{replyPreviewText.length >= 60 ? '…' : ''}</span>
                 </button>
               )}
+              {(() => {
+                const fwdLabel = getForwardedFromLabel(msg);
+                const hasFwd = fwdLabel || (msg.telegram_extra?.fwd_from && typeof msg.telegram_extra.fwd_from === 'object');
+                if (!hasFwd) return null;
+                const text = fwdLabel ? t('messaging.forwardedFrom', { name: fwdLabel }) : t('messaging.forwarded');
+                return (
+                  <div
+                    className={`text-[11px] mb-1 truncate ${
+                      isOutbound ? 'text-primary-foreground/70' : 'text-muted-foreground'
+                    }`}
+                    title={text}
+                  >
+                    {text}
+                  </div>
+                );
+              })()}
               <MessageContent
                 msg={msg}
                 isOutbound={isOutbound}
@@ -1678,12 +2008,17 @@ export default function MessagingPage() {
                 }`}
               >
                 <span>{formatTime(msgTime)}</span>
-                {isOutbound &&
-                  (msg.status === 'read' || msg.status === 'delivered' ? (
+                {isOutbound && (() => {
+                  const readMax = selectedChat ? readOutboxMaxIdByChannel[selectedChat.channel_id] : undefined;
+                  const tgId = msg.telegram_message_id != null ? Number(msg.telegram_message_id) : null;
+                  const isReadByReceipt = readMax != null && tgId != null && tgId <= readMax;
+                  const isRead = msg.status === 'read' || msg.status === 'delivered' || isReadByReceipt;
+                  return isRead ? (
                     <CheckCheck className="w-3.5 h-3.5 text-primary-foreground ml-1" />
-                  ) : msg.status === 'sent' ? (
+                  ) : msg.status === 'sent' || msg.status === 'delivered' || (msg.status === 'pending' && tgId != null) ? (
                     <Check className="w-3.5 h-3.5 text-primary-foreground/80 ml-1" />
-                  ) : null)}
+                  ) : null;
+                })()}
               </div>
               {msg.reactions && Object.keys(msg.reactions).length > 0 && (
                 <div className={`flex flex-wrap gap-1 mt-1 ${isOutbound ? 'justify-end' : 'justify-start'}`}>
@@ -1699,14 +2034,37 @@ export default function MessagingPage() {
         </div>
       );
     },
-    [messages, selectedAccountId, selectedChat, setMediaViewer, t, scrollToMessageByTelegramId]
+    [messages, selectedAccountId, selectedChat, readOutboxMaxIdByChannel, setMediaViewer, t, scrollToMessageByTelegramId]
   );
 
+  // Сразу после монтирования Virtuoso для этого чата — мгновенно (behavior: 'auto') скролл в самый низ. Двойной rAF чтобы сработало после раскладки.
   useEffect(() => {
-    if (messages.length <= VIRTUAL_LIST_THRESHOLD || messages.length === 0 || !virtuosoScrollAfterChatChangeRef.current) return;
-    virtuosoScrollAfterChatChangeRef.current = false;
-    virtuosoRef.current?.scrollToIndex({ index: messages.length - 1, align: 'end', behavior: 'auto' });
-  }, [selectedChat?.channel_id, messages.length]);
+    if (messages.length <= VIRTUAL_LIST_THRESHOLD || messages.length === 0) return;
+    if (lastLoadedChannelId !== selectedChat?.channel_id) return;
+    const scrollToEnd = () => virtuosoRef.current?.scrollToIndex({ index: messages.length - 1, align: 'end', behavior: 'auto' });
+    const raf1 = requestAnimationFrame(() => {
+      scrollToEnd();
+      requestAnimationFrame(scrollToEnd);
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, [lastLoadedChannelId, selectedChat?.channel_id, messages.length]);
+
+  // Кнопка «вниз» для обычного списка (не Virtuoso): показывать, если проскроллили вверх больше ~10 сообщений
+  useEffect(() => {
+    if (messages.length > VIRTUAL_LIST_THRESHOLD || messages.length === 0) return;
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    const SCROLL_THRESHOLD_PX = 400;
+    const check = () => {
+      const { scrollTop, scrollHeight, clientHeight } = el;
+      const fromBottom = scrollHeight - scrollTop - clientHeight;
+      if (fromBottom > SCROLL_THRESHOLD_PX) setShowScrollToBottomButton(true);
+      else if (fromBottom < 50) setShowScrollToBottomButton(false);
+    };
+    el.addEventListener('scroll', check, { passive: true });
+    check();
+    return () => el.removeEventListener('scroll', check);
+  }, [messages.length]);
 
   const REACTION_EMOJI = ['👍', '❤️', '🔥', '👏', '😄', '😮', '😢', '🙏', '👎'];
   const handleReaction = async (messageId: string, emoji: string) => {
@@ -1882,7 +2240,7 @@ export default function MessagingPage() {
       return true;
     })
     .filter((chat) => {
-      const name = getChatName(chat).toLowerCase();
+      const name = getChatNameWithOverrides(chat).toLowerCase();
       return name.includes(chatSearch.toLowerCase());
     })
     .filter((chat) => {
@@ -2162,7 +2520,7 @@ export default function MessagingPage() {
                         key={`${chat.channel}-${chat.channel_id}`}
                         type="button"
                         onClick={() => setSelectedChat(chat)}
-                        title={getChatName(chat)}
+                        title={getChatNameWithOverrides(chat)}
                         className={`relative shrink-0 rounded-full p-0.5 transition-colors hover:ring-2 hover:ring-primary/50 ${
                           selectedChat?.channel_id === chat.channel_id ? 'ring-2 ring-primary' : ''
                         }`}
@@ -2324,16 +2682,19 @@ export default function MessagingPage() {
                   Синхронизация: {accountSyncProgress.done} / {accountSyncProgress.total}
                 </span>
               ) : isSelectedAccountMine ? (
-                <>
-                  <span className="truncate flex-1 min-w-0">{t('messaging.selectChatsSync')}</span>
-                  <button
-                    type="button"
-                    onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
-                    className="text-primary font-medium shrink-0 hover:underline"
-                  >
-                    {t('messaging.configure')}
-                  </button>
-                </>
+                <div className="flex flex-col gap-1 min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate flex-1 min-w-0">{t('messaging.selectChatsSync')}</span>
+                    <button
+                      type="button"
+                      onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
+                      className="text-primary font-medium shrink-0 hover:underline"
+                    >
+                      {t('messaging.configure')}
+                    </button>
+                  </div>
+                  <span className="text-[11px] text-muted-foreground/90">{t('messaging.syncSafetyShort')}</span>
+                </div>
               ) : (
                 <span className="truncate">{t('messaging.colleagueAccountHint')}</span>
               )}
@@ -2353,7 +2714,8 @@ export default function MessagingPage() {
                 <span>{t('messaging.waitingSync')}</span>
               ) : isSelectedAccountMine ? (
                 <>
-                  <p className="mb-3">{t('messaging.accountNeedsSync')}</p>
+                  <p className="mb-2">{t('messaging.accountNeedsSync')}</p>
+                  <p className="text-xs text-muted-foreground mb-3 max-w-xs">{t('messaging.syncSafetyShort')}</p>
                   <Button
                     size="sm"
                     onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
@@ -2366,8 +2728,17 @@ export default function MessagingPage() {
               )}
             </div>
           ) : !loadingChats && displayChats.length === 0 ? (
-            <div className="p-4 text-center text-sm text-muted-foreground flex-1 min-h-0 flex items-center justify-center">
-              {t('messaging.noChats')}
+            <div className="flex-1 min-h-0 flex items-center justify-center p-4">
+              <EmptyState
+                icon={MessageSquare}
+                title={t('messaging.noChats')}
+                description={t('messaging.noChatsDesc')}
+                action={
+                  <Link href="/dashboard/bd-accounts">
+                    <Button>{t('messaging.noChatsCta')}</Button>
+                  </Link>
+                }
+              />
             </div>
           ) : !loadingChats ? (
             displayChats.map((chat, idx) => {
@@ -2412,8 +2783,11 @@ export default function MessagingPage() {
                 />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-start justify-between mb-1 gap-2">
-                    <div className="font-medium text-sm truncate min-w-0">
-                      {getChatName(chat)}
+                    <div className="font-medium text-sm truncate min-w-0 flex items-center gap-1.5">
+                      {getChatNameWithOverrides(chat)}
+                      {chat.peer_type === 'user' && userStatusByUserId[chat.channel_id]?.status === 'UserStatusOnline' && (
+                        <span className="inline-block w-2 h-2 rounded-full bg-green-500 shrink-0" title={t('messaging.online')} aria-label={t('messaging.online')} />
+                      )}
                     </div>
                     <span className="text-xs text-muted-foreground flex-shrink-0">
                       {formatTime(chat.last_message_at)}
@@ -2449,9 +2823,20 @@ export default function MessagingPage() {
             <div className="px-4 py-3 border-b border-border bg-card/95 backdrop-blur-sm shrink-0 min-h-[3.5rem] flex flex-col justify-center">
               <div className="flex items-center justify-between gap-2 min-h-[2rem]">
                 <div className="min-w-0 flex-1">
-                  <div className="font-semibold truncate">{getChatName(selectedChat)}</div>
+                  <div className="font-semibold truncate flex items-center gap-2">
+                    {getChatNameWithOverrides(selectedChat)}
+                    {selectedChat.peer_type === 'user' && (() => {
+                      const st = userStatusByUserId[selectedChat.channel_id];
+                      if (st?.status === 'UserStatusOnline') return <span className="inline-block w-2 h-2 rounded-full bg-green-500 shrink-0" title={t('messaging.online')} aria-label={t('messaging.online')} />;
+                      if (st?.status === 'UserStatusOffline' && st?.expires && st.expires > 0) return <span className="text-xs text-muted-foreground" title={t('messaging.recently')}>{t('messaging.recently')}</span>;
+                      return null;
+                    })()}
+                  </div>
                   {selectedChat.telegram_id && (
                     <div className="text-xs text-muted-foreground truncate">ID: {selectedChat.telegram_id}</div>
+                  )}
+                  {typingChannelId === selectedChat.channel_id && (
+                    <div className="text-xs text-primary mt-0.5 animate-pulse">{t('messaging.typing')}</div>
                   )}
                 </div>
                 <div className="relative" ref={chatHeaderMenuRef}>
@@ -2473,6 +2858,22 @@ export default function MessagingPage() {
                         <UserCircle className="w-4 h-4" />
                         {selectedChat.contact_id ? t('messaging.changeContactName') : t('messaging.noContact')}
                       </button>
+                      {selectedChat.contact_id && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowChatHeaderMenu(false);
+                            setAddToFunnelFromChat({
+                              contactId: selectedChat.contact_id!,
+                              contactName: getChatNameWithOverrides(selectedChat),
+                            });
+                          }}
+                          className="w-full px-4 py-2 text-left text-sm hover:bg-accent flex items-center gap-2"
+                        >
+                          <Filter className="w-4 h-4" />
+                          {t('pipeline.addToFunnel')}
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2505,8 +2906,28 @@ export default function MessagingPage() {
               </div>
             )}
 
-            <div ref={messagesScrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pl-4 pt-4 pb-4 pr-[10px] bg-muted/20 flex flex-col scroll-thin">
-              {loadingMessages ? (
+            <div className="relative flex-1 min-h-0 flex flex-col">
+              <div ref={messagesScrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pl-4 pt-4 pb-4 pr-[10px] bg-muted/20 flex flex-col scroll-thin">
+              {channelNeedsRefresh === selectedChat?.channel_id && (
+                <div className="flex items-center justify-between gap-2 py-2 px-3 mb-2 rounded-lg bg-amber-500/15 border border-amber-500/40 text-sm">
+                  <span className="text-foreground">{t('messaging.channelTooLongBanner')}</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setChannelNeedsRefresh(null);
+                      loadOlderMessages();
+                    }}
+                  >
+                    {t('messaging.refreshHistory')}
+                  </Button>
+                </div>
+              )}
+              {selectedChat && lastLoadedChannelId !== selectedChat.channel_id ? (
+                <div className="flex items-center justify-center h-full">
+                  <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
+                </div>
+              ) : loadingMessages ? (
                 <div className="flex items-center justify-center h-full">
                   <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
                 </div>
@@ -2517,7 +2938,7 @@ export default function MessagingPage() {
                   <p className="text-xs mt-1 text-muted-foreground">{t('messaging.startConversation')}</p>
                 </div>
               ) : messages.length > VIRTUAL_LIST_THRESHOLD ? (
-                <div className="flex-1 min-h-0 flex flex-col w-full max-w-3xl mx-auto">
+                <div key={`virtuoso-${selectedChat?.channel_id ?? 'none'}-${lastLoadedChannelId ?? 'none'}`} className="flex-1 min-h-0 flex flex-col w-full max-w-3xl mx-auto">
                   {loadingOlder && (
                     <div className="flex justify-center py-2 flex-shrink-0">
                       <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
@@ -2536,8 +2957,14 @@ export default function MessagingPage() {
                       loadOlderMessages();
                     }}
                     itemContent={(index, msg) => renderMessageRow(msg, index)}
-                    followOutput="smooth"
-                    initialTopMostItemIndex={messages.length - 1}
+                    followOutput="auto"
+                    initialTopMostItemIndex={{ index: Math.max(0, messages.length - 1), align: 'end' }}
+                    atBottomStateChange={(atBottom) => {
+                      if (atBottom) setShowScrollToBottomButton(false);
+                    }}
+                    rangeChanged={(range) => {
+                      if (range.endIndex < messages.length - 10) setShowScrollToBottomButton(true);
+                    }}
                     className="space-y-3"
                   />
                 </div>
@@ -2554,6 +2981,18 @@ export default function MessagingPage() {
                   ))}
                   <div ref={messagesEndRef} />
                 </div>
+              )}
+              </div>
+              {showScrollToBottomButton && messages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={scrollToLastMessage}
+                  className="absolute bottom-4 right-6 z-10 p-2 rounded-full bg-primary text-primary-foreground shadow-lg hover:bg-primary/90 transition-colors focus:outline-none focus:ring-2 focus:ring-ring"
+                  title={t('messaging.scrollToBottom', 'Вниз к последнему сообщению')}
+                  aria-label={t('messaging.scrollToBottom', 'Вниз к последнему сообщению')}
+                >
+                  <ChevronDown className="w-5 h-5" />
+                </button>
               )}
             </div>
 
@@ -2581,30 +3020,45 @@ export default function MessagingPage() {
                       onClick={() => handlePinChat(chatContextMenu.chat)}
                     />
                   )}
+                  {chatContextMenu.chat.contact_id && (
+                    <ContextMenuItem
+                      icon={<Filter className="w-4 h-4" />}
+                      label={t('pipeline.addToFunnel')}
+                      onClick={() => {
+                        setChatContextMenu(null);
+                        setAddToFunnelFromChat({
+                          contactId: chatContextMenu.chat.contact_id!,
+                          contactName: getChatNameWithOverrides(chatContextMenu.chat),
+                        });
+                      }}
+                    />
+                  )}
                   <ContextMenuSection label={t('messaging.addToFolder')}>
                     <ContextMenuItem
                       label={t('messaging.folderNone')}
                       onClick={() => handleChatFoldersClear(chatContextMenu.chat)}
                     />
-                    {folders.length === 0 ? (
+                    {displayFolders.filter((f) => f.folder_id !== 0).length === 0 ? (
                       <ContextMenuItem label={t('messaging.folderNoFolders')} disabled />
                     ) : (
-                      folders.map((f) => {
-                        const isInFolder = chatFolderIds(chatContextMenu.chat).includes(f.folder_id);
-                        return (
-                          <ContextMenuItem
-                            key={f.id}
-                            icon={isInFolder ? <Check className="w-4 h-4 text-primary" /> : undefined}
-                            label={
-                              <>
-                                <span className="truncate flex-1">{f.folder_title}</span>
-                                <span className="text-[10px] text-muted-foreground shrink-0">{f.is_user_created ? 'CRM' : 'TG'}</span>
-                              </>
-                            }
-                            onClick={() => handleChatFoldersToggle(chatContextMenu.chat, f.folder_id)}
-                          />
-                        );
-                      })
+                      displayFolders
+                        .filter((f) => f.folder_id !== 0)
+                        .map((f) => {
+                          const isInFolder = chatFolderIds(chatContextMenu.chat).includes(f.folder_id);
+                          return (
+                            <ContextMenuItem
+                              key={f.id}
+                              icon={isInFolder ? <Check className="w-4 h-4 text-primary" /> : undefined}
+                              label={
+                                <>
+                                  <span className="truncate flex-1">{f.folder_title}</span>
+                                  <span className="text-[10px] text-muted-foreground shrink-0">{f.is_user_created ? 'CRM' : 'TG'}</span>
+                                </>
+                              }
+                              onClick={() => handleChatFoldersToggle(chatContextMenu.chat, f.folder_id)}
+                            />
+                          );
+                        })
                     )}
                   </ContextMenuSection>
                   {isSelectedAccountMine && (
@@ -2634,6 +3088,15 @@ export default function MessagingPage() {
               onCreateFolder={handleCreateFolder}
               onReorder={handleReorderFolders}
               onUpdateFolder={handleUpdateFolder}
+              onDeleteFolder={handleDeleteFolder}
+              onFolderDeleted={handleFolderDeleted}
+            />
+
+            <AddToFunnelModal
+              isOpen={!!addToFunnelFromChat}
+              onClose={() => setAddToFunnelFromChat(null)}
+              contactId={addToFunnelFromChat?.contactId ?? ''}
+              contactName={addToFunnelFromChat?.contactName}
             />
 
             {/* Context menu: account — Settings (BD Accounts) */}
@@ -2890,6 +3353,21 @@ export default function MessagingPage() {
                     placeholder={isSelectedAccountMine ? t('messaging.writeMessage') : t('messaging.colleagueViewOnly')}
                     value={newMessage}
                     onChange={(e) => setNewMessage(e.target.value)}
+                    onPaste={(e) => {
+                      const items = e.clipboardData?.items;
+                      if (!items?.length || !isSelectedAccountMine) return;
+                      for (let i = 0; i < items.length; i++) {
+                        const item = items[i];
+                        if (item.kind === 'file') {
+                          const file = item.getAsFile();
+                          if (file?.type.startsWith('image/')) {
+                            e.preventDefault();
+                            setPendingFile(file);
+                            return;
+                          }
+                        }
+                      }
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
@@ -2988,26 +3466,60 @@ export default function MessagingPage() {
               </button>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col p-3">
+              {aiSummaryText !== null && (
+                <div className="mb-3 p-3 rounded-lg border border-border bg-muted/20">
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <FileText className="w-4 h-4 text-primary shrink-0" />
+                    <span className="font-medium text-sm">{t('messaging.aiSummary')}</span>
+                  </div>
+                  <p className="text-sm text-foreground whitespace-pre-wrap">{aiSummaryText}</p>
+                </div>
+              )}
               <p className="text-xs text-muted-foreground mb-3">
                 {t('messaging.aiCommandsPlaceholder')}
               </p>
               <div className="space-y-2">
                 {[
-                  { icon: FileText, labelKey: 'aiSummary', descKey: 'aiSummaryDesc' },
-                  { icon: Send, labelKey: 'aiCompose', descKey: 'aiComposeDesc' },
-                  { icon: Bot, labelKey: 'aiReplyForMe', descKey: 'aiReplyForMeDesc' },
-                  { icon: MessageSquare, labelKey: 'aiReplyIdeas', descKey: 'aiReplyIdeasDesc' },
-                  { icon: Zap, labelKey: 'aiTone', descKey: 'aiToneDesc' },
-                ].map(({ icon: Icon, labelKey, descKey }) => (
+                  { icon: FileText, labelKey: 'aiSummary', descKey: 'aiSummaryDesc', action: 'summary' as const },
+                  { icon: Send, labelKey: 'aiCompose', descKey: 'aiComposeDesc', action: null },
+                  { icon: Bot, labelKey: 'aiReplyForMe', descKey: 'aiReplyForMeDesc', action: null },
+                  { icon: MessageSquare, labelKey: 'aiReplyIdeas', descKey: 'aiReplyIdeasDesc', action: null },
+                  { icon: Zap, labelKey: 'aiTone', descKey: 'aiToneDesc', action: null },
+                ].map(({ icon: Icon, labelKey, descKey, action }) => (
                   <button
                     key={labelKey}
                     type="button"
-                    className="w-full text-left p-3 rounded-lg border border-border bg-muted/30 hover:bg-muted/50 transition-colors flex gap-3 items-start"
+                    disabled={action === 'summary' && (!selectedChat || !messages.length || aiSummaryLoading)}
+                    onClick={action === 'summary' ? async () => {
+                      if (!selectedChat || messages.length === 0) return;
+                      setAiSummaryError(null);
+                      setAiSummaryLoading(true);
+                      try {
+                        const res = await apiClient.post<{ summary?: string; empty?: boolean }>('/api/ai/chat/summarize', {
+                          messages: messages.map((m) => ({ content: m.content ?? '', role: m.direction === 'outbound' ? 'user' : 'assistant' })),
+                        });
+                        setAiSummaryText(res.data?.empty ? '' : (res.data?.summary ?? ''));
+                      } catch (e: any) {
+                        const code = e?.response?.data?.code;
+                        const msg = e?.response?.data?.message || e?.message;
+                        setAiSummaryError(code === 'OPENAI_NOT_CONFIGURED' ? t('messaging.aiNotConfigured') : msg);
+                        setAiSummaryText(null);
+                      } finally {
+                        setAiSummaryLoading(false);
+                      }
+                    } : undefined}
+                    className="w-full text-left p-3 rounded-lg border border-border bg-muted/30 hover:bg-muted/50 transition-colors flex gap-3 items-start disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    <Icon className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+                    {aiSummaryLoading && action === 'summary' ? (
+                      <Loader2 className="w-4 h-4 text-primary shrink-0 mt-0.5 animate-spin" />
+                    ) : (
+                      <Icon className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+                    )}
                     <div className="min-w-0 flex-1">
                       <div className="font-medium text-sm">{t(`messaging.${labelKey}`)}</div>
-                      <div className="text-xs text-muted-foreground mt-0.5">{t(`messaging.${descKey}`)}</div>
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        {action === 'summary' && aiSummaryError ? aiSummaryError : t(`messaging.${descKey}`)}
+                      </div>
                     </div>
                   </button>
                 ))}
@@ -3072,7 +3584,7 @@ export default function MessagingPage() {
                     className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-accent text-left disabled:opacity-50"
                   >
                     <ChatAvatar bdAccountId={selectedAccountId} chatId={chat.channel_id} chat={chat} className="w-10 h-10" />
-                    <span className="truncate flex-1">{getChatName(chat)}</span>
+                    <span className="truncate flex-1">{getChatNameWithOverrides(chat)}</span>
                     {forwardingToChatId === chat.channel_id && <Loader2 className="w-4 h-4 animate-spin shrink-0" />}
                   </button>
                 ))}

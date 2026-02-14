@@ -11,6 +11,7 @@ import {
   MessageReceivedEvent,
   MessageDeletedEvent,
   MessageEditedEvent,
+  BDAccountTelegramUpdateEvent,
   BDAccountSyncStartedEvent,
   BDAccountSyncProgressEvent,
   BDAccountSyncCompletedEvent,
@@ -717,6 +718,7 @@ export class TelegramManager {
       const info = this.clients.get(accountId);
       if (!info?.client?.connected) return;
       try {
+        await client.invoke(new Api.updates.GetState());
       } catch (e: any) {
         if (e?.message !== 'TIMEOUT' && !e?.message?.includes('builder.resolve')) {
           console.warn(`[TelegramManager] GetState keepalive failed for ${accountId}:`, e?.message);
@@ -1030,11 +1032,616 @@ export class TelegramManager {
         console.warn(`[TelegramManager] Could not set up EditedMessage for ${accountId}:`, err?.message);
       }
 
+      // Telegram presence/UI updates: typing, user status, read receipt, draft — только для чатов из sync list, публикуем в RabbitMQ → WebSocket.
+      this.setupTelegramPresenceHandlers(client, accountId, organizationId).catch((err) =>
+        console.warn('[TelegramManager] setupTelegramPresenceHandlers failed:', err?.message)
+      );
+      this.setupTelegramOtherHandlers(client, accountId, organizationId).catch((err) =>
+        console.warn('[TelegramManager] setupTelegramOtherHandlers failed:', err?.message)
+      );
+
       // Reconnection and account cleanup are handled in scheduleReconnect, cleanupInactiveClients, and on TIMEOUT.
     } catch (error: any) {
       console.error(`[TelegramManager] Error setting up event handlers:`, error.message);
       // Don't throw - allow client to continue without event handlers
     }
+  }
+
+  /**
+   * Обработчики Telegram presence/UI: typing, user status, read receipt, draft. Публикуем только для чатов из sync list.
+   */
+  private async setupTelegramPresenceHandlers(
+    client: TelegramClient,
+    accountId: string,
+    organizationId: string
+  ): Promise<void> {
+    const publish = async (data: BDAccountTelegramUpdateEvent['data']) => {
+      const ev: BDAccountTelegramUpdateEvent = {
+        id: randomUUID(),
+        type: EventType.BD_ACCOUNT_TELEGRAM_UPDATE,
+        timestamp: new Date(),
+        organizationId,
+        data: { ...data, bdAccountId: accountId, organizationId },
+      };
+      await this.rabbitmq.publishEvent(ev);
+    };
+
+    const ApiAny = Api as any;
+
+    // UpdateUserTyping — личный чат (user_id = собеседник)
+    if (ApiAny.UpdateUserTyping) {
+      try {
+        client.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!client.connected) return;
+              const userId = event?.userId ?? event?.user_id;
+              const channelId = userId != null ? String(userId) : '';
+              if (!channelId) return;
+              const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+              if (!allowed) return;
+              const action = event?.action?.className ?? event?.action?.constructor?.name ?? '';
+              await publish({
+                bdAccountId: accountId,
+                organizationId,
+                updateKind: 'typing',
+                channelId,
+                userId: String(userId),
+                action: action || undefined,
+              });
+            } catch (_) {}
+          },
+          new Raw({ types: [ApiAny.UpdateUserTyping], func: () => true })
+        );
+      } catch (_) {}
+    }
+
+    // UpdateChatUserTyping — группа/канал (chat_id = чат, from_id = кто печатает)
+    if (ApiAny.UpdateChatUserTyping) {
+      try {
+        client.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!client.connected) return;
+              const chatIdRaw = event?.chatId ?? event?.chat_id;
+              const channelId = chatIdRaw != null ? String(chatIdRaw) : '';
+              if (!channelId) return;
+              const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+              if (!allowed) return;
+              const fromId = event?.fromId ?? event?.from_id;
+              let userId: string | undefined;
+              if (fromId) {
+                if (fromId.userId != null) userId = String(fromId.userId);
+                else if (fromId.channelId != null) userId = String(fromId.channelId);
+                else userId = String(fromId);
+              }
+              const action = event?.action?.className ?? event?.action?.constructor?.name ?? '';
+              await publish({
+                bdAccountId: accountId,
+                organizationId,
+                updateKind: 'typing',
+                channelId,
+                userId,
+                action: action || undefined,
+              });
+            } catch (_) {}
+          },
+          new Raw({ types: [ApiAny.UpdateChatUserTyping], func: () => true })
+        );
+      } catch (_) {}
+    }
+
+    // UpdateUserStatus — онлайн/офлайн (без привязки к чату)
+    if (ApiAny.UpdateUserStatus) {
+      try {
+        client.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!client.connected) return;
+              const userId = event?.userId ?? event?.user_id;
+              if (userId == null) return;
+              const status = event?.status?.className ?? event?.status?.constructor?.name ?? '';
+              const expires = (event?.status?.expires ?? event?.status?.until) ?? undefined;
+              await publish({
+                bdAccountId: accountId,
+                organizationId,
+                updateKind: 'user_status',
+                userId: String(userId),
+                status: status || undefined,
+                expires: typeof expires === 'number' ? expires : undefined,
+              });
+            } catch (_) {}
+          },
+          new Raw({ types: [ApiAny.UpdateUserStatus], func: () => true })
+        );
+      } catch (_) {}
+    }
+
+    // UpdateReadHistoryInbox — прочитано в личке/группе (peer + max_id)
+    if (ApiAny.UpdateReadHistoryInbox) {
+      try {
+        client.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!client.connected) return;
+              const peer = event?.peer;
+              let channelId = '';
+              if (peer) {
+                if (peer.userId != null) channelId = String(peer.userId);
+                else if (peer.chatId != null) channelId = String(peer.chatId);
+                else if (peer.channelId != null) channelId = String(peer.channelId);
+              }
+              if (!channelId) return;
+              const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+              if (!allowed) return;
+              const maxId = event?.maxId ?? event?.max_id ?? 0;
+              await publish({
+                bdAccountId: accountId,
+                organizationId,
+                updateKind: 'read_inbox',
+                channelId,
+                maxId,
+              });
+            } catch (_) {}
+          },
+          new Raw({ types: [ApiAny.UpdateReadHistoryInbox], func: () => true })
+        );
+      } catch (_) {}
+    }
+
+    // UpdateReadChannelInbox — прочитано в канале/супергруппе
+    if (ApiAny.UpdateReadChannelInbox) {
+      try {
+        client.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!client.connected) return;
+              const channelIdRaw = event?.channelId ?? event?.channel_id;
+              const channelId = channelIdRaw != null ? String(channelIdRaw) : '';
+              if (!channelId) return;
+              const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+              if (!allowed) return;
+              const maxId = event?.maxId ?? event?.max_id ?? 0;
+              await publish({
+                bdAccountId: accountId,
+                organizationId,
+                updateKind: 'read_channel_inbox',
+                channelId,
+                maxId,
+              });
+            } catch (_) {}
+          },
+          new Raw({ types: [ApiAny.UpdateReadChannelInbox], func: () => true })
+        );
+      } catch (_) {}
+    }
+
+    // UpdateDraftMessage — черновик в чате
+    if (ApiAny.UpdateDraftMessage) {
+      try {
+        client.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!client.connected) return;
+              const peer = event?.peer;
+              let channelId = '';
+              if (peer) {
+                if (peer.userId != null) channelId = String(peer.userId);
+                else if (peer.chatId != null) channelId = String(peer.chatId);
+                else if (peer.channelId != null) channelId = String(peer.channelId);
+              }
+              if (!channelId) return;
+              const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+              if (!allowed) return;
+              const draft = event?.draft;
+              let draftText = '';
+              let replyToMsgId: number | undefined;
+              if (draft) {
+                draftText = (draft.message ?? (draft as any).message ?? '') || '';
+                replyToMsgId = (draft.replyTo as any)?.replyToMsgId ?? (draft as any).replyToMsgId ?? (draft as any).reply_to_msg_id;
+              }
+              await publish({
+                bdAccountId: accountId,
+                organizationId,
+                updateKind: 'draft',
+                channelId,
+                draftText: draftText || undefined,
+                replyToMsgId,
+              });
+            } catch (_) {}
+          },
+          new Raw({ types: [ApiAny.UpdateDraftMessage], func: () => true })
+        );
+      } catch (_) {}
+    }
+  }
+
+  /**
+   * Обработчики прочих Telegram-апдейтов: messageID, read outbox, pinned, notify, user name/phone,
+   * participants, scheduled, poll, config, dcOptions, langPack, theme, phoneCall, callbackQuery, channelTooLong.
+   */
+  private async setupTelegramOtherHandlers(
+    client: TelegramClient,
+    accountId: string,
+    organizationId: string
+  ): Promise<void> {
+    const publish = async (data: BDAccountTelegramUpdateEvent['data']) => {
+      const ev: BDAccountTelegramUpdateEvent = {
+        id: randomUUID(),
+        type: EventType.BD_ACCOUNT_TELEGRAM_UPDATE,
+        timestamp: new Date(),
+        organizationId,
+        data: { ...data, bdAccountId: accountId, organizationId },
+      };
+      await this.rabbitmq.publishEvent(ev);
+    };
+
+    const ApiAny = Api as any;
+
+    const wrap = (types: any[], handler: (event: any) => Promise<void>) => {
+      if (!types.length) return;
+      try {
+        client.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!client.connected) return;
+              await handler(event);
+            } catch (_) {}
+          },
+          new Raw({ types, func: () => true })
+        );
+      } catch (_) {}
+    };
+
+    // UpdateMessageID — подтверждение отправки (temp id → real id)
+    wrap([ApiAny.UpdateMessageID], async (event) => {
+      const telegramMessageId = event?.id;
+      const randomId = event?.randomId ?? event?.random_id;
+      if (telegramMessageId == null || randomId == null) return;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'message_id_confirmed',
+        telegramMessageId: typeof telegramMessageId === 'number' ? telegramMessageId : undefined,
+        randomId: String(randomId),
+      });
+    });
+
+    // UpdateReadHistoryOutbox — собеседник прочитал наши сообщения (личка/группа)
+    wrap([ApiAny.UpdateReadHistoryOutbox], async (event) => {
+      const peer = event?.peer;
+      let channelId = '';
+      if (peer) {
+        if (peer.userId != null) channelId = String(peer.userId);
+        else if (peer.chatId != null) channelId = String(peer.chatId);
+        else if (peer.channelId != null) channelId = String(peer.channelId);
+      }
+      if (!channelId) return;
+      const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+      if (!allowed) return;
+      const maxId = event?.maxId ?? event?.max_id ?? 0;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'read_outbox',
+        channelId,
+        maxId,
+      });
+    });
+
+    // UpdateReadChannelOutbox — прочитано в канале/супергруппе (наши сообщения прочитаны)
+    wrap([ApiAny.UpdateReadChannelOutbox], async (event) => {
+      const channelIdRaw = event?.channelId ?? event?.channel_id;
+      const channelId = channelIdRaw != null ? String(channelIdRaw) : '';
+      if (!channelId) return;
+      const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+      if (!allowed) return;
+      const maxId = event?.maxId ?? event?.max_id ?? 0;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'read_channel_outbox',
+        channelId,
+        maxId,
+      });
+    });
+
+    // UpdateDialogPinned — закрепление диалога
+    wrap([ApiAny.UpdateDialogPinned], async (event) => {
+      const peer = event?.peer;
+      let channelId = '';
+      if (peer) {
+        if (peer.userId != null) channelId = String(peer.userId);
+        else if (peer.chatId != null) channelId = String(peer.chatId);
+        else if (peer.channelId != null) channelId = String(peer.channelId);
+      }
+      if (!channelId) return;
+      const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+      if (!allowed) return;
+      const pinned = Boolean(event?.pinned);
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'dialog_pinned',
+        channelId,
+        pinned,
+      });
+    });
+
+    // UpdatePinnedDialogs — порядок закреплённых диалогов
+    wrap([ApiAny.UpdatePinnedDialogs], async (event) => {
+      const folderId = event?.folderId ?? event?.folder_id ?? 0;
+      const order = event?.order;
+      const orderIds = Array.isArray(order) ? order.map((p: any) => {
+        if (p?.userId != null) return String(p.userId);
+        if (p?.chatId != null) return String(p.chatId);
+        if (p?.channelId != null) return String(p.channelId);
+        return String(p);
+      }).filter(Boolean) : undefined;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'pinned_dialogs',
+        folderId,
+        order: orderIds,
+      });
+    });
+
+    // UpdateNotifySettings — настройки уведомлений
+    wrap([ApiAny.UpdateNotifySettings], async (event) => {
+      const peer = event?.peer;
+      let channelId = '';
+      if (peer) {
+        if (peer.userId != null) channelId = String(peer.userId);
+        else if (peer.chatId != null) channelId = String(peer.chatId);
+        else if (peer.channelId != null) channelId = String(peer.channelId);
+      }
+      const settings = event?.notifySettings ?? event?.notify_settings;
+      const notifySettings = settings && typeof settings === 'object' ? (settings as Record<string, unknown>) : undefined;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'notify_settings',
+        channelId: channelId || undefined,
+        notifySettings,
+      });
+    });
+
+    // UpdateUserName — имя/username пользователя
+    wrap([ApiAny.UpdateUserName], async (event) => {
+      const userId = event?.userId ?? event?.user_id;
+      if (userId == null) return;
+      const firstName = event?.firstName ?? event?.first_name ?? '';
+      const lastName = event?.lastName ?? event?.last_name ?? '';
+      const usernames = event?.usernames ?? event?.username;
+      const list = Array.isArray(usernames) ? usernames : (typeof usernames === 'string' && usernames ? [usernames] : undefined);
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'user_name',
+        userId: String(userId),
+        firstName: firstName || undefined,
+        lastName: lastName || undefined,
+        usernames: list,
+      });
+    });
+
+    // UpdateUserPhone — телефон пользователя
+    wrap([ApiAny.UpdateUserPhone], async (event) => {
+      const userId = event?.userId ?? event?.user_id;
+      const phone = event?.phone ?? '';
+      if (userId == null) return;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'user_phone',
+        userId: String(userId),
+        phone: phone || undefined,
+      });
+    });
+
+    // UpdateChatParticipantAdd — добавлен участник в чат
+    wrap([ApiAny.UpdateChatParticipantAdd], async (event) => {
+      const chatIdRaw = event?.chatId ?? event?.chat_id;
+      const channelId = chatIdRaw != null ? String(chatIdRaw) : '';
+      if (!channelId) return;
+      const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+      if (!allowed) return;
+      const userId = event?.userId ?? event?.user_id;
+      const inviterIdRaw = event?.inviterId ?? event?.inviter_id;
+      let inviterId: string | undefined;
+      if (inviterIdRaw != null) {
+        if (typeof inviterIdRaw === 'object' && inviterIdRaw.userId != null) inviterId = String(inviterIdRaw.userId);
+        else inviterId = String(inviterIdRaw);
+      }
+      const version = event?.version;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'chat_participant_add',
+        channelId,
+        userId: userId != null ? String(userId) : undefined,
+        inviterId,
+        version: typeof version === 'number' ? version : undefined,
+      });
+    });
+
+    // UpdateChatParticipantDelete — удалён участник из чата
+    wrap([ApiAny.UpdateChatParticipantDelete], async (event) => {
+      const chatIdRaw = event?.chatId ?? event?.chat_id;
+      const channelId = chatIdRaw != null ? String(chatIdRaw) : '';
+      if (!channelId) return;
+      const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+      if (!allowed) return;
+      const userId = event?.userId ?? event?.user_id;
+      const version = event?.version;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'chat_participant_delete',
+        channelId,
+        userId: userId != null ? String(userId) : undefined,
+        version: typeof version === 'number' ? version : undefined,
+      });
+    });
+
+    // UpdateNewScheduledMessage — новое отложенное сообщение
+    wrap([ApiAny.UpdateNewScheduledMessage], async (event) => {
+      const message = event?.message;
+      let channelId: string | undefined;
+      if (message?.peerId) {
+        const p = message.peerId;
+        if (p?.userId != null) channelId = String(p.userId);
+        else if (p?.chatId != null) channelId = String(p.chatId);
+        else if (p?.channelId != null) channelId = String(p.channelId);
+      }
+      if (channelId) {
+        const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+        if (!allowed) return;
+      }
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'scheduled_message',
+        channelId,
+        poll: message ? (message as any) : undefined,
+      });
+    });
+
+    // UpdateDeleteScheduledMessages — удалены отложенные сообщения
+    wrap([ApiAny.UpdateDeleteScheduledMessages], async (event) => {
+      const peer = event?.peer;
+      let channelId = '';
+      if (peer) {
+        if (peer.userId != null) channelId = String(peer.userId);
+        else if (peer.chatId != null) channelId = String(peer.chatId);
+        else if (peer.channelId != null) channelId = String(peer.channelId);
+      }
+      const ids = event?.messages ?? event?.messageIds ?? [];
+      const messageIds = Array.isArray(ids) ? ids.filter((n: any) => typeof n === 'number') : [];
+      if (channelId) {
+        const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+        if (!allowed) return;
+      }
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'delete_scheduled_messages',
+        channelId: channelId || undefined,
+        messageIds: messageIds.length ? messageIds : undefined,
+      });
+    });
+
+    // UpdateMessagePoll — обновление опроса
+    wrap([ApiAny.UpdateMessagePoll], async (event) => {
+      const pollId = event?.pollId ?? event?.poll_id;
+      const poll = event?.poll;
+      const results = event?.results;
+      if (pollId == null) return;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'message_poll',
+        pollId: String(pollId),
+        poll: poll && typeof poll === 'object' ? (poll as Record<string, unknown>) : undefined,
+        results: results && typeof results === 'object' ? (results as Record<string, unknown>) : undefined,
+      });
+    });
+
+    // UpdateMessagePollVote — голос в опросе
+    wrap([ApiAny.UpdateMessagePollVote], async (event) => {
+      const pollId = event?.pollId ?? event?.poll_id;
+      const options = event?.options;
+      const opts = Array.isArray(options) ? options.map(String) : undefined;
+      const qts = event?.qts;
+      if (pollId == null) return;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'message_poll_vote',
+        pollId: String(pollId),
+        options: opts,
+        qts: typeof qts === 'number' ? qts : undefined,
+      });
+    });
+
+    // UpdateConfig — конфиг
+    wrap([ApiAny.UpdateConfig], async () => {
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'config',
+      });
+    });
+
+    // UpdateDcOptions — опции дата-центров
+    wrap([ApiAny.UpdateDcOptions], async () => {
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'dc_options',
+      });
+    });
+
+    // UpdateLangPack — языковой пакет
+    wrap([ApiAny.UpdateLangPack], async () => {
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'lang_pack',
+      });
+    });
+
+    // UpdateTheme — тема
+    wrap([ApiAny.UpdateTheme], async () => {
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'theme',
+      });
+    });
+
+    // UpdatePhoneCall — звонок
+    wrap([ApiAny.UpdatePhoneCall], async (event) => {
+      const phoneCall = event?.phoneCall;
+      const phoneCallId = phoneCall?.id ?? (phoneCall as any)?.id;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'phone_call',
+        phoneCallId: phoneCallId != null ? String(phoneCallId) : undefined,
+      });
+    });
+
+    // UpdateBotCallbackQuery — callback от инлайн-кнопки
+    wrap([ApiAny.UpdateBotCallbackQuery], async (event) => {
+      const queryId = event?.queryId ?? event?.query_id;
+      const userId = event?.userId ?? event?.user_id;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'callback_query',
+        queryId: queryId != null ? String(queryId) : undefined,
+        userId: userId != null ? String(userId) : undefined,
+      });
+    });
+
+    // UpdateChannelTooLong — канал/чат «слишком длинный», нужен getDifference
+    wrap([ApiAny.UpdateChannelTooLong], async (event) => {
+      const channelIdRaw = event?.channelId ?? event?.channel_id;
+      const channelId = channelIdRaw != null ? String(channelIdRaw) : '';
+      const pts = event?.pts;
+      if (!channelId) return;
+      const allowed = await this.isChatAllowedForAccount(accountId, channelId);
+      if (!allowed) return;
+      await publish({
+        bdAccountId: accountId,
+        organizationId,
+        updateKind: 'channel_too_long',
+        channelId,
+        pts: typeof pts === 'number' ? pts : undefined,
+      });
+    });
   }
 
   /**
@@ -1131,11 +1738,13 @@ export class TelegramManager {
       ON CONFLICT (bd_account_id, channel_id, telegram_message_id) WHERE (telegram_message_id IS NOT NULL)
       DO UPDATE SET
         content = EXCLUDED.content,
+        reply_to_telegram_id = COALESCE(EXCLUDED.reply_to_telegram_id, messages.reply_to_telegram_id),
         telegram_entities = EXCLUDED.telegram_entities,
         telegram_media = EXCLUDED.telegram_media,
         telegram_extra = EXCLUDED.telegram_extra,
         reactions = COALESCE(EXCLUDED.reactions, messages.reactions),
         our_reactions = COALESCE(EXCLUDED.our_reactions, messages.our_reactions),
+        unread = EXCLUDED.unread,
         updated_at = NOW()
       RETURNING id`,
       [
@@ -1163,21 +1772,43 @@ export class TelegramManager {
   }
 
   /**
-   * Найти или создать контакт по telegram_id (для отображения имени в чатах).
+   * Найти или создать контакт по telegram_id; при наличии userInfo — заполнить/обновить first_name, last_name, username из Telegram.
    */
-  private async ensureContactForTelegramId(organizationId: string, telegramId: string): Promise<string | null> {
+  private async upsertContactFromTelegramUser(
+    organizationId: string,
+    telegramId: string,
+    userInfo?: { firstName: string; lastName: string | null; username: string | null }
+  ): Promise<string | null> {
     if (!telegramId?.trim()) return null;
     const existing = await this.pool.query(
-      'SELECT id FROM contacts WHERE telegram_id = $1 AND organization_id = $2 LIMIT 1',
+      'SELECT id, first_name, last_name, username FROM contacts WHERE telegram_id = $1 AND organization_id = $2 LIMIT 1',
       [telegramId, organizationId]
     );
-    if (existing.rows.length > 0) return existing.rows[0].id;
+    const firstName = userInfo?.firstName?.trim() ?? '';
+    const lastName = (userInfo?.lastName?.trim() || null) ?? null;
+    const username = (userInfo?.username?.trim() || null) ?? null;
+
+    if (existing.rows.length > 0) {
+      const row = existing.rows[0];
+      const id = row.id;
+      if (userInfo) {
+        const newFirst = firstName || row.first_name || '';
+        const newLast = lastName !== null ? lastName : row.last_name;
+        const newUsername = username !== null ? username : row.username;
+        await this.pool.query(
+          `UPDATE contacts SET first_name = $2, last_name = $3, username = $4, updated_at = NOW()
+           WHERE id = $1 AND organization_id = $5`,
+          [id, newFirst, newLast, newUsername, organizationId]
+        );
+      }
+      return id;
+    }
     try {
       const insert = await this.pool.query(
-        `INSERT INTO contacts (organization_id, telegram_id, first_name, last_name)
-         VALUES ($1, $2, '', NULL)
+        `INSERT INTO contacts (organization_id, telegram_id, first_name, last_name, username)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING id`,
-        [organizationId, telegramId]
+        [organizationId, telegramId, firstName || '', lastName, username]
       );
       if (insert.rows.length > 0) return insert.rows[0].id;
     } catch (_) {}
@@ -1186,6 +1817,11 @@ export class TelegramManager {
       [telegramId, organizationId]
     );
     return again.rows.length > 0 ? again.rows[0].id : null;
+  }
+
+  /** Устаревший алиас: только обеспечить контакт по telegram_id без данных из TG. */
+  private async ensureContactForTelegramId(organizationId: string, telegramId: string): Promise<string | null> {
+    return this.upsertContactFromTelegramUser(organizationId, telegramId);
   }
 
   /**
@@ -1272,6 +1908,9 @@ export class TelegramManager {
             bdAccountId: accountId,
             content: serialized.content,
             direction: isOut ? 'outbound' : 'inbound',
+            telegramMessageId: serialized.telegram_message_id || undefined,
+            replyToTelegramId: serialized.reply_to_telegram_id || undefined,
+            createdAt: new Date().toISOString(),
           },
         };
         await this.rabbitmq.publishEvent(event);
@@ -1324,7 +1963,32 @@ export class TelegramManager {
         return;
       }
 
-      const contactId = await this.ensureContactForTelegramId(organizationId, senderId || chatId);
+      let contactId: string | null = null;
+      const tid = senderId || chatId;
+      if (message.fromId && message.fromId instanceof Api.PeerUser) {
+        const clientInfo = this.clients.get(accountId);
+        if (clientInfo?.client) {
+          try {
+            const peer = await clientInfo.client.getInputEntity(parseInt(tid, 10));
+            const entity = await clientInfo.client.getEntity(peer);
+            if (entity && (entity as any).className === 'User') {
+              const u = entity as Api.User;
+              contactId = await this.upsertContactFromTelegramUser(organizationId, tid, {
+                firstName: (u.firstName ?? '').trim(),
+                lastName: (u.lastName ?? '').trim() || null,
+                username: (u.username ?? '').trim() || null,
+              });
+            }
+          } catch (e: any) {
+            if (e?.message !== 'TIMEOUT' && !e?.message?.includes('Could not find')) {
+              console.warn('[TelegramManager] getEntity for contact enrichment:', e?.message);
+            }
+          }
+        }
+      }
+      if (contactId == null) {
+        contactId = await this.upsertContactFromTelegramUser(organizationId, tid);
+      }
       const direction = isOut ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
 
       const serialized = serializeMessage(message);
@@ -1367,6 +2031,11 @@ export class TelegramManager {
             bdAccountId: accountId,
             content: serialized.content,
             direction: isOut ? 'outbound' : 'inbound',
+            telegramMessageId: serialized.telegram_message_id || undefined,
+            replyToTelegramId: serialized.reply_to_telegram_id || undefined,
+            telegramMedia: serialized.telegram_media || undefined,
+            telegramEntities: serialized.telegram_entities || undefined,
+            createdAt: new Date().toISOString(),
           },
         };
         await this.rabbitmq.publishEvent(event);
@@ -1958,6 +2627,9 @@ export class TelegramManager {
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo?.isConnected) return false;
 
+    const accRow = await this.pool.query('SELECT organization_id FROM bd_accounts WHERE id = $1 LIMIT 1', [accountId]);
+    const organizationId = accRow.rows[0]?.organization_id;
+
     let title = chatId;
     let peerType = 'user';
     try {
@@ -1971,6 +2643,13 @@ export class TelegramManager {
           const u = entity as any;
           title = [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || title;
           peerType = 'user';
+          if (organizationId) {
+            await this.upsertContactFromTelegramUser(organizationId, chatId, {
+              firstName: (u.firstName ?? '').trim(),
+              lastName: (u.lastName ?? '').trim() || null,
+              username: (u.username ?? '').trim() || null,
+            });
+          }
         } else if (c === 'Chat') {
           title = (entity as any).title?.trim() || title;
           peerType = 'chat';
@@ -2313,6 +2992,33 @@ export class TelegramManager {
       console.error(`[TelegramManager] Error sending message:`, error);
       throw error;
     }
+  }
+
+  /**
+   * Save draft in Telegram (messages.SaveDraft). Empty text clears the draft.
+   */
+  async saveDraft(
+    accountId: string,
+    chatId: string,
+    text: string,
+    opts: { replyToMsgId?: number } = {}
+  ): Promise<void> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const client = clientInfo.client;
+    const ApiAny = Api as any;
+    const peer = await client.getInputEntity(chatId);
+    const replyTo = opts.replyToMsgId != null ? { replyToMsgId: opts.replyToMsgId } : undefined;
+    await client.invoke(
+      new ApiAny.messages.SaveDraft({
+        peer,
+        message: text || '',
+        ...(replyTo ? { replyTo } : {}),
+      })
+    );
+    clientInfo.lastActivity = new Date();
   }
 
   /**

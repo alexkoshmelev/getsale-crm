@@ -30,7 +30,25 @@ function getUser(req: express.Request) {
   return {
     id: req.headers['x-user-id'] as string,
     organizationId: req.headers['x-organization-id'] as string,
+    role: (req.headers['x-user-role'] as string) || '',
   };
+}
+
+/** Проверка права по role_permissions (owner всегда true). */
+async function canPermission(pool: Pool, role: string, resource: string, action: string): Promise<boolean> {
+  const roleLower = (role || '').toLowerCase();
+  try {
+    const r = await pool.query(
+      `SELECT 1 FROM role_permissions WHERE role = $1 AND resource = $2 AND (action = $3 OR action = '*') LIMIT 1`,
+      [roleLower, resource, action]
+    );
+    if (r.rows.length > 0) return true;
+    if (roleLower === 'owner') return true;
+    return false;
+  } catch {
+    if (roleLower === 'owner') return true;
+    return false;
+  }
 }
 
 app.use(express.json());
@@ -357,6 +375,121 @@ app.get('/api/messaging/chats', async (req, res) => {
   }
 });
 
+// Search chats by name (for command palette). Scopes to org and sync chats only.
+app.get('/api/messaging/search', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '5'), 10) || 5, 1), 20);
+    if (!q || q.length < 2) {
+      return res.json({ items: [] });
+    }
+    const searchPattern = `%${q.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`;
+    const result = await pool.query(
+      `SELECT
+        'telegram' AS channel,
+        s.telegram_chat_id::text AS channel_id,
+        s.bd_account_id,
+        COALESCE(
+          c.display_name,
+          CASE WHEN NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), '') IS NOT NULL
+               AND TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) NOT LIKE 'Telegram %%'
+               THEN TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) ELSE NULL END,
+          c.username,
+          NULLIF(TRIM(COALESCE(s.title, '')), ''),
+          c.telegram_id::text,
+          s.telegram_chat_id::text
+        ) AS name
+       FROM bd_account_sync_chats s
+       JOIN bd_accounts a ON a.id = s.bd_account_id AND a.organization_id = $1
+       LEFT JOIN LATERAL (
+         SELECT m0.contact_id FROM messages m0
+         WHERE m0.organization_id = a.organization_id AND m0.channel = 'telegram'
+           AND m0.channel_id = s.telegram_chat_id::text AND m0.bd_account_id = s.bd_account_id
+         LIMIT 1
+       ) mid ON true
+       LEFT JOIN contacts c ON c.id = mid.contact_id
+       WHERE s.peer_type IN ('user', 'chat')
+         AND (
+           s.title ILIKE $2
+           OR c.display_name ILIKE $2
+           OR CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,'')) ILIKE $2
+           OR c.username ILIKE $2
+           OR c.telegram_id::text ILIKE $2
+         )
+       ORDER BY s.title, c.display_name NULLS LAST
+       LIMIT $3`,
+      [user.organizationId, searchPattern, limit]
+    );
+    res.json({ items: result.rows });
+  } catch (error) {
+    console.error('Error searching chats:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Unfurl link preview (Open Graph). Requires auth to avoid abuse.
+const UNFURL_TIMEOUT_MS = 4000;
+const UNFURL_MAX_BODY = 300000; // 300kb
+const URL_REGEX = /^https?:\/\/[^\s<>"']+$/i;
+
+app.get('/api/messaging/unfurl', async (req, res) => {
+  try {
+    getUser(req); // require auth
+    const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+    if (!rawUrl || !URL_REGEX.test(rawUrl)) {
+      return res.status(400).json({ error: 'Valid url query parameter is required' });
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), UNFURL_TIMEOUT_MS);
+    const response = await fetch(rawUrl, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'GetSale-CRM-Bot/1.0 (link preview)' },
+      redirect: 'follow',
+    });
+    clearTimeout(timeout);
+    if (!response.ok || !response.body) {
+      return res.json({ title: null, description: null, image: null });
+    }
+    const contentLength = response.headers.get('content-length');
+    if (contentLength && parseInt(contentLength, 10) > UNFURL_MAX_BODY) {
+      return res.json({ title: null, description: null, image: null });
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const reader = (response.body as any).getReader();
+    try {
+      while (total < UNFURL_MAX_BODY) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const buf = Buffer.from(value);
+        total += buf.length;
+        chunks.push(total <= UNFURL_MAX_BODY ? buf : buf.subarray(0, UNFURL_MAX_BODY - (total - buf.length)));
+        if (total >= UNFURL_MAX_BODY) break;
+      }
+    } finally {
+      reader.releaseLock?.();
+    }
+    const html = Buffer.concat(chunks).toString('utf8', 0, Math.min(total, UNFURL_MAX_BODY));
+    const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)?.[1];
+    const ogDesc = html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:description["']/i)?.[1];
+    const ogImage = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i)?.[1];
+    const title = ogTitle ? ogTitle.replace(/&amp;/g, '&').replace(/&#39;/g, "'").slice(0, 200) : null;
+    const description = ogDesc ? ogDesc.replace(/&amp;/g, '&').replace(/&#39;/g, "'").slice(0, 300) : null;
+    let image: string | null = ogImage ? ogImage.replace(/&amp;/g, '&').trim() : null;
+    if (image && !/^https?:\/\//i.test(image)) image = new URL(image, rawUrl).href;
+    res.json({ title, description, image });
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      return res.json({ title: null, description: null, image: null });
+    }
+    res.json({ title: null, description: null, image: null });
+  }
+});
+
 // Mark all messages as read for a chat
 app.post('/api/messaging/chats/:chatId/mark-all-read', async (req, res) => {
   try {
@@ -458,6 +591,10 @@ app.post('/api/messaging/pinned-chats', async (req, res) => {
 app.delete('/api/messaging/pinned-chats/:channelId', async (req, res) => {
   try {
     const user = getUser(req);
+    const allowed = await canPermission(pool, user.role, 'messaging', 'chat.delete');
+    if (!allowed) {
+      return res.status(403).json({ error: 'Forbidden: no permission to unpin chats' });
+    }
     const { channelId } = req.params;
     const { bdAccountId } = req.query;
     if (!bdAccountId || String(bdAccountId).trim() === '') {
@@ -691,7 +828,11 @@ app.post('/api/messaging/send', async (req, res) => {
       return res.status(400).json({ error: 'Unsupported channel or sending failed' });
     }
 
-    // Publish event
+    // Get updated message first so we can include full payload in event (for real-time UI)
+    const updatedResult = await pool.query('SELECT * FROM messages WHERE id = $1', [message.id]);
+    const updatedRow = updatedResult.rows[0] as Record<string, unknown> | undefined;
+
+    // Publish event with channelId/content so frontend can show sent message without refresh
     const event: MessageSentEvent = {
       id: randomUUID(),
       type: EventType.MESSAGE_SENT,
@@ -703,13 +844,16 @@ app.post('/api/messaging/send', async (req, res) => {
         channel,
         contactId,
         bdAccountId,
+        channelId: updatedRow ? String(updatedRow.channel_id ?? '') : undefined,
+        content: updatedRow && typeof updatedRow.content === 'string' ? updatedRow.content : undefined,
+        direction: 'outbound',
+        telegramMessageId: updatedRow?.telegram_message_id != null ? updatedRow.telegram_message_id : undefined,
+        createdAt: updatedRow && updatedRow.created_at != null ? String(updatedRow.created_at) : undefined,
       },
     };
     await rabbitmq.publishEvent(event);
 
-    // Get updated message
-    const updatedResult = await pool.query('SELECT * FROM messages WHERE id = $1', [message.id]);
-    res.json(updatedResult.rows[0]);
+    res.json(updatedRow);
   } catch (error: any) {
     console.error('Error sending message:', error);
     res.status(500).json({ 
@@ -723,6 +867,10 @@ app.post('/api/messaging/send', async (req, res) => {
 app.delete('/api/messaging/messages/:id', async (req, res) => {
   try {
     const user = getUser(req);
+    const allowed = await canPermission(pool, user.role, 'messaging', 'message.delete');
+    if (!allowed) {
+      return res.status(403).json({ error: 'Forbidden: no permission to delete messages' });
+    }
     const { id } = req.params;
 
     const msgResult = await pool.query(
@@ -732,10 +880,11 @@ app.delete('/api/messaging/messages/:id', async (req, res) => {
     if (msgResult.rows.length === 0) {
       return res.status(404).json({ error: 'Message not found' });
     }
-    const msg = msgResult.rows[0] as { id: string; organization_id: string; bd_account_id: string | null; channel_id: string; telegram_message_id: number | null };
+    const msg = msgResult.rows[0] as { id: string; organization_id: string; bd_account_id: string | null; channel_id: string; telegram_message_id: number | string | null };
 
     if (msg.bd_account_id && msg.telegram_message_id != null) {
       try {
+        const telegramMessageId = typeof msg.telegram_message_id === 'string' ? parseInt(msg.telegram_message_id, 10) : msg.telegram_message_id;
         const delRes = await fetch(
           `${BD_ACCOUNTS_SERVICE_URL}/api/bd-accounts/${msg.bd_account_id}/delete-message`,
           {
@@ -746,8 +895,8 @@ app.delete('/api/messaging/messages/:id', async (req, res) => {
               'X-Organization-Id': user.organizationId,
             },
             body: JSON.stringify({
-              channelId: msg.channel_id,
-              telegramMessageId: msg.telegram_message_id,
+              channelId: String(msg.channel_id),
+              telegramMessageId: Number.isNaN(telegramMessageId) ? Number(msg.telegram_message_id) : telegramMessageId,
             }),
           }
         );

@@ -37,6 +37,7 @@ import { Breadcrumbs } from '@/components/layout/Breadcrumbs';
 import { NotificationsDropdown } from '@/components/layout/NotificationsDropdown';
 import { KeyboardShortcutsModal } from '@/components/layout/KeyboardShortcutsModal';
 import { HelpDropdown } from '@/components/layout/HelpDropdown';
+import { OnboardingModal } from '@/components/layout/OnboardingModal';
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -443,13 +444,14 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
               'min-w-0',
               pathname === '/dashboard/messaging'
                 ? 'flex-1 min-h-0 flex flex-col overflow-hidden'
-                : 'flex-1 min-h-0 overflow-auto'
+                : 'flex-1 min-h-0 flex flex-col overflow-auto'
             )}
           >
             {children}
           </div>
         </main>
       </div>
+      <OnboardingModal />
       <KeyboardShortcutsModal isOpen={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
     </div>
   );

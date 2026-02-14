@@ -2,9 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import Link from 'next/link';
 import axios from 'axios';
 import { BarChart3, TrendingUp, Users, DollarSign } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
+import { EmptyState } from '@/components/ui/EmptyState';
+import Button from '@/components/ui/Button';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -46,6 +49,37 @@ export default function AnalyticsPage() {
   }
 
   const totalValue = pipelineValue.reduce((sum, stage) => sum + (parseFloat(stage.total_value) || 0), 0);
+  const hasNoData = pipelineValue.length === 0 && teamPerformance.length === 0 && conversionRates.length === 0;
+
+  if (hasNoData) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="font-heading text-2xl font-bold text-foreground tracking-tight mb-1">
+            {t('analytics.title')}
+          </h1>
+          <p className="text-sm text-muted-foreground">{t('analytics.subtitle')}</p>
+        </div>
+        <div className="flex-1 flex items-center justify-center py-16">
+          <EmptyState
+            icon={BarChart3}
+            title={t('analytics.emptyTitle')}
+            description={t('analytics.emptyDesc')}
+            action={
+              <div className="flex flex-wrap gap-2 justify-center">
+                <Link href="/dashboard/crm">
+                  <Button>{t('analytics.emptyCta')}</Button>
+                </Link>
+                <Link href="/dashboard/pipeline">
+                  <Button variant="outline">{t('analytics.emptyCtaPipeline')}</Button>
+                </Link>
+              </div>
+            }
+          />
+        </div>
+      </div>
+    );
+  }
 
   const statCards = [
     { key: 'totalValue', value: `$${totalValue.toLocaleString()}`, icon: DollarSign, accent: 'success' },
