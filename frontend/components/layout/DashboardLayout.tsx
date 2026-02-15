@@ -346,7 +346,9 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
         className={clsx(
           'flex flex-col transition-[margin] duration-200 ease-in-out',
           mainMargin,
-          pathname === '/dashboard/messaging' ? 'h-screen overflow-hidden' : 'min-h-screen'
+          (pathname === '/dashboard/messaging' || pathname === '/dashboard/pipeline')
+            ? 'h-screen overflow-hidden'
+            : 'min-h-screen'
         )}
       >
         <header className="shrink-0 z-10 bg-card/95 backdrop-blur-sm border-b border-border h-14 min-h-[3.5rem] px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2 shadow-soft">
@@ -435,16 +437,19 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
         <main
           className={clsx(
             'flex-1 min-h-0 flex flex-col animate-in fade-in duration-200',
-            pathname === '/dashboard/messaging' ? 'p-0 overflow-hidden' : 'p-4 sm:p-6 overflow-auto'
+            (pathname === '/dashboard/messaging' || pathname === '/dashboard/pipeline')
+              ? 'p-0 overflow-hidden'
+              : 'p-4 sm:p-6 overflow-auto'
           )}
         >
           <div className="sm:hidden mb-2 shrink-0"><Breadcrumbs /></div>
           <div
             className={clsx(
               'min-w-0',
-              pathname === '/dashboard/messaging'
+              (pathname === '/dashboard/messaging' || pathname === '/dashboard/pipeline')
                 ? 'flex-1 min-h-0 flex flex-col overflow-hidden'
-                : 'flex-1 min-h-0 flex flex-col overflow-auto'
+                : 'flex-1 min-h-0 flex flex-col overflow-auto',
+              pathname === '/dashboard/pipeline' && 'p-4 sm:p-6'
             )}
           >
             {children}

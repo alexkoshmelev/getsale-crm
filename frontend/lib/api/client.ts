@@ -1,6 +1,15 @@
 import axios from 'axios';
 import { useAuthStore } from '@/lib/stores/auth-store';
 
+function logoutAndRedirectToLogin(): void {
+  try {
+    useAuthStore.getState().logout();
+  } catch (_) {}
+  if (typeof window !== 'undefined' && window.location.pathname !== '/auth/login') {
+    window.location.href = '/auth/login';
+  }
+}
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export const apiClient = axios.create({
@@ -72,6 +81,7 @@ apiClient.interceptors.response.use(
     } catch (refreshError) {
       apiClientQueue.forEach(({ reject: r }) => r(refreshError));
       apiClientQueue.length = 0;
+      logoutAndRedirectToLogin();
     } finally {
       apiClientRefreshing = false;
     }

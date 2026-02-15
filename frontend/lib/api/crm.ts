@@ -158,6 +158,9 @@ export interface Deal {
   title: string;
   value?: number | null;
   currency?: string | null;
+  probability?: number | null;
+  expected_close_date?: string | null;
+  comments?: string | null;
   history?: unknown[];
   created_at: string;
   updated_at: string;
@@ -169,6 +172,11 @@ export interface Deal {
   stageName?: string;
   stage_order?: number;
   stageOrder?: number;
+  contactName?: string | null;
+  ownerEmail?: string | null;
+  bd_account_id?: string | null;
+  channel?: string | null;
+  channel_id?: string | null;
 }
 
 export interface DealsListParams extends PaginationParams {
@@ -196,13 +204,19 @@ export async function fetchDeal(id: string): Promise<Deal> {
 }
 
 export async function createDeal(body: {
-  companyId: string;
+  companyId?: string | null;
   contactId?: string | null;
   pipelineId: string;
   stageId?: string | null;
   title: string;
   value?: number | null;
   currency?: string;
+  probability?: number | null;
+  expectedCloseDate?: string | null;
+  comments?: string | null;
+  bdAccountId?: string | null;
+  channel?: string | null;
+  channelId?: string | null;
 }): Promise<Deal> {
   const { data } = await apiClient.post<Deal>('/api/crm/deals', body);
   return data;
@@ -210,7 +224,16 @@ export async function createDeal(body: {
 
 export async function updateDeal(
   id: string,
-  body: Partial<{ title: string; value: number | null; currency: string | null; contactId: string | null; ownerId: string }>
+  body: Partial<{
+    title: string;
+    value: number | null;
+    currency: string | null;
+    contactId: string | null;
+    ownerId: string;
+    probability: number | null;
+    expectedCloseDate: string | null;
+    comments: string | null;
+  }>
 ): Promise<Deal> {
   const { data } = await apiClient.put<Deal>(`/api/crm/deals/${id}`, body);
   return data;

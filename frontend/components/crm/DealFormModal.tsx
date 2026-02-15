@@ -1,12 +1,15 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
+import { MessageSquare } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Select, SelectOption } from '@/components/ui/Select';
 import Button from '@/components/ui/Button';
 import { Deal, Company, Contact, createDeal, updateDeal, fetchCompanies, fetchContacts } from '@/lib/api/crm';
 import { Pipeline, Stage, fetchPipelines, fetchStages } from '@/lib/api/pipeline';
+import { DealChatAvatar } from '@/components/crm/DealChatAvatar';
 
 interface DealFormModalProps {
   isOpen: boolean;
@@ -32,6 +35,9 @@ export function DealFormModal({
   const [title, setTitle] = useState('');
   const [value, setValue] = useState('');
   const [currency, setCurrency] = useState('RUB');
+  const [probability, setProbability] = useState('');
+  const [expectedCloseDate, setExpectedCloseDate] = useState('');
+  const [comments, setComments] = useState('');
 
   const [companies, setCompanies] = useState<Company[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -85,6 +91,9 @@ export function DealFormModal({
       setTitle(edit.title ?? '');
       setValue(edit.value != null ? String(edit.value) : '');
       setCurrency(edit.currency ?? 'RUB');
+      setProbability(edit.probability != null ? String(edit.probability) : '');
+      setExpectedCloseDate(edit.expected_close_date ?? '');
+      setComments(edit.comments ?? '');
     } else {
       setCompanyId(preselectedCompanyId ?? '');
       setContactId(preselectedContactId ?? '');
@@ -93,6 +102,9 @@ export function DealFormModal({
       setTitle('');
       setValue('');
       setCurrency('RUB');
+      setProbability('');
+      setExpectedCloseDate('');
+      setComments('');
     }
     setError('');
   }, [edit, preselectedCompanyId, preselectedContactId, isOpen]);
@@ -121,6 +133,8 @@ export function DealFormModal({
       setError('Выберите компанию и воронку');
       return;
     }
+    const probNum = probability.trim() === '' ? null : parseInt(probability, 10);
+    const probValue = probNum !== null && !Number.isNaN(probNum) ? probNum : null;
     setLoading(true);
     try {
       if (isEdit) {
@@ -129,6 +143,9 @@ export function DealFormModal({
           value: value ? parseFloat(value) : null,
           currency: currency || null,
           contactId: contactId || null,
+          probability: probValue,
+          expectedCloseDate: expectedCloseDate.trim() || null,
+          comments: comments.trim() || null,
         });
       } else {
         await createDeal({
@@ -139,6 +156,9 @@ export function DealFormModal({
           title: title.trim(),
           value: value ? parseFloat(value) : undefined,
           currency: currency || undefined,
+          probability: probValue ?? undefined,
+          expectedCloseDate: expectedCloseDate.trim() || undefined,
+          comments: comments.trim() || undefined,
         });
       }
       onSuccess();
@@ -159,6 +179,26 @@ export function DealFormModal({
         </div>
       )}
       <form onSubmit={handleSubmit} className="space-y-4">
+        {isEdit && edit?.bd_account_id && edit?.channel_id && (
+          <div className="flex items-center gap-3 pb-2 border-b border-border">
+            <DealChatAvatar
+              bdAccountId={edit.bd_account_id}
+              channelId={edit.channel_id}
+              title={edit.title}
+              className="w-12 h-12"
+            />
+            <div className="flex-1 min-w-0 flex items-center justify-between gap-2">
+              <span className="font-medium text-foreground truncate">{edit.title}</span>
+              <Link
+                href={`/dashboard/messaging?bdAccountId=${encodeURIComponent(edit.bd_account_id)}&open=${encodeURIComponent(edit.channel_id)}`}
+                className="shrink-0 inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
+              >
+                <MessageSquare className="w-4 h-4" />
+                Открыть чат
+              </Link>
+            </div>
+          </div>
+        )}
         {!isEdit && (
           <>
             <Select
@@ -227,6 +267,33 @@ export function DealFormModal({
               <option value="EUR">EUR</option>
             </select>
           </div>
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <Input
+            label="Вероятность, %"
+            type="number"
+            min={0}
+            max={100}
+            value={probability}
+            onChange={(e) => setProbability(e.target.value)}
+            placeholder="0–100"
+          />
+          <Input
+            label="Ожидаемая дата закрытия"
+            type="date"
+            value={expectedCloseDate}
+            onChange={(e) => setExpectedCloseDate(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Комментарий</label>
+          <textarea
+            value={comments}
+            onChange={(e) => setComments(e.target.value)}
+            placeholder="Заметки по сделке"
+            rows={3}
+            className="w-full px-4 py-2.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary outline-none resize-y"
+          />
         </div>
         <div className="flex gap-3 pt-2">
           <Button type="button" variant="outline" className="flex-1" onClick={onClose}>

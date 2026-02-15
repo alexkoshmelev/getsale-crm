@@ -4,7 +4,8 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '@/components/ui/Modal';
 import Button from '@/components/ui/Button';
-import { fetchPipelines, fetchContactPipelineIds, addLeadToPipeline, type Pipeline } from '@/lib/api/pipeline';
+import { fetchPipelines, type Pipeline } from '@/lib/api/pipeline';
+import { fetchDeals, createDeal } from '@/lib/api/crm';
 
 interface AddToFunnelModalProps {
   isOpen: boolean;
@@ -12,6 +13,12 @@ interface AddToFunnelModalProps {
   onSuccess?: () => void;
   contactId: string;
   contactName?: string;
+  /** Название сделки (для группового чата — название чата) */
+  dealTitle?: string;
+  /** При добавлении из чата — привязка к чату и отображение аватарки в воронке */
+  bdAccountId?: string | null;
+  channel?: string | null;
+  channelId?: string | null;
 }
 
 export function AddToFunnelModal({
@@ -20,6 +27,10 @@ export function AddToFunnelModal({
   onSuccess,
   contactId,
   contactName,
+  dealTitle,
+  bdAccountId,
+  channel,
+  channelId,
 }: AddToFunnelModalProps) {
   const { t } = useTranslation();
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
@@ -35,7 +46,10 @@ export function AddToFunnelModal({
       setSelectedPipelineId('');
       setContactPipelineIds([]);
       setLoading(true);
-      Promise.all([fetchPipelines(), fetchContactPipelineIds(contactId)])
+      Promise.all([
+        fetchPipelines(),
+        fetchDeals({ contactId, limit: 500 }).then((r) => [...new Set(r.items.map((d) => d.pipeline_id))]),
+      ])
         .then(([pls, ids]) => {
           setPipelines(pls);
           setContactPipelineIds(ids);
@@ -54,13 +68,19 @@ export function AddToFunnelModal({
     setSubmitting(true);
     setError(null);
     try {
-      await addLeadToPipeline({ contactId, pipelineId: selectedPipelineId });
+      await createDeal({
+        contactId,
+        pipelineId: selectedPipelineId,
+        title: (dealTitle ?? contactName ?? '').trim() || t('pipeline.dealFromContact', 'Сделка по контакту'),
+        ...(bdAccountId && channel != null && channelId != null
+          ? { bdAccountId, channel, channelId }
+          : {}),
+      });
       onSuccess?.();
       onClose();
     } catch (err: any) {
       const msg = err?.response?.data?.error ?? err?.message ?? 'Failed to add to funnel';
-      const code = err?.response?.data?.code;
-      setError(code === 'ALREADY_IN_PIPELINE' ? t('pipeline.alreadyInFunnel') : msg);
+      setError(msg);
     } finally {
       setSubmitting(false);
     }

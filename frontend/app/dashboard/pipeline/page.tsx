@@ -3,33 +3,18 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
-import { Plus, Circle, LayoutGrid, List, GripVertical, MoreVertical, Settings } from 'lucide-react';
+import { Plus, Circle, LayoutGrid, List, GripVertical, MoreVertical, Settings, Pencil, Trash2 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Pagination } from '@/components/ui/Pagination';
-import {
-  fetchPipelines,
-  fetchStages,
-  fetchLeads,
-  updateLead,
-  removeLead,
-  type Pipeline,
-  type Stage,
-  type Lead,
-} from '@/lib/api/pipeline';
+import { fetchPipelines, fetchStages, type Pipeline, type Stage } from '@/lib/api/pipeline';
+import { fetchDeals, updateDealStage, deleteDeal, type Deal } from '@/lib/api/crm';
 import { PipelineManageModal } from '@/components/pipeline/PipelineManageModal';
+import { DealFormModal } from '@/components/crm/DealFormModal';
+import { DealChatAvatar } from '@/components/crm/DealChatAvatar';
 
-function leadDisplayName(lead: Lead): string {
-  const dn = (lead.display_name ?? '').trim();
-  if (dn) return dn;
-  const fn = (lead.first_name ?? '').trim();
-  const ln = (lead.last_name ?? '').trim();
-  const full = [fn, ln].filter(Boolean).join(' ').trim();
-  if (full) return full;
-  const un = (lead.username ?? '').trim();
-  if (un) return un.startsWith('@') ? un : `@${un}`;
-  if (lead.telegram_id) return String(lead.telegram_id);
-  return lead.email?.trim() || '—';
+function dealCardTitle(deal: Deal): string {
+  return (deal.title ?? '').trim() || (deal.companyName ?? deal.company_name ?? '').trim() || '—';
 }
 
 export default function PipelinePage() {
@@ -37,16 +22,17 @@ export default function PipelinePage() {
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
   const [stages, setStages] = useState<Stage[]>([]);
-  const [leads, setLeads] = useState<Lead[]>([]);
+  const [deals, setDeals] = useState<Deal[]>([]);
   const [viewMode, setViewMode] = useState<'kanban' | 'list'>('kanban');
   const [listPage, setListPage] = useState(1);
   const [listTotal, setListTotal] = useState(0);
   const [listLimit] = useState(10);
   const [loading, setLoading] = useState(true);
-  const [draggingLeadId, setDraggingLeadId] = useState<string | null>(null);
-  const [movingLeadId, setMovingLeadId] = useState<string | null>(null);
-  const [leadMenuId, setLeadMenuId] = useState<string | null>(null);
+  const [draggingDealId, setDraggingDealId] = useState<string | null>(null);
+  const [movingDealId, setMovingDealId] = useState<string | null>(null);
+  const [dealMenuId, setDealMenuId] = useState<string | null>(null);
   const [manageModalOpen, setManageModalOpen] = useState(false);
+  const [editingDeal, setEditingDeal] = useState<Deal | null>(null);
 
   const loadPipelines = useCallback(async () => {
     try {
@@ -62,24 +48,24 @@ export default function PipelinePage() {
     }
   }, [selectedPipelineId]);
 
-  const loadStagesAndLeads = useCallback(async () => {
+  const loadStagesAndDeals = useCallback(async () => {
     if (!selectedPipelineId) {
       setStages([]);
-      setLeads([]);
+      setDeals([]);
       return;
     }
     setLoading(true);
     try {
-      const [stagesList, leadsRes] = await Promise.all([
+      const [stagesList, dealsRes] = await Promise.all([
         fetchStages(selectedPipelineId),
-        fetchLeads({ pipelineId: selectedPipelineId, limit: 500 }),
+        fetchDeals({ pipelineId: selectedPipelineId, limit: 500 }),
       ]);
       setStages(stagesList.sort((a, b) => a.order_index - b.order_index));
-      setLeads(leadsRes.items);
+      setDeals(dealsRes.items);
     } catch (e) {
-      console.error('Failed to load stages/leads', e);
+      console.error('Failed to load stages/deals', e);
       setStages([]);
-      setLeads([]);
+      setDeals([]);
     } finally {
       setLoading(false);
     }
@@ -90,22 +76,22 @@ export default function PipelinePage() {
   }, []);
 
   useEffect(() => {
-    loadStagesAndLeads();
-  }, [loadStagesAndLeads]);
+    loadStagesAndDeals();
+  }, [loadStagesAndDeals]);
 
   const loadListPage = useCallback(async () => {
     if (!selectedPipelineId) return;
     setLoading(true);
     try {
-      const res = await fetchLeads({
+      const res = await fetchDeals({
         pipelineId: selectedPipelineId,
         page: listPage,
         limit: listLimit,
       });
-      setLeads(res.items);
+      setDeals(res.items);
       setListTotal(res.pagination.total);
     } catch (e) {
-      console.error('Failed to load leads list', e);
+      console.error('Failed to load deals list', e);
     } finally {
       setLoading(false);
     }
@@ -116,39 +102,39 @@ export default function PipelinePage() {
   }, [viewMode, selectedPipelineId, listPage, loadListPage]);
 
   const handleDrop = useCallback(
-    async (leadId: string, toStageId: string) => {
-      setDraggingLeadId(null);
-      const lead = leads.find((l) => l.id === leadId);
-      if (!lead || lead.stage_id === toStageId) return;
-      setMovingLeadId(leadId);
+    async (dealId: string, toStageId: string) => {
+      setDraggingDealId(null);
+      const deal = deals.find((d) => d.id === dealId);
+      if (!deal || deal.stage_id === toStageId) return;
+      setMovingDealId(dealId);
       try {
-        await updateLead(leadId, { stageId: toStageId });
-        setLeads((prev) =>
-          prev.map((l) => (l.id === leadId ? { ...l, stage_id: toStageId } : l))
+        await updateDealStage(dealId, { stageId: toStageId });
+        setDeals((prev) =>
+          prev.map((d) => (d.id === dealId ? { ...d, stage_id: toStageId } : d))
         );
       } catch (e) {
-        console.error('Failed to move lead', e);
+        console.error('Failed to move deal', e);
       } finally {
-        setMovingLeadId(null);
+        setMovingDealId(null);
       }
     },
-    [leads]
+    [deals]
   );
 
-  const handleRemoveLead = useCallback(
-    async (leadId: string) => {
-      setLeadMenuId(null);
+  const handleRemoveDeal = useCallback(
+    async (dealId: string) => {
+      setDealMenuId(null);
       try {
-        await removeLead(leadId);
-        setLeads((prev) => prev.filter((l) => l.id !== leadId));
+        await deleteDeal(dealId);
+        setDeals((prev) => prev.filter((d) => d.id !== dealId));
       } catch (e) {
-        console.error('Failed to remove lead', e);
+        console.error('Failed to remove deal', e);
       }
     },
     []
   );
 
-  const leadsByStage = (stageId: string) => leads.filter((l) => l.stage_id === stageId);
+  const dealsByStage = (stageId: string) => deals.filter((d) => d.stage_id === stageId);
 
   if (pipelines.length === 0 && !loading) {
     return (
@@ -180,7 +166,7 @@ export default function PipelinePage() {
           onClose={() => setManageModalOpen(false)}
           selectedPipelineId={null}
           onPipelinesChange={loadPipelines}
-          onStagesChange={loadStagesAndLeads}
+          onStagesChange={loadStagesAndDeals}
         />
       </div>
     );
@@ -220,7 +206,7 @@ export default function PipelinePage() {
               type="button"
               onClick={() => {
                 setViewMode('kanban');
-                loadStagesAndLeads();
+                loadStagesAndDeals();
               }}
               className={`px-3 py-1.5 text-sm rounded-md flex items-center gap-1.5 ${viewMode === 'kanban' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
             >
@@ -279,7 +265,7 @@ export default function PipelinePage() {
                   <thead className="bg-muted/50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                        {t('pipeline.leadContact')}
+                        {t('pipeline.dealCard', 'Сделка')}
                       </th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
                         Stage
@@ -288,7 +274,7 @@ export default function PipelinePage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
-                    {leads.length === 0 ? (
+                    {deals.length === 0 ? (
                       <tr>
                         <td colSpan={3} className="px-6 py-12 text-center">
                           <p className="text-muted-foreground text-sm mb-3">{t('pipeline.noDealsEmptyTitle')}</p>
@@ -298,44 +284,72 @@ export default function PipelinePage() {
                         </td>
                       </tr>
                     ) : (
-                      leads.map((lead) => (
-                        <tr key={lead.id} className="hover:bg-muted/30">
+                      deals.map((deal) => (
+                        <tr key={deal.id} className="hover:bg-muted/30">
                           <td className="px-6 py-4">
-                            <Link
-                              href={`/dashboard/crm?tab=contacts&open=${lead.contact_id}`}
-                              className="font-medium text-foreground hover:underline"
-                            >
-                              {leadDisplayName(lead)}
-                            </Link>
-                            {lead.email && (
-                              <div className="text-xs text-muted-foreground mt-0.5">{lead.email}</div>
+                            <div className="flex items-center gap-3">
+                              {deal.bd_account_id && deal.channel_id ? (
+                                <DealChatAvatar
+                                  bdAccountId={deal.bd_account_id}
+                                  channelId={deal.channel_id}
+                                  title={dealCardTitle(deal)}
+                                  className="w-8 h-8 shrink-0"
+                                />
+                              ) : null}
+                              <button
+                                type="button"
+                                onClick={() => setEditingDeal(deal)}
+                                className="font-medium text-foreground hover:underline text-left"
+                              >
+                                {dealCardTitle(deal)}
+                              </button>
+                            </div>
+                            {(deal.value != null || deal.companyName || deal.company_name || deal.contactName || deal.ownerEmail) && (
+                              <div className="text-xs text-muted-foreground mt-0.5 space-x-1.5">
+                                {deal.value != null && <span>{`${deal.value} ${(deal.currency ?? '').trim()}`.trim()}</span>}
+                                {(deal.companyName ?? deal.company_name) && <span>· {deal.companyName ?? deal.company_name}</span>}
+                                {deal.contactName && <span>· {deal.contactName}</span>}
+                                {deal.ownerEmail && <span>· {deal.ownerEmail}</span>}
+                              </div>
                             )}
                           </td>
                           <td className="px-6 py-4 text-sm text-muted-foreground">
-                            {stages.find((s) => s.id === lead.stage_id)?.name ?? '—'}
+                            {stages.find((s) => s.id === deal.stage_id)?.name ?? '—'}
                           </td>
                           <td className="px-6 py-4">
                             <div className="relative">
                               <button
                                 type="button"
-                                onClick={() => setLeadMenuId(leadMenuId === lead.id ? null : lead.id)}
+                                onClick={() => setDealMenuId(dealMenuId === deal.id ? null : deal.id)}
                                 className="p-1.5 rounded text-muted-foreground hover:bg-accent"
                               >
                                 <MoreVertical className="w-4 h-4" />
                               </button>
-                              {leadMenuId === lead.id && (
+                              {dealMenuId === deal.id && (
                                 <>
                                   <div
                                     className="fixed inset-0 z-10"
                                     aria-hidden
-                                    onClick={() => setLeadMenuId(null)}
+                                    onClick={() => setDealMenuId(null)}
                                   />
                                   <div className="absolute right-0 top-full mt-1 py-1 rounded-lg border border-border bg-card shadow-lg z-20 min-w-[160px]">
                                     <button
                                       type="button"
-                                      onClick={() => handleRemoveLead(lead.id)}
-                                      className="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10"
+                                      onClick={() => {
+                                        setEditingDeal(deal);
+                                        setDealMenuId(null);
+                                      }}
+                                      className="w-full text-left px-3 py-2 text-sm text-foreground hover:bg-accent flex items-center gap-2"
                                     >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                      {t('pipeline.editDeal', 'Редактировать')}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemoveDeal(deal.id)}
+                                      className="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10 flex items-center gap-2"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
                                       {t('pipeline.removeFromFunnel')}
                                     </button>
                                   </div>
@@ -364,7 +378,7 @@ export default function PipelinePage() {
       ) : (
         <div className="flex-1 min-h-0 flex gap-4 overflow-x-auto overflow-y-hidden pb-4 mt-4 -mx-1 items-stretch">
           {stages.map((stage) => {
-            const stageLeads = leadsByStage(stage.id);
+            const stageDeals = dealsByStage(stage.id);
             const stageColor = stage.color || undefined;
             return (
               <div
@@ -380,8 +394,8 @@ export default function PipelinePage() {
                 onDrop={(e) => {
                   e.preventDefault();
                   e.currentTarget.classList.remove('ring-2', 'ring-primary/30');
-                  const leadId = e.dataTransfer.getData('application/x-lead-id');
-                  if (leadId) handleDrop(leadId, stage.id);
+                  const dealId = e.dataTransfer.getData('application/x-deal-id');
+                  if (dealId) handleDrop(dealId, stage.id);
                 }}
               >
                 <div className="p-4 border-b border-border flex items-center justify-between shrink-0">
@@ -394,72 +408,135 @@ export default function PipelinePage() {
                     <h3 className="font-heading font-semibold text-foreground tracking-tight">{stage.name}</h3>
                   </div>
                   <span className="text-xs font-medium text-muted-foreground bg-card border border-border px-2 py-1 rounded-lg">
-                    {t('pipeline.leadsCount', { count: stageLeads.length })}
+                    {t('pipeline.dealsCount', { count: stageDeals.length })}
                   </span>
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-2 min-h-[120px]">
-                  {stageLeads.map((lead) => (
+                  {stageDeals.map((deal) => {
+                    const stageName = stages.find((s) => s.id === deal.stage_id)?.name ?? '—';
+                    const stageColor = stages.find((s) => s.id === deal.stage_id)?.color;
+                    const companyName = deal.companyName ?? deal.company_name ?? '';
+                    const amountStr = deal.value != null ? `${deal.value} ${(deal.currency ?? '').trim()}`.trim() : '';
+                    return (
                     <div
-                      key={lead.id}
+                      key={deal.id}
                       draggable
                       onDragStart={(e) => {
-                        setDraggingLeadId(lead.id);
-                        e.dataTransfer.setData('application/x-lead-id', lead.id);
+                        setDraggingDealId(deal.id);
+                        e.dataTransfer.setData('application/x-deal-id', deal.id);
                         e.dataTransfer.effectAllowed = 'move';
                       }}
-                      onDragEnd={() => setDraggingLeadId(null)}
-                      className={`bg-card rounded-lg p-3 border border-border shadow-soft cursor-grab active:cursor-grabbing flex items-center gap-2 ${
-                        draggingLeadId === lead.id ? 'opacity-50' : 'hover:shadow-soft-md hover:border-primary/30'
-                      } ${movingLeadId === lead.id ? 'animate-pulse' : ''}`}
+                      onDragEnd={() => setDraggingDealId(null)}
+                      className={`bg-card rounded-lg p-3 border border-border shadow-soft cursor-grab active:cursor-grabbing flex flex-col gap-2 ${
+                        draggingDealId === deal.id ? 'opacity-50' : 'hover:shadow-soft-md hover:border-primary/30'
+                      } ${movingDealId === deal.id ? 'animate-pulse' : ''}`}
                     >
-                      <GripVertical className="w-4 h-4 text-muted-foreground shrink-0" />
-                      <div className="min-w-0 flex-1">
-                        <Link
-                          href={`/dashboard/crm?tab=contacts&open=${lead.contact_id}`}
-                          className="font-medium text-foreground hover:underline block truncate"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {leadDisplayName(lead)}
-                        </Link>
-                        {lead.username && (
-                          <div className="text-xs text-muted-foreground truncate">{lead.username}</div>
-                        )}
-                      </div>
-                      <div className="relative shrink-0">
+                      <div className="flex items-start gap-2 min-w-0">
+                        <GripVertical className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" />
+                        {deal.bd_account_id && deal.channel_id ? (
+                          <DealChatAvatar
+                            bdAccountId={deal.bd_account_id}
+                            channelId={deal.channel_id}
+                            title={dealCardTitle(deal)}
+                            className="w-9 h-9 shrink-0 mt-0.5"
+                          />
+                        ) : null}
+                        <div className="min-w-0 flex-1">
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setEditingDeal(deal); }}
+                            className="font-semibold text-foreground hover:underline block truncate text-sm text-left w-full"
+                          >
+                            {dealCardTitle(deal)}
+                          </button>
+                          <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                            <span
+                              className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-muted/80 text-foreground border border-border"
+                              style={stageColor ? { borderColor: stageColor, color: stageColor } : undefined}
+                            >
+                              {stageName}
+                            </span>
+                            {amountStr && (
+                              <span className="text-xs text-muted-foreground">{amountStr}</span>
+                            )}
+                            {deal.probability != null && (
+                              <span className="text-xs text-muted-foreground">{deal.probability}%</span>
+                            )}
+                            {companyName && (
+                              <span className="text-xs text-muted-foreground truncate max-w-[100px]" title={companyName}>
+                                {companyName}
+                              </span>
+                            )}
+                            {(deal.contactName ?? deal.ownerEmail) && (
+                              <span className="text-xs text-muted-foreground truncate max-w-[100px]" title={[deal.contactName, deal.ownerEmail].filter(Boolean).join(' · ') || undefined}>
+                                {deal.contactName ?? deal.ownerEmail}
+                              </span>
+                            )}
+                          </div>
+                          {(deal.expected_close_date || deal.comments) && (
+                            <div className="text-xs text-muted-foreground mt-0.5 space-x-2">
+                              {deal.expected_close_date && (
+                                <span title={deal.expected_close_date}>
+                                  📅 {deal.expected_close_date}
+                                </span>
+                              )}
+                              {deal.comments && (
+                                <span className="truncate max-w-[180px] block" title={deal.comments}>
+                                  {deal.comments}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        <div className="relative shrink-0">
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            setLeadMenuId(leadMenuId === lead.id ? null : lead.id);
+                            setDealMenuId(dealMenuId === deal.id ? null : deal.id);
                           }}
                           className="p-1 rounded text-muted-foreground hover:bg-accent"
                         >
                           <MoreVertical className="w-4 h-4" />
                         </button>
-                        {leadMenuId === lead.id && (
+                        {dealMenuId === deal.id && (
                           <>
                             <div
                               className="fixed inset-0 z-10"
                               aria-hidden
-                              onClick={() => setLeadMenuId(null)}
+                              onClick={() => setDealMenuId(null)}
                             />
                             <div className="absolute right-0 top-full mt-1 py-1 rounded-lg border border-border bg-card shadow-lg z-20 min-w-[160px]">
                               <button
                                 type="button"
-                                onClick={() => handleRemoveLead(lead.id)}
-                                className="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10"
+                                onClick={() => {
+                                  setEditingDeal(deal);
+                                  setDealMenuId(null);
+                                }}
+                                className="w-full text-left px-3 py-2 text-sm text-foreground hover:bg-accent flex items-center gap-2"
                               >
+                                <Pencil className="w-3.5 h-3.5" />
+                                {t('pipeline.editDeal', 'Редактировать')}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveDeal(deal.id)}
+                                className="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10 flex items-center gap-2"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
                                 {t('pipeline.removeFromFunnel')}
                               </button>
                             </div>
                           </>
                         )}
+                        </div>
                       </div>
                     </div>
-                  ))}
-                  {stageLeads.length === 0 && (
+                    );
+                  })}
+                  {stageDeals.length === 0 && (
                     <div className="text-center py-8 text-muted-foreground text-sm rounded-lg border border-dashed border-border">
-                      {t('pipeline.noLeadsInStage')}
+                      {t('pipeline.noDealsInStage', 'Нет сделок')}
                     </div>
                   )}
                 </div>
@@ -469,7 +546,7 @@ export default function PipelinePage() {
         </div>
       )}
 
-      {stages.length > 0 && leads.length === 0 && viewMode === 'kanban' && (
+      {stages.length > 0 && deals.length === 0 && viewMode === 'kanban' && (
         <div className="mt-4 p-4 rounded-xl border border-dashed border-border bg-muted/20 text-center">
           <p className="text-sm text-muted-foreground mb-2">{t('pipeline.noDealsEmptyDesc')}</p>
           <Link href="/dashboard/crm">
@@ -483,7 +560,16 @@ export default function PipelinePage() {
         onClose={() => setManageModalOpen(false)}
         selectedPipelineId={selectedPipelineId}
         onPipelinesChange={loadPipelines}
-        onStagesChange={loadStagesAndLeads}
+        onStagesChange={loadStagesAndDeals}
+      />
+      <DealFormModal
+        isOpen={!!editingDeal}
+        onClose={() => setEditingDeal(null)}
+        onSuccess={() => {
+          loadStagesAndDeals();
+          setEditingDeal(null);
+        }}
+        edit={editingDeal ?? undefined}
       />
     </div>
   );

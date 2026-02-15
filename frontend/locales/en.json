@@ -157,7 +157,9 @@
     "noStages": "No stages",
     "noStagesDesc": "Create your first pipeline in CRM.",
     "noStagesCta": "Go to CRM",
-    "noDealsInStage": "No leads",
+    "noDealsInStage": "No deals",
+    "dealCard": "Deal",
+    "dealFromContact": "Deal from contact",
     "noLeadsInStage": "No leads",
     "noDealsEmptyTitle": "No leads yet",
     "noLeadsCta": "Add contacts from CRM to the funnel",
@@ -181,7 +183,12 @@
     "stageName": "Stage name",
     "deletePipelineConfirm": "Delete pipeline \"{{name}}\"? All stages and leads in it will be removed.",
     "deleteStageConfirm": "Delete stage \"{{name}}\"? Leads in it will be moved to the first other stage.",
-    "stagesForPipeline": "Stages for \"{{name}}\""
+    "stagesForPipeline": "Stages for \"{{name}}\"",
+    "editDeal": "Edit",
+    "setAsDefault": "Set as default pipeline",
+    "defaultPipeline": "Default",
+    "moveStageUp": "Move up",
+    "moveStageDown": "Move down"
   },
   "analytics": {
     "title": "Analytics",

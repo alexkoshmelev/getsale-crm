@@ -199,8 +199,15 @@ export default function CRMPage() {
       apiClient.get(`/api/crm/companies/${detailId}`).then((r) => setDetailData(r.data));
     } else if (detailType === 'contacts') {
       apiClient.get(`/api/crm/contacts/${detailId}`).then((r) => setDetailData(r.data));
-    } else {
-      apiClient.get(`/api/crm/deals/${detailId}`).then((r) => setDetailData(r.data));
+    } else if (detailType === 'deals') {
+      apiClient.get(`/api/crm/deals/${detailId}`).then((r) => {
+        setDetailData(r.data);
+        setDealEdit(r.data);
+        setDealModalOpen(true);
+        setDetailId(null);
+        setDetailType(null);
+        setDetailData(null);
+      });
     }
   }, [detailId, detailType]);
 
@@ -210,7 +217,12 @@ export default function CRMPage() {
     else loadDeals();
   }, [activeTab, loadCompanies, loadContacts, loadDeals]);
 
-  const openDetail = (type: TabId, id: string) => {
+  const openDetail = (type: TabId, id: string, deal?: Deal) => {
+    if (type === 'deals' && deal) {
+      setDealEdit(deal);
+      setDealModalOpen(true);
+      return;
+    }
     setDetailType(type);
     setDetailId(id);
   };
@@ -510,7 +522,7 @@ export default function CRMPage() {
                     <tr
                       key={d.id}
                       className="hover:bg-muted/30 transition-colors cursor-pointer group"
-                      onClick={() => openDetail('deals', d.id)}
+                      onClick={() => openDetail('deals', d.id, d)}
                     >
                       <td className="px-6 py-4">
                         <div className="flex items-center gap-3">
@@ -582,9 +594,9 @@ export default function CRMPage() {
         )}
       </div>
 
-      {/* Detail SlideOver */}
+      {/* Detail SlideOver (companies & contacts only; deals open in modal) */}
       <SlideOver
-        isOpen={Boolean(detailId && detailType)}
+        isOpen={Boolean(detailId && detailType && detailType !== 'deals')}
         onClose={() => { setDetailId(null); setDetailType(null); setDetailData(null); }}
         title={
           detailType === 'companies' ? t('common.company') :
@@ -605,14 +617,6 @@ export default function CRMPage() {
             onEdit={() => { setContactEdit(detailData as Contact); setContactModalOpen(true); setDetailId(null); }}
             onDelete={() => setDeleteConfirm({ type: 'contacts', id: (detailData as Contact).id, name: getContactDisplayName(detailData as Contact) || (detailData as Contact).email || '' })}
             onAddToFunnel={() => setAddToFunnelContact(detailData as Contact)}
-            t={t}
-          />
-        )}
-        {detailData && detailType === 'deals' && (
-          <DealDetail
-            deal={detailData as Deal}
-            onEdit={() => { setDealEdit(detailData as Deal); setDealModalOpen(true); setDetailId(null); }}
-            onDelete={() => setDeleteConfirm({ type: 'deals', id: (detailData as Deal).id, name: (detailData as Deal).title })}
             t={t}
           />
         )}

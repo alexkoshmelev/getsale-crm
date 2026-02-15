@@ -588,24 +588,38 @@ app.get('/api/crm/deals', async (req, res, next) => {
         c.name AS company_name,
         p.name AS pipeline_name,
         s.name AS stage_name,
-        s.order_index AS stage_order
+        s.order_index AS stage_order,
+        cont.display_name AS contact_display_name,
+        cont.first_name AS contact_first_name,
+        cont.last_name AS contact_last_name,
+        cont.email AS contact_email,
+        u.email AS owner_email
        FROM deals d
        LEFT JOIN companies c ON d.company_id = c.id
        LEFT JOIN pipelines p ON d.pipeline_id = p.id
        LEFT JOIN stages s ON d.stage_id = s.id
+       LEFT JOIN contacts cont ON d.contact_id = cont.id
+       LEFT JOIN users u ON d.owner_id = u.id
        ${where}
        ORDER BY d.updated_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
     const items = result.rows.map((r: any) => {
-      const { company_name, pipeline_name, stage_name, stage_order, ...deal } = r;
+      const { company_name, pipeline_name, stage_name, stage_order, contact_display_name, contact_first_name, contact_last_name, contact_email, owner_email, ...deal } = r;
+      const contactName =
+        contact_display_name?.trim() ||
+        [contact_first_name?.trim(), contact_last_name?.trim()].filter(Boolean).join(' ') ||
+        contact_email?.trim() ||
+        null;
       return {
         ...deal,
         companyName: company_name,
         pipelineName: pipeline_name,
         stageName: stage_name,
         stageOrder: stage_order,
+        contactName: contactName || undefined,
+        ownerEmail: owner_email || undefined,
       };
     });
 
@@ -632,11 +646,18 @@ app.get('/api/crm/deals/:id', async (req, res, next) => {
         c.name AS company_name,
         p.name AS pipeline_name,
         s.name AS stage_name,
-        s.order_index AS stage_order
+        s.order_index AS stage_order,
+        cont.display_name AS contact_display_name,
+        cont.first_name AS contact_first_name,
+        cont.last_name AS contact_last_name,
+        cont.email AS contact_email,
+        u.email AS owner_email
        FROM deals d
        LEFT JOIN companies c ON d.company_id = c.id
        LEFT JOIN pipelines p ON d.pipeline_id = p.id
        LEFT JOIN stages s ON d.stage_id = s.id
+       LEFT JOIN contacts cont ON d.contact_id = cont.id
+       LEFT JOIN users u ON d.owner_id = u.id
        WHERE d.id = $1 AND d.organization_id = $2`,
       [id, user.organizationId]
     );
@@ -644,13 +665,20 @@ app.get('/api/crm/deals/:id', async (req, res, next) => {
       throw new AppError(404, 'Deal not found', ErrorCodes.NOT_FOUND);
     }
     const row = result.rows[0];
-    const { company_name, pipeline_name, stage_name, stage_order, ...deal } = row;
+    const { company_name, pipeline_name, stage_name, stage_order, contact_display_name, contact_first_name, contact_last_name, contact_email, owner_email, ...deal } = row;
+    const contactName =
+      contact_display_name?.trim() ||
+      [contact_first_name?.trim(), contact_last_name?.trim()].filter(Boolean).join(' ') ||
+      contact_email?.trim() ||
+      null;
     res.json({
       ...deal,
       companyName: company_name,
       pipelineName: pipeline_name,
       stageName: stage_name,
       stageOrder: stage_order,
+      contactName: contactName || undefined,
+      ownerEmail: owner_email || undefined,
     });
   } catch (e) {
     next(e);
@@ -676,26 +704,40 @@ app.post('/api/crm/deals', async (req, res, next) => {
       title,
       value,
       currency,
+      probability,
+      expectedCloseDate,
+      comments,
       bdAccountId,
       channel,
       channelId,
     } = parsed.data;
 
     const fromChat = bdAccountId != null && channel != null && channelId != null;
-    if (!fromChat && (companyId == null || companyId === '')) {
+    const fromContactOnly = contactId != null && !fromChat && (companyId == null || companyId === '');
+    if (!fromChat && !fromContactOnly && (companyId == null || companyId === '')) {
       throw new AppError(
         400,
-        'Either companyId or (bdAccountId + channel + channelId) for deal-from-chat is required',
+        'Either companyId, (bdAccountId + channel + channelId), or contactId is required',
         ErrorCodes.VALIDATION
       );
     }
-    if (!fromChat) {
+    let resolvedCompanyId = companyId ?? null;
+    if (!fromChat && !fromContactOnly && companyId) {
       const companyCheck = await pool.query(
         'SELECT 1 FROM companies WHERE id = $1 AND organization_id = $2',
         [companyId, user.organizationId]
       );
       if (companyCheck.rows.length === 0) {
         throw new AppError(400, 'Company not found or access denied', ErrorCodes.VALIDATION);
+      }
+    }
+    if (fromContactOnly && contactId) {
+      const contactRow = await pool.query(
+        'SELECT company_id FROM contacts WHERE id = $1 AND organization_id = $2',
+        [contactId, user.organizationId]
+      );
+      if (contactRow.rows.length > 0 && contactRow.rows[0].company_id) {
+        resolvedCompanyId = contactRow.rows[0].company_id;
       }
     }
     const pipelineCheck = await pool.query(
@@ -731,11 +773,11 @@ app.post('/api/crm/deals', async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO deals (organization_id, company_id, contact_id, pipeline_id, stage_id, owner_id, title, value, currency, history, bd_account_id, channel, channel_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+      `INSERT INTO deals (organization_id, company_id, contact_id, pipeline_id, stage_id, owner_id, title, value, currency, probability, expected_close_date, comments, history, bd_account_id, channel, channel_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
       [
         user.organizationId,
-        companyId ?? null,
+        resolvedCompanyId,
         contactId ?? null,
         pipelineId,
         stageId,
@@ -743,6 +785,9 @@ app.post('/api/crm/deals', async (req, res, next) => {
         title,
         value ?? null,
         currency ?? null,
+        probability ?? null,
+        expectedCloseDate ?? null,
+        comments ?? null,
         JSON.stringify([
           {
             id: randomUUID(),
@@ -799,8 +844,11 @@ app.put('/api/crm/deals/:id', async (req, res, next) => {
         currency = $4,
         contact_id = $5,
         owner_id = COALESCE($6, owner_id),
+        probability = $7,
+        expected_close_date = $8,
+        comments = $9,
         updated_at = NOW()
-       WHERE id = $1 AND organization_id = $7
+       WHERE id = $1 AND organization_id = $10
        RETURNING *`,
       [
         id,
@@ -809,6 +857,9 @@ app.put('/api/crm/deals/:id', async (req, res, next) => {
         d.currency !== undefined ? d.currency : row.currency,
         d.contactId !== undefined ? d.contactId : row.contact_id,
         d.ownerId ?? row.owner_id,
+        d.probability !== undefined ? d.probability : row.probability,
+        d.expectedCloseDate !== undefined ? d.expectedCloseDate : row.expected_close_date,
+        d.comments !== undefined ? d.comments : row.comments,
         user.organizationId,
       ]
     );

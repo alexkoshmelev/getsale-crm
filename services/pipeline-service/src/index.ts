@@ -94,6 +94,12 @@ app.put('/api/pipeline/:id', async (req, res) => {
       updates.push(`description = $${idx++}`);
     }
     if (isDefault !== undefined) {
+      if (isDefault === true) {
+        await pool.query(
+          'UPDATE pipelines SET is_default = false WHERE organization_id = $1',
+          [user.organizationId]
+        );
+      }
       params.push(!!isDefault);
       updates.push(`is_default = $${idx++}`);
     }

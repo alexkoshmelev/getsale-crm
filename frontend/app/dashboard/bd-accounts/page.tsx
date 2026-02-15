@@ -164,6 +164,15 @@ export default function BDAccountsPage() {
     fetchAccounts();
   }, []);
 
+  // После долгого простоя при возврате на вкладку перезапросить аккаунты (токен мог обновиться в другой вкладке или данные устареть)
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') fetchAccounts();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
   // Открыть модалку «Выбор чатов» по ссылке с Мессенджера (?accountId=...&openSelectChats=1)
   // Сначала грузим из БД; при первом открытии (пустой список) один раз подтягиваем папки и чаты из Telegram
   useEffect(() => {

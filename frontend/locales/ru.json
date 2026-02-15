@@ -157,7 +157,9 @@
     "noStages": "Нет стадий",
     "noStagesDesc": "Создайте первую воронку в CRM.",
     "noStagesCta": "Перейти в CRM",
-    "noDealsInStage": "Нет лидов",
+    "noDealsInStage": "Нет сделок",
+    "dealCard": "Сделка",
+    "dealFromContact": "Сделка по контакту",
     "noLeadsInStage": "Нет лидов",
     "noDealsEmptyTitle": "Лидов пока нет",
     "noLeadsCta": "Добавьте контакты из CRM в воронку",
@@ -181,7 +183,12 @@
     "stageName": "Название стадии",
     "deletePipelineConfirm": "Удалить воронку «{{name}}»? Все стадии и лиды в ней будут удалены.",
     "deleteStageConfirm": "Удалить стадию «{{name}}»? Лиды в ней будут перемещены в первую другую стадию.",
-    "stagesForPipeline": "Стадии воронки «{{name}}»"
+    "stagesForPipeline": "Стадии воронки «{{name}}»",
+    "editDeal": "Редактировать",
+    "setAsDefault": "Сделать воронкой по умолчанию",
+    "defaultPipeline": "По умолчанию",
+    "moveStageUp": "Вверх",
+    "moveStageDown": "Вниз"
   },
   "analytics": {
     "title": "Аналитика",

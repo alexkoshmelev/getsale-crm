@@ -60,14 +60,20 @@ export const DealCreateSchema = z
     title: z.string().min(1, 'Title is required').max(255).trim(),
     value: z.number().min(0).optional().nullable(),
     currency: z.string().length(3).optional(),
+    probability: z.number().min(0).max(100).optional().nullable(),
+    expectedCloseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable(),
+    comments: z.string().max(5000).optional().nullable(),
     // Сделка из чата: минимальная модель — чат + сумма
     bdAccountId: z.string().uuid().optional().nullable(),
     channel: z.string().max(50).optional().nullable(),
     channelId: z.string().max(255).optional().nullable(),
   })
   .refine(
-    (data) => data.companyId != null || (data.bdAccountId != null && data.channel != null && data.channelId != null),
-    { message: 'Either companyId or (bdAccountId + channel + channelId) is required' }
+    (data) =>
+      data.companyId != null ||
+      (data.bdAccountId != null && data.channel != null && data.channelId != null) ||
+      data.contactId != null,
+    { message: 'Either companyId, (bdAccountId + channel + channelId), or contactId is required' }
   );
 
 export const DealUpdateSchema = z.object({
@@ -76,6 +82,9 @@ export const DealUpdateSchema = z.object({
   currency: z.string().length(3).optional().nullable(),
   contactId: z.string().uuid().optional().nullable(),
   ownerId: z.string().uuid().optional(),
+  probability: z.number().min(0).max(100).optional().nullable(),
+  expectedCloseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable(),
+  comments: z.string().max(5000).optional().nullable(),
 });
 
 export const DealStageUpdateSchema = z.object({

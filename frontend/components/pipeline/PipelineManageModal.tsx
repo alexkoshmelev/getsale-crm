@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X, Plus, Pencil, Trash2 } from 'lucide-react';
+import { X, Plus, Pencil, Trash2, Star, ChevronUp, ChevronDown } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import {
@@ -92,6 +92,46 @@ export function PipelineManageModal({
       const list = await fetchPipelines();
       setPipelines(list);
       onPipelinesChange();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSetDefaultPipeline = async (p: Pipeline) => {
+    if (p.is_default) return;
+    setSaving(true);
+    try {
+      await updatePipeline(p.id, { isDefault: true });
+      const list = await fetchPipelines();
+      setPipelines(list);
+      onPipelinesChange();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleMoveStage = async (stage: Stage, direction: 'up' | 'down') => {
+    const sorted = [...stages].sort((a, b) => a.order_index - b.order_index);
+    const idx = sorted.findIndex((s) => s.id === stage.id);
+    if (idx < 0) return;
+    const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= sorted.length) return;
+    const other = sorted[swapIdx];
+    setSaving(true);
+    try {
+      await Promise.all([
+        updateStage(stage.id, { orderIndex: other.order_index }),
+        updateStage(other.id, { orderIndex: stage.order_index }),
+      ]);
+      if (selectedPipelineId) {
+        const list = await fetchStages(selectedPipelineId);
+        setStages(list.sort((a, b) => a.order_index - b.order_index));
+      }
+      onStagesChange();
     } catch (e) {
       console.error(e);
     } finally {
@@ -226,6 +266,15 @@ export function PipelineManageModal({
                       </>
                     ) : (
                       <>
+                        <button
+                          type="button"
+                          onClick={() => handleSetDefaultPipeline(p)}
+                          disabled={saving || p.is_default}
+                          title={p.is_default ? t('pipeline.defaultPipeline', 'По умолчанию') : t('pipeline.setAsDefault', 'Сделать воронкой по умолчанию')}
+                          className={`p-1.5 rounded shrink-0 ${p.is_default ? 'text-primary' : 'text-muted-foreground hover:bg-accent'}`}
+                        >
+                          <Star className={`w-4 h-4 ${p.is_default ? 'fill-current' : ''}`} />
+                        </button>
                         <span className="flex-1 truncate text-sm font-medium">{p.name}</span>
                         <button
                           type="button"
@@ -234,6 +283,7 @@ export function PipelineManageModal({
                             setEditPipelineName(p.name);
                           }}
                           className="p-1.5 rounded text-muted-foreground hover:bg-accent"
+                          title={t('pipeline.editPipeline')}
                         >
                           <Pencil className="w-4 h-4" />
                         </button>
@@ -242,6 +292,7 @@ export function PipelineManageModal({
                           onClick={() => handleDeletePipeline(p)}
                           disabled={saving}
                           className="p-1.5 rounded text-destructive hover:bg-destructive/10"
+                          title={t('pipeline.deletePipeline')}
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -280,7 +331,7 @@ export function PipelineManageModal({
                 )}
               </div>
               <ul className="space-y-1">
-                {stages.map((s) => (
+                {stages.sort((a, b) => a.order_index - b.order_index).map((s, idx) => (
                   <li key={s.id} className="flex items-center gap-2 py-1.5">
                     {editingStageId === s.id ? (
                       <>
@@ -289,11 +340,31 @@ export function PipelineManageModal({
                           onChange={(e) => setEditStageName(e.target.value)}
                           className="flex-1 h-8 text-sm"
                         />
-                        <Button size="sm" onClick={() => handleUpdateStage(s.id)} disabled={saving}>Save</Button>
-                        <Button variant="ghost" size="sm" onClick={() => setEditingStageId(null)}>Cancel</Button>
+                        <Button size="sm" onClick={() => handleUpdateStage(s.id)} disabled={saving}>{t('common.save')}</Button>
+                        <Button variant="ghost" size="sm" onClick={() => setEditingStageId(null)}>{t('common.cancel')}</Button>
                       </>
                     ) : (
                       <>
+                        <div className="flex flex-col gap-0 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleMoveStage(s, 'up')}
+                            disabled={saving || idx === 0}
+                            className="p-0.5 rounded text-muted-foreground hover:bg-accent disabled:opacity-30"
+                            title={t('pipeline.moveStageUp', 'Вверх')}
+                          >
+                            <ChevronUp className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleMoveStage(s, 'down')}
+                            disabled={saving || idx === stages.length - 1}
+                            className="p-0.5 rounded text-muted-foreground hover:bg-accent disabled:opacity-30"
+                            title={t('pipeline.moveStageDown', 'Вниз')}
+                          >
+                            <ChevronDown className="w-4 h-4" />
+                          </button>
+                        </div>
                         <span className="flex-1 truncate text-sm">{s.name}</span>
                         <button
                           type="button"
@@ -302,6 +373,7 @@ export function PipelineManageModal({
                             setEditStageName(s.name);
                           }}
                           className="p-1.5 rounded text-muted-foreground hover:bg-accent"
+                          title={t('pipeline.editStage')}
                         >
                           <Pencil className="w-4 h-4" />
                         </button>
@@ -310,6 +382,7 @@ export function PipelineManageModal({
                           onClick={() => handleDeleteStage(s)}
                           disabled={saving}
                           className="p-1.5 rounded text-destructive hover:bg-destructive/10"
+                          title={t('pipeline.deleteStage')}
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>

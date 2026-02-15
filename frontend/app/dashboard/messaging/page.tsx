@@ -562,7 +562,14 @@ export default function MessagingPage() {
   const [editDisplayNameValue, setEditDisplayNameValue] = useState('');
   const [savingDisplayName, setSavingDisplayName] = useState(false);
   const [showChatHeaderMenu, setShowChatHeaderMenu] = useState(false);
-  const [addToFunnelFromChat, setAddToFunnelFromChat] = useState<{ contactId: string; contactName: string } | null>(null);
+  const [addToFunnelFromChat, setAddToFunnelFromChat] = useState<{
+    contactId: string;
+    contactName: string;
+    dealTitle?: string;
+    bdAccountId?: string;
+    channel?: string;
+    channelId?: string;
+  } | null>(null);
   const chatHeaderMenuRef = useRef<HTMLDivElement>(null);
   const [mediaViewer, setMediaViewer] = useState<{ url: string; type: 'image' | 'video' } | null>(null);
   const [aiSummaryText, setAiSummaryText] = useState<string | null>(null);
@@ -644,6 +651,15 @@ export default function MessagingPage() {
 
   useEffect(() => {
     fetchAccounts();
+  }, []);
+
+  // После долгого простоя при возврате на вкладку перезапросить аккаунты
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') fetchAccounts();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
   // Open account and chat from URL (e.g. from command palette: ?bdAccountId=...&open=channelId)
@@ -2866,6 +2882,10 @@ export default function MessagingPage() {
                             setAddToFunnelFromChat({
                               contactId: selectedChat.contact_id!,
                               contactName: getChatNameWithOverrides(selectedChat),
+                              dealTitle: getChatNameWithOverrides(selectedChat),
+                              bdAccountId: selectedAccountId ?? undefined,
+                              channel: selectedChat.channel,
+                              channelId: selectedChat.channel_id,
                             });
                           }}
                           className="w-full px-4 py-2 text-left text-sm hover:bg-accent flex items-center gap-2"
@@ -3029,6 +3049,10 @@ export default function MessagingPage() {
                         setAddToFunnelFromChat({
                           contactId: chatContextMenu.chat.contact_id!,
                           contactName: getChatNameWithOverrides(chatContextMenu.chat),
+                          dealTitle: getChatNameWithOverrides(chatContextMenu.chat),
+                          bdAccountId: selectedAccountId ?? undefined,
+                          channel: chatContextMenu.chat.channel,
+                          channelId: chatContextMenu.chat.channel_id,
                         });
                       }}
                     />
@@ -3097,6 +3121,10 @@ export default function MessagingPage() {
               onClose={() => setAddToFunnelFromChat(null)}
               contactId={addToFunnelFromChat?.contactId ?? ''}
               contactName={addToFunnelFromChat?.contactName}
+              dealTitle={addToFunnelFromChat?.dealTitle}
+              bdAccountId={addToFunnelFromChat?.bdAccountId}
+              channel={addToFunnelFromChat?.channel}
+              channelId={addToFunnelFromChat?.channelId}
             />
 
             {/* Context menu: account — Settings (BD Accounts) */}
