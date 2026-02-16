@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
-import { MessageSquare } from 'lucide-react';
+import { MessageSquare, StickyNote, Bell } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Select, SelectOption } from '@/components/ui/Select';
@@ -36,8 +36,8 @@ export function DealFormModal({
   const [value, setValue] = useState('');
   const [currency, setCurrency] = useState('RUB');
   const [probability, setProbability] = useState('');
-  const [expectedCloseDate, setExpectedCloseDate] = useState('');
   const [comments, setComments] = useState('');
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
 
   const [companies, setCompanies] = useState<Company[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -92,7 +92,6 @@ export function DealFormModal({
       setValue(edit.value != null ? String(edit.value) : '');
       setCurrency(edit.currency ?? 'RUB');
       setProbability(edit.probability != null ? String(edit.probability) : '');
-      setExpectedCloseDate(edit.expected_close_date ?? '');
       setComments(edit.comments ?? '');
     } else {
       setCompanyId(preselectedCompanyId ?? '');
@@ -103,7 +102,6 @@ export function DealFormModal({
       setValue('');
       setCurrency('RUB');
       setProbability('');
-      setExpectedCloseDate('');
       setComments('');
     }
     setError('');
@@ -144,7 +142,6 @@ export function DealFormModal({
           currency: currency || null,
           contactId: contactId || null,
           probability: probValue,
-          expectedCloseDate: expectedCloseDate.trim() || null,
           comments: comments.trim() || null,
         });
       } else {
@@ -157,7 +154,6 @@ export function DealFormModal({
           value: value ? parseFloat(value) : undefined,
           currency: currency || undefined,
           probability: probValue ?? undefined,
-          expectedCloseDate: expectedCloseDate.trim() || undefined,
           comments: comments.trim() || undefined,
         });
       }
@@ -171,34 +167,34 @@ export function DealFormModal({
     }
   };
 
+  const chatHref =
+    isEdit && edit?.bd_account_id && edit?.channel_id
+      ? `/dashboard/messaging?bdAccountId=${encodeURIComponent(edit.bd_account_id)}&open=${encodeURIComponent(edit.channel_id)}`
+      : null;
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={isEdit ? 'Редактировать сделку' : 'Новая сделка'} size="lg">
+    <Modal isOpen={isOpen} onClose={onClose} title={isEdit ? 'Карточка сделки' : 'Новая сделка'} size="lg">
       {error && (
-        <div className="mb-4 p-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-sm">
+        <div className="mb-4 p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
           {error}
         </div>
       )}
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form onSubmit={handleSubmit} className="space-y-5">
+        {/* Шапка: аватар + название (при редактировании с чатом) */}
         {isEdit && edit?.bd_account_id && edit?.channel_id && (
-          <div className="flex items-center gap-3 pb-2 border-b border-border">
+          <div className="flex flex-col items-center text-center pb-4 border-b border-border">
             <DealChatAvatar
               bdAccountId={edit.bd_account_id}
               channelId={edit.channel_id}
               title={edit.title}
-              className="w-12 h-12"
+              className="w-16 h-16"
             />
-            <div className="flex-1 min-w-0 flex items-center justify-between gap-2">
-              <span className="font-medium text-foreground truncate">{edit.title}</span>
-              <Link
-                href={`/dashboard/messaging?bdAccountId=${encodeURIComponent(edit.bd_account_id)}&open=${encodeURIComponent(edit.channel_id)}`}
-                className="shrink-0 inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
-              >
-                <MessageSquare className="w-4 h-4" />
-                Открыть чат
-              </Link>
-            </div>
+            <h2 className="mt-3 font-heading text-xl font-semibold text-foreground truncate w-full px-2">
+              {edit.title}
+            </h2>
           </div>
         )}
+
         {!isEdit && (
           <>
             <Select
@@ -237,64 +233,149 @@ export function DealFormModal({
             />
           </>
         )}
+
         <Input
           label="Название сделки *"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="Продажа пакета услуг"
           required
-          autoFocus={isEdit}
+          autoFocus={isEdit && !edit?.bd_account_id}
         />
-        <div className="grid grid-cols-2 gap-4">
-          <Input
-            label="Сумма"
-            type="number"
-            min={0}
-            step={0.01}
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="0"
-          />
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Валюта</label>
-            <select
-              value={currency}
-              onChange={(e) => setCurrency(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary outline-none"
-            >
-              <option value="RUB">RUB</option>
-              <option value="USD">USD</option>
-              <option value="EUR">EUR</option>
-            </select>
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-4">
-          <Input
-            label="Вероятность, %"
-            type="number"
-            min={0}
-            max={100}
-            value={probability}
-            onChange={(e) => setProbability(e.target.value)}
-            placeholder="0–100"
-          />
-          <Input
-            label="Ожидаемая дата закрытия"
-            type="date"
-            value={expectedCloseDate}
-            onChange={(e) => setExpectedCloseDate(e.target.value)}
-          />
-        </div>
+
+        {/* Описание — сразу под названием */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Комментарий</label>
+          <label className="block text-sm font-medium text-foreground mb-1.5">Описание</label>
           <textarea
+            ref={descriptionRef}
             value={comments}
             onChange={(e) => setComments(e.target.value)}
-            placeholder="Заметки по сделке"
-            rows={3}
-            className="w-full px-4 py-2.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary outline-none resize-y"
+            placeholder="Любые заметки по сделке..."
+            rows={2}
+            className="w-full px-4 py-2.5 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-ring focus:border-primary outline-none resize-y text-sm"
           />
         </div>
+
+        {/* Сумма и стадия в одну линию как на скрине */}
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-1.5">Сумма</label>
+            <div className="flex gap-2">
+              <input
+                type="number"
+                min={0}
+                step={0.01}
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                placeholder="0"
+                className="flex-1 px-4 py-2.5 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-ring outline-none text-sm"
+              />
+              <select
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value)}
+                className="w-20 px-2 py-2.5 rounded-xl border border-border bg-background text-foreground focus:ring-2 focus:ring-ring outline-none text-sm"
+              >
+                <option value="RUB">RUB</option>
+                <option value="USD">USD</option>
+                <option value="EUR">EUR</option>
+              </select>
+            </div>
+          </div>
+          {isEdit && stages.length > 0 && (
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-1.5">Стадия</label>
+              <Select
+                options={stageOptions}
+                value={stageId}
+                onChange={(e) => setStageId(e.target.value)}
+                placeholder="Стадия"
+                className="[&_select]:rounded-xl [&_select]:py-2.5"
+              />
+            </div>
+          )}
+        </div>
+
+        {!isEdit && (
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-1.5">Стадия</label>
+            <Select
+              options={stageOptions}
+              value={stageId}
+              onChange={(e) => setStageId(e.target.value)}
+              disabled={!pipelineId || loadingMeta}
+              placeholder={pipelineId ? 'Первая стадия по умолчанию' : 'Сначала выберите воронку'}
+              className="[&_select]:rounded-xl [&_select]:py-2.5"
+            />
+          </div>
+        )}
+
+        {isEdit && (
+          <>
+            <Input
+              label="Вероятность, %"
+              type="number"
+              min={0}
+              max={100}
+              value={probability}
+              onChange={(e) => setProbability(e.target.value)}
+              placeholder="0–100"
+              className="[&_input]:rounded-xl"
+            />
+          </>
+        )}
+
+        {/* Три кнопки как на скрине: заметка, напоминание, открыть чат */}
+        <div className="grid grid-cols-3 gap-3">
+          <button
+            type="button"
+            onClick={() => descriptionRef.current?.focus()}
+            className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-border bg-muted/30 hover:bg-muted/50 text-foreground transition-colors"
+          >
+            <StickyNote className="w-5 h-5 text-primary" />
+            <span className="text-xs font-medium">Добавить заметку</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => window.alert('Напоминания будут доступны в следующей версии.')}
+            className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-border bg-muted/30 hover:bg-muted/50 text-foreground transition-colors"
+          >
+            <Bell className="w-5 h-5 text-primary" />
+            <span className="text-xs font-medium">Добавить напоминание</span>
+          </button>
+          {chatHref ? (
+            <Link
+              href={chatHref}
+              className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-border bg-muted/30 hover:bg-muted/50 text-foreground transition-colors no-underline"
+            >
+              <MessageSquare className="w-5 h-5 text-primary" />
+              <span className="text-xs font-medium">Открыть чат</span>
+            </Link>
+          ) : (
+            <div className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-dashed border-border bg-muted/10 text-muted-foreground">
+              <MessageSquare className="w-5 h-5 opacity-50" />
+              <span className="text-xs">Нет чата</span>
+            </div>
+          )}
+        </div>
+
+        {/* Блок описания внизу с датой (если есть текст) — как на скрине */}
+        {isEdit && comments.trim() && (
+          <div className="pt-3 border-t border-border">
+            <p className="text-sm text-foreground whitespace-pre-wrap">{comments.trim()}</p>
+            <p className="text-xs text-muted-foreground mt-1.5">
+              {edit.updated_at
+                ? new Date(edit.updated_at).toLocaleString('ru-RU', {
+                    day: 'numeric',
+                    month: 'long',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })
+                : ''}
+            </p>
+          </div>
+        )}
+
         <div className="flex gap-3 pt-2">
           <Button type="button" variant="outline" className="flex-1" onClick={onClose}>
             Отмена

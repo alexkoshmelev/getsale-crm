@@ -473,18 +473,9 @@ export default function PipelinePage() {
                               </span>
                             )}
                           </div>
-                          {(deal.expected_close_date || deal.comments) && (
-                            <div className="text-xs text-muted-foreground mt-0.5 space-x-2">
-                              {deal.expected_close_date && (
-                                <span title={deal.expected_close_date}>
-                                  📅 {deal.expected_close_date}
-                                </span>
-                              )}
-                              {deal.comments && (
-                                <span className="truncate max-w-[180px] block" title={deal.comments}>
-                                  {deal.comments}
-                                </span>
-                              )}
+                          {deal.comments && (
+                            <div className="text-xs text-muted-foreground mt-0.5 truncate max-w-[200px]" title={deal.comments}>
+                              {deal.comments}
                             </div>
                           )}
                         </div>
