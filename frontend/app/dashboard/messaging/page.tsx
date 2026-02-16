@@ -2783,6 +2783,7 @@ export default function MessagingPage() {
                 onContextMenu={(e) => {
                   e.preventDefault();
                   if (!selectedAccountId) return;
+                  setSelectedChat(chat);
                   setChatContextMenu({ x: e.clientX, y: e.clientY, chat });
                 }}
                 className={`p-4 cursor-pointer border-b border-border transition-colors flex gap-3 ${
@@ -3125,6 +3126,7 @@ export default function MessagingPage() {
               bdAccountId={addToFunnelFromChat?.bdAccountId}
               channel={addToFunnelFromChat?.channel}
               channelId={addToFunnelFromChat?.channelId}
+              defaultPipelineId={typeof window !== 'undefined' ? window.localStorage.getItem('pipeline.selectedPipelineId') : null}
             />
 
             {/* Context menu: account — Settings (BD Accounts) */}

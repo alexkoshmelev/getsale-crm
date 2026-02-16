@@ -40,6 +40,7 @@ import { CompanyFormModal } from '@/components/crm/CompanyFormModal';
 import { ContactFormModal } from '@/components/crm/ContactFormModal';
 import { DealFormModal } from '@/components/crm/DealFormModal';
 import { AddToFunnelModal } from '@/components/crm/AddToFunnelModal';
+import { formatDealAmount } from '@/lib/format/currency';
 import { clsx } from 'clsx';
 
 type TabId = 'companies' | 'contacts' | 'deals';
@@ -537,7 +538,7 @@ export default function CRMPage() {
                         {(d.pipelineName ?? d.pipeline_name ?? '—')} / {(d.stageName ?? d.stage_name ?? '—')}
                       </td>
                       <td className="px-6 py-4 text-sm font-medium text-foreground">
-                        {d.value != null ? `${Number(d.value).toLocaleString()} ${d.currency ?? 'RUB'}` : '—'}
+                        {d.value != null ? formatDealAmount(d.value, d.currency) : '—'}
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -640,6 +641,7 @@ export default function CRMPage() {
         onClose={() => setAddToFunnelContact(null)}
         contactId={addToFunnelContact?.id ?? ''}
         contactName={addToFunnelContact ? getContactDisplayName(addToFunnelContact) : undefined}
+        defaultPipelineId={typeof window !== 'undefined' ? window.localStorage.getItem('pipeline.selectedPipelineId') : null}
       />
       <DealFormModal
         isOpen={dealModalOpen}
@@ -815,7 +817,7 @@ function DealDetail({
         <div>
           <dt className="text-muted-foreground">{t('crm.amount')}</dt>
           <dd className="font-medium text-foreground">
-            {deal.value != null ? `${Number(deal.value).toLocaleString()} ${deal.currency ?? 'RUB'}` : '—'}
+            {deal.value != null ? formatDealAmount(deal.value, deal.currency) : '—'}
           </dd>
         </div>
       </dl>

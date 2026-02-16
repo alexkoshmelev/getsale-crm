@@ -19,6 +19,8 @@ interface AddToFunnelModalProps {
   bdAccountId?: string | null;
   channel?: string | null;
   channelId?: string | null;
+  /** Пайплайн по умолчанию (например выбранный пользователем или is_default) */
+  defaultPipelineId?: string | null;
 }
 
 export function AddToFunnelModal({
@@ -31,6 +33,7 @@ export function AddToFunnelModal({
   bdAccountId,
   channel,
   channelId,
+  defaultPipelineId,
 }: AddToFunnelModalProps) {
   const { t } = useTranslation();
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
@@ -43,7 +46,6 @@ export function AddToFunnelModal({
   useEffect(() => {
     if (isOpen && contactId) {
       setError(null);
-      setSelectedPipelineId('');
       setContactPipelineIds([]);
       setLoading(true);
       Promise.all([
@@ -53,11 +55,15 @@ export function AddToFunnelModal({
         .then(([pls, ids]) => {
           setPipelines(pls);
           setContactPipelineIds(ids);
+          const defaultId = defaultPipelineId && pls.some((p) => p.id === defaultPipelineId)
+            ? defaultPipelineId
+            : (pls.find((p) => p.is_default)?.id ?? pls[0]?.id ?? '');
+          setSelectedPipelineId(defaultId);
         })
         .catch(() => setPipelines([]))
         .finally(() => setLoading(false));
     }
-  }, [isOpen, contactId]);
+  }, [isOpen, contactId, defaultPipelineId]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

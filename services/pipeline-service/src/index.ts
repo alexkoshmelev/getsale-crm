@@ -50,18 +50,44 @@ app.get('/api/pipeline', async (req, res) => {
   }
 });
 
+const DEFAULT_STAGES = [
+  { name: 'Lead', order_index: 0, color: '#3B82F6' },
+  { name: 'Qualified', order_index: 1, color: '#10B981' },
+  { name: 'Proposal', order_index: 2, color: '#F59E0B' },
+  { name: 'Negotiation', order_index: 3, color: '#EF4444' },
+  { name: 'Closed Won', order_index: 4, color: '#8B5CF6' },
+  { name: 'Closed Lost', order_index: 5, color: '#6B7280' },
+];
+
 app.post('/api/pipeline', async (req, res) => {
   try {
     const user = getUser(req);
     const { name, description, isDefault } = req.body;
 
+    if (isDefault === true) {
+      await pool.query(
+        'UPDATE pipelines SET is_default = false WHERE organization_id = $1',
+        [user.organizationId]
+      );
+    }
+
     const result = await pool.query(
       `INSERT INTO pipelines (organization_id, name, description, is_default)
        VALUES ($1, $2, $3, $4) RETURNING *`,
-      [user.organizationId, name, description, isDefault || false]
+      [user.organizationId, name ?? 'New Pipeline', description ?? null, isDefault || false]
     );
+    const pipeline = result.rows[0];
+    const pipelineId = pipeline.id;
 
-    res.json(result.rows[0]);
+    for (const stage of DEFAULT_STAGES) {
+      await pool.query(
+        `INSERT INTO stages (pipeline_id, organization_id, name, order_index, color)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [pipelineId, user.organizationId, stage.name, stage.order_index, stage.color]
+      );
+    }
+
+    res.status(201).json(pipeline);
   } catch (error) {
     console.error('Error creating pipeline:', error);
     res.status(500).json({ error: 'Internal server error' });

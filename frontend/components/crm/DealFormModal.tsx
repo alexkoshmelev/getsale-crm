@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
+import { useTranslation } from 'react-i18next';
 import { MessageSquare, StickyNote, Bell } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -10,6 +11,7 @@ import Button from '@/components/ui/Button';
 import { Deal, Company, Contact, createDeal, updateDeal, fetchCompanies, fetchContacts } from '@/lib/api/crm';
 import { Pipeline, Stage, fetchPipelines, fetchStages } from '@/lib/api/pipeline';
 import { DealChatAvatar } from '@/components/crm/DealChatAvatar';
+import { getCurrencySymbol } from '@/lib/format/currency';
 
 interface DealFormModalProps {
   isOpen: boolean;
@@ -34,7 +36,7 @@ export function DealFormModal({
   const [stageId, setStageId] = useState('');
   const [title, setTitle] = useState('');
   const [value, setValue] = useState('');
-  const [currency, setCurrency] = useState('RUB');
+  const [currency, setCurrency] = useState('USD');
   const [probability, setProbability] = useState('');
   const [comments, setComments] = useState('');
   const descriptionRef = useRef<HTMLTextAreaElement>(null);
@@ -49,6 +51,8 @@ export function DealFormModal({
   const [error, setError] = useState('');
 
   const isEdit = Boolean(edit?.id);
+  const { t, i18n } = useTranslation();
+  const locale = i18n.language?.startsWith('ru') ? 'ru-RU' : 'en-US';
 
   useEffect(() => {
     if (isOpen) {
@@ -90,7 +94,7 @@ export function DealFormModal({
       setStageId(edit.stage_id);
       setTitle(edit.title ?? '');
       setValue(edit.value != null ? String(edit.value) : '');
-      setCurrency(edit.currency ?? 'RUB');
+      setCurrency(edit.currency ?? 'USD');
       setProbability(edit.probability != null ? String(edit.probability) : '');
       setComments(edit.comments ?? '');
     } else {
@@ -100,7 +104,7 @@ export function DealFormModal({
       setStageId('');
       setTitle('');
       setValue('');
-      setCurrency('RUB');
+      setCurrency('USD');
       setProbability('');
       setComments('');
     }
@@ -124,11 +128,11 @@ export function DealFormModal({
     e.preventDefault();
     setError('');
     if (!title.trim()) {
-      setError('Укажите название сделки');
+      setError(t('pipeline.dealFormErrorTitleRequired'));
       return;
     }
     if (!isEdit && (!companyId || !pipelineId)) {
-      setError('Выберите компанию и воронку');
+      setError(t('pipeline.dealFormErrorCompanyPipeline'));
       return;
     }
     const probNum = probability.trim() === '' ? null : parseInt(probability, 10);
@@ -160,7 +164,7 @@ export function DealFormModal({
       onSuccess();
       onClose();
     } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Ошибка сохранения';
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? t('pipeline.dealFormErrorSave');
       setError(msg);
     } finally {
       setLoading(false);
@@ -173,7 +177,7 @@ export function DealFormModal({
       : null;
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={isEdit ? 'Карточка сделки' : 'Новая сделка'} size="lg">
+    <Modal isOpen={isOpen} onClose={onClose} title={isEdit ? t('pipeline.dealFormTitle') : t('pipeline.dealFormNew')} size="lg">
       {error && (
         <div className="mb-4 p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
           {error}
@@ -181,86 +185,90 @@ export function DealFormModal({
       )}
       <form onSubmit={handleSubmit} className="space-y-5">
         {/* Шапка: аватар + название (при редактировании с чатом) */}
-        {isEdit && edit?.bd_account_id && edit?.channel_id && (
+        {isEdit && (edit?.bd_account_id && edit?.channel_id || edit?.creatorEmail) && (
           <div className="flex flex-col items-center text-center pb-4 border-b border-border">
-            <DealChatAvatar
-              bdAccountId={edit.bd_account_id}
-              channelId={edit.channel_id}
-              title={edit.title}
-              className="w-16 h-16"
-            />
+            {edit?.bd_account_id && edit?.channel_id && (
+              <DealChatAvatar
+                bdAccountId={edit.bd_account_id}
+                channelId={edit.channel_id}
+                title={edit.title}
+                className="w-16 h-16"
+              />
+            )}
             <h2 className="mt-3 font-heading text-xl font-semibold text-foreground truncate w-full px-2">
               {edit.title}
             </h2>
+            {edit.creatorEmail && (
+              <p className="text-xs text-muted-foreground mt-1">{t('pipeline.dealFormCreatedBy')}: {edit.creatorEmail}</p>
+            )}
           </div>
         )}
 
         {!isEdit && (
           <>
             <Select
-              label="Компания *"
+              label={t('pipeline.dealFormCompany')}
               options={companyOptions}
               value={companyId}
               onChange={(e) => setCompanyId(e.target.value)}
               disabled={loadingMeta}
-              placeholder="Выберите компанию"
+              placeholder={t('pipeline.dealFormSelectCompany')}
               required
             />
             <Select
-              label="Контакт"
+              label={t('pipeline.dealFormContact')}
               options={contactOptions}
               value={contactId}
               onChange={(e) => setContactId(e.target.value)}
               disabled={loadingMeta}
-              placeholder="Выберите контакт"
+              placeholder={t('pipeline.dealFormSelectContact')}
             />
             <Select
-              label="Воронка *"
+              label={t('pipeline.dealFormPipeline')}
               options={pipelineOptions}
               value={pipelineId}
               onChange={(e) => setPipelineId(e.target.value)}
               disabled={loadingMeta}
-              placeholder="Выберите воронку"
+              placeholder={t('pipeline.dealFormSelectPipeline')}
               required
             />
             <Select
-              label="Стадия"
+              label={t('pipeline.dealFormStage')}
               options={stageOptions}
               value={stageId}
               onChange={(e) => setStageId(e.target.value)}
               disabled={!pipelineId || loadingMeta}
-              placeholder={pipelineId ? 'Первая стадия по умолчанию' : 'Сначала выберите воронку'}
+              placeholder={pipelineId ? t('pipeline.dealFormStageDefault') : t('pipeline.dealFormSelectStageFirst')}
             />
           </>
         )}
 
         <Input
-          label="Название сделки *"
+          label={t('pipeline.dealFormTitleLabel')}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          placeholder="Продажа пакета услуг"
+          placeholder={t('pipeline.dealFormTitlePlaceholder')}
           required
           autoFocus={isEdit && !edit?.bd_account_id}
         />
 
-        {/* Описание — сразу под названием */}
         <div>
-          <label className="block text-sm font-medium text-foreground mb-1.5">Описание</label>
+          <label className="block text-sm font-medium text-foreground mb-1.5">{t('pipeline.dealFormDescription')}</label>
           <textarea
             ref={descriptionRef}
             value={comments}
             onChange={(e) => setComments(e.target.value)}
-            placeholder="Любые заметки по сделке..."
+            placeholder={t('pipeline.dealFormDescriptionPlaceholder')}
             rows={2}
             className="w-full px-4 py-2.5 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-ring focus:border-primary outline-none resize-y text-sm"
           />
         </div>
 
-        {/* Сумма и стадия в одну линию как на скрине */}
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-foreground mb-1.5">Сумма</label>
-            <div className="flex gap-2">
+        {/* Сумма и стадия в одну линию */}
+        <div className="grid grid-cols-2 gap-6">
+          <div className="min-w-0">
+            <label className="block text-sm font-medium text-foreground mb-1.5">{t('pipeline.dealFormAmount')}</label>
+            <div className="flex gap-2 min-w-0">
               <input
                 type="number"
                 min={0}
@@ -268,28 +276,28 @@ export function DealFormModal({
                 value={value}
                 onChange={(e) => setValue(e.target.value)}
                 placeholder="0"
-                className="flex-1 px-4 py-2.5 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-ring outline-none text-sm"
+                className="min-w-0 flex-1 px-4 py-2.5 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-ring outline-none text-sm w-0"
               />
               <select
                 value={currency}
                 onChange={(e) => setCurrency(e.target.value)}
-                className="w-20 px-2 py-2.5 rounded-xl border border-border bg-background text-foreground focus:ring-2 focus:ring-ring outline-none text-sm"
+                className="shrink-0 w-[5.5rem] px-2 py-2.5 rounded-xl border border-border bg-background text-foreground focus:ring-2 focus:ring-ring outline-none text-sm"
               >
-                <option value="RUB">RUB</option>
-                <option value="USD">USD</option>
-                <option value="EUR">EUR</option>
+                <option value="USD">USD ({getCurrencySymbol('USD')})</option>
+                <option value="RUB">RUB ({getCurrencySymbol('RUB')})</option>
+                <option value="EUR">EUR ({getCurrencySymbol('EUR')})</option>
               </select>
             </div>
           </div>
           {isEdit && stages.length > 0 && (
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1.5">Стадия</label>
+            <div className="min-w-0">
+              <label className="block text-sm font-medium text-foreground mb-1.5">{t('pipeline.dealFormStage')}</label>
               <Select
                 options={stageOptions}
                 value={stageId}
                 onChange={(e) => setStageId(e.target.value)}
-                placeholder="Стадия"
-                className="[&_select]:rounded-xl [&_select]:py-2.5"
+                placeholder={t('pipeline.dealFormStagePlaceholder')}
+                className="[&_select]:rounded-xl [&_select]:py-2.5 [&_select]:min-w-0"
               />
             </div>
           )}
@@ -297,13 +305,13 @@ export function DealFormModal({
 
         {!isEdit && (
           <div>
-            <label className="block text-sm font-medium text-foreground mb-1.5">Стадия</label>
+            <label className="block text-sm font-medium text-foreground mb-1.5">{t('pipeline.dealFormStage')}</label>
             <Select
               options={stageOptions}
               value={stageId}
               onChange={(e) => setStageId(e.target.value)}
               disabled={!pipelineId || loadingMeta}
-              placeholder={pipelineId ? 'Первая стадия по умолчанию' : 'Сначала выберите воронку'}
+              placeholder={pipelineId ? t('pipeline.dealFormStageDefault') : t('pipeline.dealFormSelectStageFirst')}
               className="[&_select]:rounded-xl [&_select]:py-2.5"
             />
           </div>
@@ -312,13 +320,13 @@ export function DealFormModal({
         {isEdit && (
           <>
             <Input
-              label="Вероятность, %"
+              label={t('pipeline.dealFormProbability')}
               type="number"
               min={0}
               max={100}
               value={probability}
               onChange={(e) => setProbability(e.target.value)}
-              placeholder="0–100"
+              placeholder={t('pipeline.dealFormProbabilityPlaceholder')}
               className="[&_input]:rounded-xl"
             />
           </>
@@ -332,15 +340,15 @@ export function DealFormModal({
             className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-border bg-muted/30 hover:bg-muted/50 text-foreground transition-colors"
           >
             <StickyNote className="w-5 h-5 text-primary" />
-            <span className="text-xs font-medium">Добавить заметку</span>
+            <span className="text-xs font-medium">{t('pipeline.dealFormAddNote')}</span>
           </button>
           <button
             type="button"
-            onClick={() => window.alert('Напоминания будут доступны в следующей версии.')}
+            onClick={() => window.alert(t('pipeline.dealFormReminderComing'))}
             className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-border bg-muted/30 hover:bg-muted/50 text-foreground transition-colors"
           >
             <Bell className="w-5 h-5 text-primary" />
-            <span className="text-xs font-medium">Добавить напоминание</span>
+            <span className="text-xs font-medium">{t('pipeline.dealFormAddReminder')}</span>
           </button>
           {chatHref ? (
             <Link
@@ -348,23 +356,23 @@ export function DealFormModal({
               className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-border bg-muted/30 hover:bg-muted/50 text-foreground transition-colors no-underline"
             >
               <MessageSquare className="w-5 h-5 text-primary" />
-              <span className="text-xs font-medium">Открыть чат</span>
+              <span className="text-xs font-medium">{t('pipeline.dealFormOpenChat')}</span>
             </Link>
           ) : (
             <div className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-dashed border-border bg-muted/10 text-muted-foreground">
               <MessageSquare className="w-5 h-5 opacity-50" />
-              <span className="text-xs">Нет чата</span>
+              <span className="text-xs">{t('pipeline.dealFormNoChat')}</span>
             </div>
           )}
         </div>
 
         {/* Блок описания внизу с датой (если есть текст) — как на скрине */}
-        {isEdit && comments.trim() && (
+        {isEdit && edit && comments.trim() && (
           <div className="pt-3 border-t border-border">
             <p className="text-sm text-foreground whitespace-pre-wrap">{comments.trim()}</p>
             <p className="text-xs text-muted-foreground mt-1.5">
               {edit.updated_at
-                ? new Date(edit.updated_at).toLocaleString('ru-RU', {
+                ? new Date(edit.updated_at).toLocaleString(locale, {
                     day: 'numeric',
                     month: 'long',
                     year: 'numeric',
@@ -378,10 +386,10 @@ export function DealFormModal({
 
         <div className="flex gap-3 pt-2">
           <Button type="button" variant="outline" className="flex-1" onClick={onClose}>
-            Отмена
+            {t('pipeline.dealFormCancel')}
           </Button>
           <Button type="submit" className="flex-1" disabled={loading}>
-            {loading ? 'Сохранение...' : isEdit ? 'Сохранить' : 'Создать'}
+            {loading ? t('pipeline.dealFormSaving') : isEdit ? t('pipeline.dealFormSave') : t('pipeline.dealFormCreate')}
           </Button>
         </div>
       </form>

@@ -185,6 +185,22 @@ export async function seed(knex: Knex): Promise<void> {
     });
     console.log('✅ Org1 deal');
   }
+  // Сделка в org1 от пользователя test — чтобы под admin видеть сделку другого пользователя (общая воронка)
+  const existingDealTestInOrg1 = await knex('deals').where({ organization_id: org1.id, title: 'Тестовая сделка (test@getsale.com)' }).first();
+  if (!existingDealTestInOrg1 && stage1Lead) {
+    await knex('deals').insert({
+      organization_id: org1.id,
+      pipeline_id: pipeline1.id,
+      stage_id: stage1Lead.id,
+      company_id: company1.id,
+      contact_id: contact1.id,
+      owner_id: testUser.id,
+      title: 'Тестовая сделка (test@getsale.com)',
+      value: 5000,
+      created_by_id: testUser.id,
+    });
+    console.log('✅ Org1 deal (created by test user, visible to admin)');
+  }
 
   // --- Org2: pipeline, stages, team, team_members, company, contact, deal ---
   let pipeline2 = await knex('pipelines').where({ organization_id: org2.id, name: 'Default Pipeline' }).first();

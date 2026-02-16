@@ -174,6 +174,7 @@ export interface Deal {
   stageOrder?: number;
   contactName?: string | null;
   ownerEmail?: string | null;
+  creatorEmail?: string | null;
   bd_account_id?: string | null;
   channel?: string | null;
   channel_id?: string | null;
@@ -186,6 +187,7 @@ export interface DealsListParams extends PaginationParams {
   pipelineId?: string;
   stageId?: string;
   ownerId?: string;
+  createdBy?: string;
 }
 
 export interface DealsListResponse {

@@ -46,6 +46,8 @@ export function PipelineManageModal({
   const [addStageMode, setAddStageMode] = useState(false);
   const [editPipelineName, setEditPipelineName] = useState('');
   const [editStageName, setEditStageName] = useState('');
+  /** В модалке выбранный пайплайн, для которого показываем и редактируем стадии (свои у каждого пайплайна). */
+  const [activePipelineId, setActivePipelineId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -57,23 +59,28 @@ export function PipelineManageModal({
   }, [open]);
 
   useEffect(() => {
-    if (!open || !selectedPipelineId) {
+    if (open && selectedPipelineId) setActivePipelineId(selectedPipelineId);
+  }, [open, selectedPipelineId]);
+
+  useEffect(() => {
+    if (!open || !activePipelineId) {
       setStages([]);
       return;
     }
-    fetchStages(selectedPipelineId).then(setStages).catch(() => setStages([]));
-  }, [open, selectedPipelineId]);
+    fetchStages(activePipelineId).then(setStages).catch(() => setStages([]));
+  }, [open, activePipelineId]);
 
   const handleCreatePipeline = async () => {
     const name = newPipelineName.trim();
     if (!name) return;
     setSaving(true);
     try {
-      await createPipeline({ name });
+      const created = await createPipeline({ name });
       setNewPipelineName('');
       setAddPipelineMode(false);
       const list = await fetchPipelines();
       setPipelines(list);
+      setActivePipelineId(created.id);
       onPipelinesChange();
     } catch (e) {
       console.error(e);
@@ -127,8 +134,8 @@ export function PipelineManageModal({
         updateStage(stage.id, { orderIndex: other.order_index }),
         updateStage(other.id, { orderIndex: stage.order_index }),
       ]);
-      if (selectedPipelineId) {
-        const list = await fetchStages(selectedPipelineId);
+      if (activePipelineId) {
+        const list = await fetchStages(activePipelineId);
         setStages(list.sort((a, b) => a.order_index - b.order_index));
       }
       onStagesChange();
@@ -146,6 +153,9 @@ export function PipelineManageModal({
       await deletePipeline(p.id);
       const list = await fetchPipelines();
       setPipelines(list);
+      if (activePipelineId === p.id) {
+        setActivePipelineId(list.length > 0 ? list[0].id : null);
+      }
       onPipelinesChange();
       onStagesChange();
     } catch (e) {
@@ -157,14 +167,14 @@ export function PipelineManageModal({
 
   const handleCreateStage = async () => {
     const name = newStageName.trim();
-    if (!name || !selectedPipelineId) return;
+    if (!name || !activePipelineId) return;
     setSaving(true);
     try {
       const maxOrder = stages.length ? Math.max(...stages.map((s) => s.order_index)) + 1 : 0;
-      await createStage({ pipelineId: selectedPipelineId, name, orderIndex: maxOrder });
+      await createStage({ pipelineId: activePipelineId, name, orderIndex: maxOrder });
       setNewStageName('');
       setAddStageMode(false);
-      const list = await fetchStages(selectedPipelineId);
+      const list = await fetchStages(activePipelineId);
       setStages(list.sort((a, b) => a.order_index - b.order_index));
       onStagesChange();
     } catch (e) {
@@ -181,8 +191,8 @@ export function PipelineManageModal({
     try {
       await updateStage(id, { name });
       setEditingStageId(null);
-      if (selectedPipelineId) {
-        const list = await fetchStages(selectedPipelineId);
+      if (activePipelineId) {
+        const list = await fetchStages(activePipelineId);
         setStages(list.sort((a, b) => a.order_index - b.order_index));
       }
       onStagesChange();
@@ -198,8 +208,8 @@ export function PipelineManageModal({
     setSaving(true);
     try {
       await deleteStage(s.id);
-      if (selectedPipelineId) {
-        const list = await fetchStages(selectedPipelineId);
+      if (activePipelineId) {
+        const list = await fetchStages(activePipelineId);
         setStages(list.sort((a, b) => a.order_index - b.order_index));
       }
       onStagesChange();
@@ -223,9 +233,25 @@ export function PipelineManageModal({
           </button>
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
+          {/* Явный выбор пайплайна для редактирования стадий */}
+          {pipelines.length > 0 && (
+            <section>
+              <label className="block text-sm font-medium text-foreground mb-1.5">{t('pipeline.selectPipelineToEdit', 'Пайплайн для настройки стадий')}</label>
+              <select
+                value={activePipelineId ?? ''}
+                onChange={(e) => setActivePipelineId(e.target.value || null)}
+                className="w-full px-3 py-2 rounded-xl border border-border bg-background text-foreground focus:ring-2 focus:ring-ring outline-none text-sm"
+              >
+                <option value="">— {t('pipeline.selectPipelineToConfigureStages')}</option>
+                {pipelines.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}{p.is_default ? ` (${t('pipeline.defaultPipeline')})` : ''}</option>
+                ))}
+              </select>
+            </section>
+          )}
           <section>
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-medium text-foreground">{t('pipeline.selectPipeline')}</h3>
+              <h3 className="text-sm font-medium text-foreground">{t('pipeline.pipelinesList', 'Список пайплайнов')}</h3>
               {!addPipelineMode ? (
                 <Button variant="outline" size="sm" onClick={() => setAddPipelineMode(true)}>
                   <Plus className="w-4 h-4 mr-1" />
@@ -253,7 +279,10 @@ export function PipelineManageModal({
             ) : (
               <ul className="space-y-1">
                 {pipelines.map((p) => (
-                  <li key={p.id} className="flex items-center gap-2 py-1.5">
+                  <li
+                    key={p.id}
+                    className={`flex items-center gap-2 py-1.5 px-2 rounded-lg -mx-2 ${activePipelineId === p.id ? 'bg-primary/10 ring-1 ring-primary/30' : 'hover:bg-muted/50'}`}
+                  >
                     {editingPipelineId === p.id ? (
                       <>
                         <Input
@@ -275,10 +304,17 @@ export function PipelineManageModal({
                         >
                           <Star className={`w-4 h-4 ${p.is_default ? 'fill-current' : ''}`} />
                         </button>
-                        <span className="flex-1 truncate text-sm font-medium">{p.name}</span>
                         <button
                           type="button"
-                          onClick={() => {
+                          onClick={() => setActivePipelineId(p.id)}
+                          className="flex-1 truncate text-sm font-medium text-left text-foreground hover:underline"
+                        >
+                          {p.name}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
                             setEditingPipelineId(p.id);
                             setEditPipelineName(p.name);
                           }}
@@ -289,7 +325,10 @@ export function PipelineManageModal({
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleDeletePipeline(p)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeletePipeline(p);
+                          }}
                           disabled={saving}
                           className="p-1.5 rounded text-destructive hover:bg-destructive/10"
                           title={t('pipeline.deletePipeline')}
@@ -304,10 +343,15 @@ export function PipelineManageModal({
             )}
           </section>
 
-          {selectedPipelineId && (
+          {pipelines.length > 0 && !activePipelineId && (
+            <section>
+              <p className="text-sm text-muted-foreground">{t('pipeline.selectPipelineToConfigureStages', 'Выберите пайплайн в списке выше, чтобы настроить его стадии.')}</p>
+            </section>
+          )}
+          {activePipelineId && (
             <section>
               <div className="flex items-center justify-between mb-2">
-                <h3 className="text-sm font-medium text-foreground">{t('pipeline.stagesForPipeline', { name: pipelines.find((x) => x.id === selectedPipelineId)?.name ?? '' })}</h3>
+                <h3 className="text-sm font-medium text-foreground">{t('pipeline.stagesForPipeline', { name: pipelines.find((x) => x.id === activePipelineId)?.name ?? '' })}</h3>
                 {!addStageMode ? (
                   <Button variant="outline" size="sm" onClick={() => setAddStageMode(true)}>
                     <Plus className="w-4 h-4 mr-1" />

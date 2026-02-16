@@ -546,6 +546,7 @@ app.get('/api/crm/deals', async (req, res, next) => {
     const pipelineId = typeof req.query.pipelineId === 'string' ? req.query.pipelineId : undefined;
     const stageId = typeof req.query.stageId === 'string' ? req.query.stageId : undefined;
     const ownerId = typeof req.query.ownerId === 'string' ? req.query.ownerId : undefined;
+    const createdBy = typeof req.query.createdBy === 'string' ? req.query.createdBy : undefined;
 
     let where = 'WHERE d.organization_id = $1';
     const params: unknown[] = [user.organizationId];
@@ -570,6 +571,10 @@ app.get('/api/crm/deals', async (req, res, next) => {
       params.push(ownerId);
       where += ` AND d.owner_id = $${params.length}`;
     }
+    if (createdBy) {
+      params.push(createdBy);
+      where += ` AND d.created_by_id = $${params.length}`;
+    }
     if (search) {
       params.push(`%${search}%`);
       where += ` AND d.title ILIKE $${params.length}`;
@@ -593,20 +598,22 @@ app.get('/api/crm/deals', async (req, res, next) => {
         cont.first_name AS contact_first_name,
         cont.last_name AS contact_last_name,
         cont.email AS contact_email,
-        u.email AS owner_email
+        u.email AS owner_email,
+        creator.email AS creator_email
        FROM deals d
        LEFT JOIN companies c ON d.company_id = c.id
        LEFT JOIN pipelines p ON d.pipeline_id = p.id
        LEFT JOIN stages s ON d.stage_id = s.id
        LEFT JOIN contacts cont ON d.contact_id = cont.id
        LEFT JOIN users u ON d.owner_id = u.id
+       LEFT JOIN users creator ON d.created_by_id = creator.id
        ${where}
        ORDER BY d.updated_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
     const items = result.rows.map((r: any) => {
-      const { company_name, pipeline_name, stage_name, stage_order, contact_display_name, contact_first_name, contact_last_name, contact_email, owner_email, ...deal } = r;
+      const { company_name, pipeline_name, stage_name, stage_order, contact_display_name, contact_first_name, contact_last_name, contact_email, owner_email, creator_email, ...deal } = r;
       const contactName =
         contact_display_name?.trim() ||
         [contact_first_name?.trim(), contact_last_name?.trim()].filter(Boolean).join(' ') ||
@@ -620,6 +627,7 @@ app.get('/api/crm/deals', async (req, res, next) => {
         stageOrder: stage_order,
         contactName: contactName || undefined,
         ownerEmail: owner_email || undefined,
+        creatorEmail: creator_email || undefined,
       };
     });
 
@@ -651,13 +659,15 @@ app.get('/api/crm/deals/:id', async (req, res, next) => {
         cont.first_name AS contact_first_name,
         cont.last_name AS contact_last_name,
         cont.email AS contact_email,
-        u.email AS owner_email
+        u.email AS owner_email,
+        creator.email AS creator_email
        FROM deals d
        LEFT JOIN companies c ON d.company_id = c.id
        LEFT JOIN pipelines p ON d.pipeline_id = p.id
        LEFT JOIN stages s ON d.stage_id = s.id
        LEFT JOIN contacts cont ON d.contact_id = cont.id
        LEFT JOIN users u ON d.owner_id = u.id
+       LEFT JOIN users creator ON d.created_by_id = creator.id
        WHERE d.id = $1 AND d.organization_id = $2`,
       [id, user.organizationId]
     );
@@ -665,7 +675,7 @@ app.get('/api/crm/deals/:id', async (req, res, next) => {
       throw new AppError(404, 'Deal not found', ErrorCodes.NOT_FOUND);
     }
     const row = result.rows[0];
-    const { company_name, pipeline_name, stage_name, stage_order, contact_display_name, contact_first_name, contact_last_name, contact_email, owner_email, ...deal } = row;
+    const { company_name, pipeline_name, stage_name, stage_order, contact_display_name, contact_first_name, contact_last_name, contact_email, owner_email, creator_email, ...deal } = row;
     const contactName =
       contact_display_name?.trim() ||
       [contact_first_name?.trim(), contact_last_name?.trim()].filter(Boolean).join(' ') ||
@@ -679,6 +689,7 @@ app.get('/api/crm/deals/:id', async (req, res, next) => {
       stageOrder: stage_order,
       contactName: contactName || undefined,
       ownerEmail: owner_email || undefined,
+      creatorEmail: creator_email || undefined,
     });
   } catch (e) {
     next(e);
@@ -773,14 +784,15 @@ app.post('/api/crm/deals', async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO deals (organization_id, company_id, contact_id, pipeline_id, stage_id, owner_id, title, value, currency, probability, expected_close_date, comments, history, bd_account_id, channel, channel_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
+      `INSERT INTO deals (organization_id, company_id, contact_id, pipeline_id, stage_id, owner_id, created_by_id, title, value, currency, probability, expected_close_date, comments, history, bd_account_id, channel, channel_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING *`,
       [
         user.organizationId,
         resolvedCompanyId,
         contactId ?? null,
         pipelineId,
         stageId,
+        user.id,
         user.id,
         title,
         value ?? null,
