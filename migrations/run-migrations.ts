@@ -70,26 +70,16 @@ async function runMigrations() {
     }
     
     console.log('\n✅ Migrations completed successfully');
-    
-    // Run seeds after migrations (only if no seeds have been run yet, or if explicitly requested)
-    // Check if seeds have been run by checking if default organization exists
-    const orgExists = await db('organizations')
-      .where({ slug: 'default-org' })
-      .first();
-    
-    const shouldRunSeeds = !orgExists || process.env.FORCE_SEED === 'true';
-    
-    if (shouldRunSeeds) {
-      console.log('\n🌱 Running database seeds...');
-      try {
-        await db.seed.run();
-        console.log('✅ Seeds completed successfully');
-      } catch (error: any) {
-        console.error('⚠️  Error running seeds:', error.message || error);
-        // Don't fail the whole process if seeds fail
-      }
-    } else {
-      console.log('\nℹ️  Seeds already exist, skipping seed run. Set FORCE_SEED=true to force seeding.');
+
+    // Демо-данные создаются сидами (001_initial_data, 002_demo_access), не миграциями.
+    // Сиды идемпотентны: 001 — merge; 002 — создаёт демо только если demo-workspace ещё нет.
+    console.log('\n🌱 Running database seeds (001, 002 demo + chats, 003 extra demo deals)...');
+    try {
+      await db.seed.run();
+      console.log('✅ Seeds completed successfully');
+    } catch (error: any) {
+      console.error('⚠️  Error running seeds:', error.message || error);
+      // Don't fail the whole process if seeds fail
     }
   } catch (error: any) {
     console.error('❌ Error running migrations:', error.message || error);

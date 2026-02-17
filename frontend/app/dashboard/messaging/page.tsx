@@ -46,6 +46,8 @@ interface BDAccount {
   display_name?: string | null;
   /** Суммарное количество непрочитанных по аккаунту (только по чатам из sync) */
   unread_count?: number;
+  /** Демо-аккаунт: только данные в БД, отправка отключена */
+  is_demo?: boolean;
 }
 
 function getAccountDisplayName(account: BDAccount): string {
@@ -692,6 +694,85 @@ export default function MessagingPage() {
     setChannelNeedsRefresh(null);
   }, [selectedAccountId]);
 
+  // Всегда загружаем чаты из БД при выборе аккаунта. Для демо — только из БД, без Telegram/sync.
+  useEffect(() => {
+    if (!selectedAccountId) {
+      setChats([]);
+      setLoadingChats(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingChats(true);
+    apiClient
+      .get<unknown[]>('/api/messaging/chats', {
+        params: { channel: 'telegram', bdAccountId: selectedAccountId },
+      })
+      .then((res) => {
+        if (cancelled) return;
+        const chatsFromDB = Array.isArray(res.data) ? res.data : [];
+        const mapped: Chat[] = chatsFromDB.map((chat: any) => {
+          const folderIds = Array.isArray(chat.folder_ids) ? chat.folder_ids.map((x: any) => Number(x)).filter((n: number) => !Number.isNaN(n)) : (chat.folder_id != null ? [Number(chat.folder_id)] : []);
+          return {
+            channel: (chat.channel as string) || 'telegram',
+            channel_id: String(chat.channel_id),
+            folder_id: chat.folder_id != null ? Number(chat.folder_id) : (folderIds[0] ?? null),
+            folder_ids: folderIds.length > 0 ? folderIds : undefined,
+            contact_id: chat.contact_id,
+            first_name: chat.first_name,
+            last_name: chat.last_name,
+            email: chat.email,
+            telegram_id: chat.telegram_id,
+            display_name: chat.display_name ?? null,
+            username: chat.username ?? null,
+            name: chat.name || null,
+            peer_type: chat.peer_type ?? null,
+            unread_count: parseInt(chat.unread_count, 10) || 0,
+            last_message_at: chat.last_message_at && String(chat.last_message_at).trim() ? chat.last_message_at : '',
+            last_message: chat.last_message,
+          };
+        });
+        const byChannelId = new Map<string, Chat>();
+        const isIdOnly = (name: string | null, channelId: string) =>
+          !name || name.trim() === '' || name === channelId || /^\d+$/.test(String(name).trim());
+        for (const chat of mapped) {
+          const existing = byChannelId.get(chat.channel_id);
+          const chatTime = new Date(chat.last_message_at).getTime();
+          const existingTime = existing ? new Date(existing.last_message_at).getTime() : 0;
+          const preferNew =
+            !existing ||
+            chatTime > existingTime ||
+            (chatTime === existingTime && isIdOnly(existing.name ?? existing.telegram_id ?? '', existing.channel_id) && !isIdOnly(chat.name ?? chat.telegram_id ?? '', chat.channel_id));
+          if (preferNew) {
+            const merged = { ...chat };
+            if (existing) merged.unread_count = (existing.unread_count || 0) + (merged.unread_count || 0);
+            byChannelId.set(chat.channel_id, merged);
+          } else {
+            if (existing) existing.unread_count = (existing.unread_count || 0) + (chat.unread_count || 0);
+          }
+        }
+        const formattedChats = Array.from(byChannelId.values()).sort((a, b) => {
+          const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+          const tb = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+          if (Number.isNaN(ta)) return 1;
+          if (Number.isNaN(tb)) return -1;
+          return tb - ta;
+        });
+        setChats(formattedChats);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error('Error fetching chats:', err);
+          setChats([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingChats(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAccountId]);
+
   // Сохранение черновика в Telegram (messages.saveDraft) с debounce 1.5 с.
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -714,10 +795,19 @@ export default function MessagingPage() {
     };
   }, [selectedAccountId, selectedChat?.channel_id, newMessage, replyToMessage?.telegram_message_id]);
 
-  // Проверяем статус синхронизации выбранного аккаунта. Синхронизацию не запускаем без выбора чатов — показываем CTA.
+  // Проверяем статус синхронизации выбранного аккаунта. Чаты всегда грузятся из БД при выборе аккаунта (отдельный эффект).
   useEffect(() => {
     const checkSync = async () => {
       if (!selectedAccountId) return;
+      const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
+      const alreadyCompleted = selectedAccount?.sync_status === 'completed' || selectedAccount?.is_demo === true;
+      if (alreadyCompleted) {
+        setAccountSyncReady(true);
+        setAccountSyncProgress(null);
+        setAccountSyncError(null);
+        return;
+      }
+
       setAccountSyncError(null);
       setLoadingChats(true);
       try {
@@ -762,7 +852,7 @@ export default function MessagingPage() {
       }
     };
     checkSync();
-  }, [selectedAccountId]);
+  }, [selectedAccountId, accounts]);
 
   // Опрос sync-status во время синхронизации: прогресс и завершение не зависят только от WebSocket
   const pollSyncStatusRef = useRef<NodeJS.Timeout | null>(null);
@@ -1215,6 +1305,7 @@ export default function MessagingPage() {
       setAccountContextMenu(null);
     };
     const handleWindowClick = (e: MouseEvent) => {
+      if (e.button === 2) return;
       const target = e.target as HTMLElement;
       if (target?.closest?.('[role="menu"]')) return;
       close();
@@ -1973,6 +2064,8 @@ export default function MessagingPage() {
             className={`flex items-end gap-2 ${isOutbound ? 'flex-row-reverse' : 'flex-row'}`}
             onContextMenu={(e) => {
               e.preventDefault();
+              setChatContextMenu(null);
+              setAccountContextMenu(null);
               setMessageContextMenu({ x: e.clientX, y: e.clientY, message: msg });
             }}
           >
@@ -2313,6 +2406,12 @@ export default function MessagingPage() {
                     setSelectedChat(null);
                     setMessages([]);
                   }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setChatContextMenu(null);
+                    setMessageContextMenu(null);
+                    setAccountContextMenu({ x: e.clientX, y: e.clientY, account });
+                  }}
                   title={getAccountDisplayName(account)}
                   className={`relative shrink-0 rounded-full p-0.5 transition-colors hover:ring-2 hover:ring-primary/50 ${
                     selectedAccountId === account.id ? 'ring-2 ring-primary' : ''
@@ -2379,12 +2478,14 @@ export default function MessagingPage() {
                   setSelectedChat(null);
                   setMessages([]);
                 }}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setAccountContextMenu({ x: e.clientX, y: e.clientY, account });
-                }}
-                className={`p-3 cursor-pointer border-b border-border hover:bg-accent flex gap-3 ${
-                  selectedAccountId === account.id
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setChatContextMenu(null);
+                    setMessageContextMenu(null);
+                    setAccountContextMenu({ x: e.clientX, y: e.clientY, account });
+                  }}
+                  className={`p-3 cursor-pointer border-b border-border hover:bg-accent flex gap-3 ${
+                    selectedAccountId === account.id
                     ? 'bg-primary/10 border-l-4 border-l-primary'
                     : ''
                 }`}
@@ -2536,6 +2637,13 @@ export default function MessagingPage() {
                         key={`${chat.channel}-${chat.channel_id}`}
                         type="button"
                         onClick={() => setSelectedChat(chat)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          if (!selectedAccountId) return;
+                          setAccountContextMenu(null);
+                          setMessageContextMenu(null);
+                          setChatContextMenu({ x: e.clientX, y: e.clientY, chat });
+                        }}
                         title={getChatNameWithOverrides(chat)}
                         className={`relative shrink-0 rounded-full p-0.5 transition-colors hover:ring-2 hover:ring-primary/50 ${
                           selectedChat?.channel_id === chat.channel_id ? 'ring-2 ring-primary' : ''
@@ -2783,7 +2891,8 @@ export default function MessagingPage() {
                 onContextMenu={(e) => {
                   e.preventDefault();
                   if (!selectedAccountId) return;
-                  setSelectedChat(chat);
+                  setAccountContextMenu(null);
+                  setMessageContextMenu(null);
                   setChatContextMenu({ x: e.clientX, y: e.clientY, chat });
                 }}
                 className={`p-4 cursor-pointer border-b border-border transition-colors flex gap-3 ${
@@ -2837,7 +2946,7 @@ export default function MessagingPage() {
       <div className="flex-1 min-h-0 min-w-0 self-stretch h-full flex flex-col bg-background overflow-hidden">
         {selectedChat ? (
           <>
-            <div className="px-4 py-3 border-b border-border bg-card/95 backdrop-blur-sm shrink-0 min-h-[3.5rem] flex flex-col justify-center">
+            <div className="relative z-10 px-4 py-3 border-b border-border bg-card/95 backdrop-blur-sm shrink-0 min-h-[3.5rem] flex flex-col justify-center">
               <div className="flex items-center justify-between gap-2 min-h-[2rem]">
                 <div className="min-w-0 flex-1">
                   <div className="font-semibold truncate flex items-center gap-2">
@@ -2865,14 +2974,18 @@ export default function MessagingPage() {
                     <MoreVertical className="w-5 h-5" />
                   </button>
                   {showChatHeaderMenu && (
-                    <div className="absolute right-0 top-full mt-1 py-1 bg-card border border-border rounded-lg shadow-lg z-10 min-w-[180px]">
+                    <div
+                      className="absolute right-0 top-full mt-1 py-1 bg-card border border-border rounded-lg shadow-lg min-w-[180px] z-[100]"
+                      role="menu"
+                    >
                       <button
                         type="button"
-                        onClick={openEditNameModal}
+                        onClick={() => { setShowChatHeaderMenu(false); openEditNameModal(); }}
                         disabled={!selectedChat.contact_id}
                         className="w-full px-4 py-2 text-left text-sm hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                        role="menuitem"
                       >
-                        <UserCircle className="w-4 h-4" />
+                        <UserCircle className="w-4 h-4 shrink-0" />
                         {selectedChat.contact_id ? t('messaging.changeContactName') : t('messaging.noContact')}
                       </button>
                       {selectedChat.contact_id && (
@@ -2890,8 +3003,9 @@ export default function MessagingPage() {
                             });
                           }}
                           className="w-full px-4 py-2 text-left text-sm hover:bg-accent flex items-center gap-2"
+                          role="menuitem"
                         >
-                          <Filter className="w-4 h-4" />
+                          <Filter className="w-4 h-4 shrink-0" />
                           {t('pipeline.addToFunnel')}
                         </button>
                       )}
@@ -3016,200 +3130,6 @@ export default function MessagingPage() {
                 </button>
               )}
             </div>
-
-            {/* Context menu: chat — Pin, Add to folder, Remove */}
-            <ContextMenu
-              open={!!(chatContextMenu && selectedAccountId)}
-              onClose={() => setChatContextMenu(null)}
-              x={chatContextMenu?.x ?? 0}
-              y={chatContextMenu?.y ?? 0}
-              className="min-w-[180px]"
-              estimatedHeight={320}
-            >
-              {chatContextMenu && selectedAccountId && (
-                <>
-                  {pinnedSet.has(chatContextMenu.chat.channel_id) ? (
-                    <ContextMenuItem
-                      icon={<PinOff className="w-4 h-4" />}
-                      label={t('messaging.unpinChat')}
-                      onClick={() => handleUnpinChat(chatContextMenu.chat)}
-                    />
-                  ) : (
-                    <ContextMenuItem
-                      icon={<Pin className="w-4 h-4" />}
-                      label={t('messaging.pinChat')}
-                      onClick={() => handlePinChat(chatContextMenu.chat)}
-                    />
-                  )}
-                  {chatContextMenu.chat.contact_id && (
-                    <ContextMenuItem
-                      icon={<Filter className="w-4 h-4" />}
-                      label={t('pipeline.addToFunnel')}
-                      onClick={() => {
-                        setChatContextMenu(null);
-                        setAddToFunnelFromChat({
-                          contactId: chatContextMenu.chat.contact_id!,
-                          contactName: getChatNameWithOverrides(chatContextMenu.chat),
-                          dealTitle: getChatNameWithOverrides(chatContextMenu.chat),
-                          bdAccountId: selectedAccountId ?? undefined,
-                          channel: chatContextMenu.chat.channel,
-                          channelId: chatContextMenu.chat.channel_id,
-                        });
-                      }}
-                    />
-                  )}
-                  <ContextMenuSection label={t('messaging.addToFolder')}>
-                    <ContextMenuItem
-                      label={t('messaging.folderNone')}
-                      onClick={() => handleChatFoldersClear(chatContextMenu.chat)}
-                    />
-                    {displayFolders.filter((f) => f.folder_id !== 0).length === 0 ? (
-                      <ContextMenuItem label={t('messaging.folderNoFolders')} disabled />
-                    ) : (
-                      displayFolders
-                        .filter((f) => f.folder_id !== 0)
-                        .map((f) => {
-                          const isInFolder = chatFolderIds(chatContextMenu.chat).includes(f.folder_id);
-                          return (
-                            <ContextMenuItem
-                              key={f.id}
-                              icon={isInFolder ? <Check className="w-4 h-4 text-primary" /> : undefined}
-                              label={
-                                <>
-                                  <span className="truncate flex-1">{f.folder_title}</span>
-                                  <span className="text-[10px] text-muted-foreground shrink-0">{f.is_user_created ? 'CRM' : 'TG'}</span>
-                                </>
-                              }
-                              onClick={() => handleChatFoldersToggle(chatContextMenu.chat, f.folder_id)}
-                            />
-                          );
-                        })
-                    )}
-                  </ContextMenuSection>
-                  {isSelectedAccountMine && (
-                    <>
-                      <div className="border-t border-border my-1" />
-                      <ContextMenuItem
-                        icon={<Trash2 className="w-4 h-4" />}
-                        label={t('messaging.deleteChat')}
-                        destructive
-                        onClick={() => handleRemoveChat(chatContextMenu.chat)}
-                      />
-                    </>
-                  )}
-                </>
-              )}
-            </ContextMenu>
-
-            <FolderManageModal
-              open={showFolderManageModal}
-              onClose={() => setShowFolderManageModal(false)}
-              folders={folders}
-              onFoldersChange={setFolders}
-              selectedAccountId={selectedAccountId}
-              isAccountOwner={!!isSelectedAccountMine}
-              hideEmptyFolders={hideEmptyFolders}
-              onHideEmptyFoldersChange={setHideEmptyFolders}
-              onCreateFolder={handleCreateFolder}
-              onReorder={handleReorderFolders}
-              onUpdateFolder={handleUpdateFolder}
-              onDeleteFolder={handleDeleteFolder}
-              onFolderDeleted={handleFolderDeleted}
-            />
-
-            <AddToFunnelModal
-              isOpen={!!addToFunnelFromChat}
-              onClose={() => setAddToFunnelFromChat(null)}
-              contactId={addToFunnelFromChat?.contactId ?? ''}
-              contactName={addToFunnelFromChat?.contactName}
-              dealTitle={addToFunnelFromChat?.dealTitle}
-              bdAccountId={addToFunnelFromChat?.bdAccountId}
-              channel={addToFunnelFromChat?.channel}
-              channelId={addToFunnelFromChat?.channelId}
-              defaultPipelineId={typeof window !== 'undefined' ? window.localStorage.getItem('pipeline.selectedPipelineId') : null}
-            />
-
-            {/* Context menu: account — Settings (BD Accounts) */}
-            <ContextMenu
-              open={!!accountContextMenu}
-              onClose={() => setAccountContextMenu(null)}
-              x={accountContextMenu?.x ?? 0}
-              y={accountContextMenu?.y ?? 0}
-              className="min-w-[160px]"
-            >
-              {accountContextMenu && (
-                <ContextMenuItem
-                  icon={<Settings className="w-4 h-4" />}
-                  label={t('messaging.accountSettings')}
-                  onClick={() => {
-                    setAccountContextMenu(null);
-                    window.location.href = `/dashboard/bd-accounts?accountId=${accountContextMenu.account.id}`;
-                  }}
-                />
-              )}
-            </ContextMenu>
-
-            {/* Context menu: message — Reply, Forward, Copy, Like, Reaction, Delete */}
-            <ContextMenu
-              open={!!messageContextMenu}
-              onClose={() => setMessageContextMenu(null)}
-              x={messageContextMenu?.x ?? 0}
-              y={messageContextMenu?.y ?? 0}
-              className="min-w-[180px]"
-              estimatedHeight={320}
-            >
-              {messageContextMenu && (
-                <>
-                  <ContextMenuItem
-                    icon={<Reply className="w-4 h-4" />}
-                    label={t('messaging.reply')}
-                    onClick={() => handleReplyToMessage(messageContextMenu.message)}
-                  />
-                  <ContextMenuItem
-                    icon={<Forward className="w-4 h-4" />}
-                    label={t('messaging.forward')}
-                    onClick={() => handleForwardMessage(messageContextMenu.message)}
-                  />
-                  <ContextMenuItem
-                    icon={<Copy className="w-4 h-4" />}
-                    label={t('messaging.copyText')}
-                    onClick={() => handleCopyMessageText(messageContextMenu.message)}
-                  />
-                  <ContextMenuItem
-                    icon={<Heart className="w-4 h-4" />}
-                    label={
-                      messageContextMenu.message.reactions?.['❤️']
-                        ? t('messaging.unlike')
-                        : t('messaging.like')
-                    }
-                    onClick={() => handleReaction(messageContextMenu.message.id, '❤️')}
-                  />
-                  <ContextMenuSection label={t('messaging.reaction')}>
-                    <div className="flex flex-wrap gap-1 px-2 pb-2">
-                      {REACTION_EMOJI.map((emoji) => (
-                        <button
-                          key={emoji}
-                          type="button"
-                          className="p-1.5 rounded hover:bg-accent text-lg leading-none"
-                          onClick={() => handleReaction(messageContextMenu.message.id, emoji)}
-                          title={emoji}
-                        >
-                          {emoji}
-                        </button>
-                      ))}
-                    </div>
-                  </ContextMenuSection>
-                  <div className="border-t border-border my-1" />
-                  <ContextMenuItem
-                    icon={deletingMessageId === messageContextMenu.message.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
-                    label={t('messaging.deleteMessage')}
-                    destructive
-                    onClick={() => handleDeleteMessage(messageContextMenu.message.id)}
-                    disabled={deletingMessageId === messageContextMenu.message.id}
-                  />
-                </>
-              )}
-            </ContextMenu>
 
             {/* Команды CRM - верхняя панель */}
             {showCommandsMenu && (
@@ -3475,6 +3395,198 @@ export default function MessagingPage() {
           </div>
         )}
       </div>
+
+      {/* Контекстные меню и модалки — всегда в DOM, чтобы ПКМ работал и без выбранного чата */}
+      <ContextMenu
+        open={!!(chatContextMenu && selectedAccountId)}
+        onClose={() => setChatContextMenu(null)}
+        x={chatContextMenu?.x ?? 0}
+        y={chatContextMenu?.y ?? 0}
+        className="min-w-[180px]"
+        estimatedHeight={320}
+      >
+        {chatContextMenu && selectedAccountId && (
+          <>
+            {pinnedSet.has(chatContextMenu.chat.channel_id) ? (
+              <ContextMenuItem
+                icon={<PinOff className="w-4 h-4" />}
+                label={t('messaging.unpinChat')}
+                onClick={() => handleUnpinChat(chatContextMenu.chat)}
+              />
+            ) : (
+              <ContextMenuItem
+                icon={<Pin className="w-4 h-4" />}
+                label={t('messaging.pinChat')}
+                onClick={() => handlePinChat(chatContextMenu.chat)}
+              />
+            )}
+            {chatContextMenu.chat.contact_id && (
+              <ContextMenuItem
+                icon={<Filter className="w-4 h-4" />}
+                label={t('pipeline.addToFunnel')}
+                onClick={() => {
+                  setChatContextMenu(null);
+                  setAddToFunnelFromChat({
+                    contactId: chatContextMenu.chat.contact_id!,
+                    contactName: getChatNameWithOverrides(chatContextMenu.chat),
+                    dealTitle: getChatNameWithOverrides(chatContextMenu.chat),
+                    bdAccountId: selectedAccountId ?? undefined,
+                    channel: chatContextMenu.chat.channel,
+                    channelId: chatContextMenu.chat.channel_id,
+                  });
+                }}
+              />
+            )}
+            <ContextMenuSection label={t('messaging.addToFolder')}>
+              <ContextMenuItem
+                label={t('messaging.folderNone')}
+                onClick={() => handleChatFoldersClear(chatContextMenu.chat)}
+              />
+              {displayFolders.filter((f) => f.folder_id !== 0).length === 0 ? (
+                <ContextMenuItem label={t('messaging.folderNoFolders')} disabled />
+              ) : (
+                displayFolders
+                  .filter((f) => f.folder_id !== 0)
+                  .map((f) => {
+                    const isInFolder = chatFolderIds(chatContextMenu.chat).includes(f.folder_id);
+                    return (
+                      <ContextMenuItem
+                        key={f.id}
+                        icon={isInFolder ? <Check className="w-4 h-4 text-primary" /> : undefined}
+                        label={
+                          <>
+                            <span className="truncate flex-1">{f.folder_title}</span>
+                            <span className="text-[10px] text-muted-foreground shrink-0">{f.is_user_created ? 'CRM' : 'TG'}</span>
+                          </>
+                        }
+                        onClick={() => handleChatFoldersToggle(chatContextMenu.chat, f.folder_id)}
+                      />
+                    );
+                  })
+              )}
+            </ContextMenuSection>
+            {isSelectedAccountMine && (
+              <>
+                <div className="border-t border-border my-1" />
+                <ContextMenuItem
+                  icon={<Trash2 className="w-4 h-4" />}
+                  label={t('messaging.deleteChat')}
+                  destructive
+                  onClick={() => handleRemoveChat(chatContextMenu.chat)}
+                />
+              </>
+            )}
+          </>
+        )}
+      </ContextMenu>
+
+      <FolderManageModal
+        open={showFolderManageModal}
+        onClose={() => setShowFolderManageModal(false)}
+        folders={folders}
+        onFoldersChange={setFolders}
+        selectedAccountId={selectedAccountId}
+        isAccountOwner={!!isSelectedAccountMine}
+        hideEmptyFolders={hideEmptyFolders}
+        onHideEmptyFoldersChange={setHideEmptyFolders}
+        onCreateFolder={handleCreateFolder}
+        onReorder={handleReorderFolders}
+        onUpdateFolder={handleUpdateFolder}
+        onDeleteFolder={handleDeleteFolder}
+        onFolderDeleted={handleFolderDeleted}
+      />
+
+      <AddToFunnelModal
+        isOpen={!!addToFunnelFromChat}
+        onClose={() => setAddToFunnelFromChat(null)}
+        contactId={addToFunnelFromChat?.contactId ?? ''}
+        contactName={addToFunnelFromChat?.contactName}
+        dealTitle={addToFunnelFromChat?.dealTitle}
+        bdAccountId={addToFunnelFromChat?.bdAccountId}
+        channel={addToFunnelFromChat?.channel}
+        channelId={addToFunnelFromChat?.channelId}
+        defaultPipelineId={typeof window !== 'undefined' ? window.localStorage.getItem('pipeline.selectedPipelineId') : null}
+      />
+
+      <ContextMenu
+        open={!!accountContextMenu}
+        onClose={() => setAccountContextMenu(null)}
+        x={accountContextMenu?.x ?? 0}
+        y={accountContextMenu?.y ?? 0}
+        className="min-w-[160px]"
+      >
+        {accountContextMenu && (
+          <ContextMenuItem
+            icon={<Settings className="w-4 h-4" />}
+            label={t('messaging.accountSettings')}
+            onClick={() => {
+              setAccountContextMenu(null);
+              window.location.href = `/dashboard/bd-accounts?accountId=${accountContextMenu.account.id}`;
+            }}
+          />
+        )}
+      </ContextMenu>
+
+      <ContextMenu
+        open={!!messageContextMenu}
+        onClose={() => setMessageContextMenu(null)}
+        x={messageContextMenu?.x ?? 0}
+        y={messageContextMenu?.y ?? 0}
+        className="min-w-[180px]"
+        estimatedHeight={320}
+      >
+        {messageContextMenu && (
+          <>
+            <ContextMenuItem
+              icon={<Reply className="w-4 h-4" />}
+              label={t('messaging.reply')}
+              onClick={() => handleReplyToMessage(messageContextMenu.message)}
+            />
+            <ContextMenuItem
+              icon={<Forward className="w-4 h-4" />}
+              label={t('messaging.forward')}
+              onClick={() => handleForwardMessage(messageContextMenu.message)}
+            />
+            <ContextMenuItem
+              icon={<Copy className="w-4 h-4" />}
+              label={t('messaging.copyText')}
+              onClick={() => handleCopyMessageText(messageContextMenu.message)}
+            />
+            <ContextMenuItem
+              icon={<Heart className="w-4 h-4" />}
+              label={
+                messageContextMenu.message.reactions?.['❤️']
+                  ? t('messaging.unlike')
+                  : t('messaging.like')
+              }
+              onClick={() => handleReaction(messageContextMenu.message.id, '❤️')}
+            />
+            <ContextMenuSection label={t('messaging.reaction')}>
+              <div className="flex flex-wrap gap-1 px-2 pb-2">
+                {REACTION_EMOJI.map((emoji) => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    className="p-1.5 rounded hover:bg-accent text-lg leading-none"
+                    onClick={() => handleReaction(messageContextMenu.message.id, emoji)}
+                    title={emoji}
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </ContextMenuSection>
+            <div className="border-t border-border my-1" />
+            <ContextMenuItem
+              icon={deletingMessageId === messageContextMenu.message.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+              label={t('messaging.deleteMessage')}
+              destructive
+              onClick={() => handleDeleteMessage(messageContextMenu.message.id)}
+              disabled={deletingMessageId === messageContextMenu.message.id}
+            />
+          </>
+        )}
+      </ContextMenu>
 
       {/* Панель ИИ-помощника справа — ширина и стили как у левых панелей (w-16 свернута, w-[320px] развернута) */}
       <div

@@ -62,6 +62,8 @@ export default function PipelinePage() {
   const [filterSearch, setFilterSearch] = useState('');
   const [filterSearchDebounced, setFilterSearchDebounced] = useState('');
   const [timelineLaneFilter, setTimelineLaneFilter] = useState<string[]>([]);
+  const timelineScrollRef = useRef<HTMLDivElement>(null);
+  const timelineScrolledToTodayRef = useRef(false);
 
   const loadPipelines = useCallback(async () => {
     try {
@@ -211,11 +213,13 @@ export default function PipelinePage() {
     ? timelineLanes
     : timelineLanes.filter((l) => timelineLaneFilter.includes(l.laneKey));
 
+  const DAYS_BACK = 21;
+  const DAYS_FORWARD = 21;
   const timelineDateColumns = (() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const cols: { dateKey: string; label: string }[] = [];
-    for (let i = 0; i <= 30; i++) {
+    for (let i = -DAYS_BACK; i <= DAYS_FORWARD; i++) {
       const d = new Date(today);
       d.setDate(d.getDate() + i);
       const dateKey = toLocalDateKey(d);
@@ -227,6 +231,25 @@ export default function PipelinePage() {
     }
     return cols;
   })();
+
+  useEffect(() => {
+    if (viewMode !== 'timeline') {
+      timelineScrolledToTodayRef.current = false;
+      return;
+    }
+    if (loading || filteredTimelineLanes.length === 0) return;
+    const el = timelineScrollRef.current;
+    if (!el || timelineScrolledToTodayRef.current) return;
+    const firstColWidth = 64;
+    const dateColWidth = 180;
+    const scrollToToday = () => {
+      const todayOffset = firstColWidth + DAYS_BACK * dateColWidth;
+      el.scrollLeft = todayOffset;
+      timelineScrolledToTodayRef.current = true;
+    };
+    const id = setTimeout(scrollToToday, 0);
+    return () => clearTimeout(id);
+  }, [viewMode, loading, filteredTimelineLanes.length]);
 
   function getDealsForLaneAndDate(laneKey: string, dateKey: string): Deal[] {
     const lane = filteredTimelineLanes.find((l) => l.laneKey === laneKey);
@@ -490,14 +513,24 @@ export default function PipelinePage() {
           ) : (
             <>
               <div className="rounded-xl border border-border bg-card shadow-soft overflow-hidden flex-1 min-h-0 flex flex-col">
-                <table className="w-full">
-                  <thead className="bg-muted/50">
+                <div className="flex-1 min-h-0 overflow-y-auto">
+                  <table className="w-full">
+                    <thead className="sticky top-0 z-10 bg-card border-b border-border">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
                         {t('pipeline.dealCard', 'Сделка')}
                       </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                        {t('pipeline.filterStage')}
+                      <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider whitespace-nowrap">
+                        {t('pipeline.listColStage', 'Стадия')}
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider whitespace-nowrap">
+                        {t('pipeline.listColCreatedAt', 'Дата создания')}
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider whitespace-nowrap">
+                        {t('pipeline.listColCreator', 'Создатель')}
+                      </th>
+                      <th className="px-6 py-3 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider whitespace-nowrap">
+                        {t('pipeline.listColAmount', 'Сумма')}
                       </th>
                       <th className="px-6 py-3 w-20" />
                     </tr>
@@ -505,7 +538,7 @@ export default function PipelinePage() {
                   <tbody className="divide-y divide-border">
                     {deals.length === 0 ? (
                       <tr>
-                        <td colSpan={3} className="px-6 py-12 text-center">
+                        <td colSpan={6} className="px-6 py-12 text-center">
                           <p className="text-muted-foreground text-sm mb-3">{t('pipeline.noDealsEmptyTitle')}</p>
                           <Link href="/dashboard/crm" className="text-sm font-medium text-primary hover:underline">
                             {t('pipeline.noLeadsCta')} →
@@ -547,6 +580,29 @@ export default function PipelinePage() {
                           </td>
                           <td className="px-6 py-4 text-sm text-muted-foreground">
                             {stages.find((s) => s.id === deal.stage_id)?.name ?? '—'}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-muted-foreground whitespace-nowrap">
+                            {new Date(deal.created_at).toLocaleDateString(i18n.language || 'ru', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-2">
+                              <div
+                                className="w-8 h-8 rounded-full bg-primary/15 text-primary flex items-center justify-center text-xs font-medium shrink-0 border border-border/50"
+                                title={deal.creatorEmail ?? undefined}
+                              >
+                                {deal.creatorEmail
+                                  ? (deal.creatorEmail.includes('@')
+                                      ? (deal.creatorEmail.slice(0, 1) + (deal.creatorEmail.split('@')[0]?.slice(-1) ?? '')).toUpperCase()
+                                      : deal.creatorEmail.slice(0, 2).toUpperCase())
+                                  : '—'}
+                              </div>
+                              <span className="text-sm text-muted-foreground truncate max-w-[140px]" title={deal.creatorEmail ?? undefined}>
+                                {deal.creatorEmail ?? '—'}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 text-sm text-muted-foreground text-right whitespace-nowrap">
+                            {deal.value != null ? formatDealAmount(deal.value, deal.currency) : '—'}
                           </td>
                           <td className="px-6 py-4">
                             <div className="relative">
@@ -594,7 +650,8 @@ export default function PipelinePage() {
                       })
                     )}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               </div>
               {listTotal > listLimit && (
                 <div className="mt-4 flex justify-center">
@@ -609,44 +666,46 @@ export default function PipelinePage() {
           )}
         </div>
       ) : viewMode === 'timeline' ? (
-        <div className="flex-1 min-h-0 flex flex-col overflow-y-auto p-4">
-          <p className="text-xs text-muted-foreground mb-3">{t('pipeline.timelineByCreated')}</p>
-          {timelineLanes.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 mb-4">
-              <span className="text-xs font-medium text-muted-foreground">{t('pipeline.timelineLanes')}:</span>
-              <button
-                type="button"
-                onClick={() => setTimelineLaneFilter([])}
-                className={`px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors ${timelineLaneFilter.length === 0 ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-border text-muted-foreground hover:text-foreground hover:border-foreground/30'}`}
-              >
-                {t('pipeline.timelineLanesAll')}
-              </button>
-              {timelineLanes.map(({ laneKey, laneLabel, deals: laneDeals }) => {
-                const selected = timelineLaneFilter.length === 0 || timelineLaneFilter.includes(laneKey);
-                const toggle = () => {
-                  if (timelineLaneFilter.length === 0) {
-                    setTimelineLaneFilter([laneKey]);
-                  } else if (timelineLaneFilter.includes(laneKey)) {
-                    const next = timelineLaneFilter.filter((k) => k !== laneKey);
-                    setTimelineLaneFilter(next.length === 0 ? [] : next);
-                  } else {
-                    setTimelineLaneFilter([...timelineLaneFilter, laneKey]);
-                  }
-                };
-                return (
-                  <button
-                    key={laneKey}
-                    type="button"
-                    onClick={toggle}
-                    className={`px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors ${selected ? 'bg-background border-border text-foreground' : 'border-border text-muted-foreground opacity-60 hover:opacity-100'}`}
-                    title={`${laneLabel} (${laneDeals.length})`}
-                  >
-                    {laneLabel} ({laneDeals.length})
-                  </button>
-                );
-              })}
-            </div>
-          )}
+        <div className="flex-1 min-h-0 flex flex-col p-4">
+          <div className="shrink-0 mb-3">
+            <p className="text-xs text-muted-foreground mb-3">{t('pipeline.timelineByCreated')}</p>
+            {timelineLanes.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 mb-4">
+                <span className="text-xs font-medium text-muted-foreground">{t('pipeline.timelineLanes')}:</span>
+                <button
+                  type="button"
+                  onClick={() => setTimelineLaneFilter([])}
+                  className={`px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors ${timelineLaneFilter.length === 0 ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-border text-muted-foreground hover:text-foreground hover:border-foreground/30'}`}
+                >
+                  {t('pipeline.timelineLanesAll')}
+                </button>
+                {timelineLanes.map(({ laneKey, laneLabel, deals: laneDeals }) => {
+                  const selected = timelineLaneFilter.length === 0 || timelineLaneFilter.includes(laneKey);
+                  const toggle = () => {
+                    if (timelineLaneFilter.length === 0) {
+                      setTimelineLaneFilter([laneKey]);
+                    } else if (timelineLaneFilter.includes(laneKey)) {
+                      const next = timelineLaneFilter.filter((k) => k !== laneKey);
+                      setTimelineLaneFilter(next.length === 0 ? [] : next);
+                    } else {
+                      setTimelineLaneFilter([...timelineLaneFilter, laneKey]);
+                    }
+                  };
+                  return (
+                    <button
+                      key={laneKey}
+                      type="button"
+                      onClick={toggle}
+                      className={`px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors ${selected ? 'bg-background border-border text-foreground' : 'border-border text-muted-foreground opacity-60 hover:opacity-100'}`}
+                      title={`${laneLabel} (${laneDeals.length})`}
+                    >
+                      {laneLabel} ({laneDeals.length})
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           {loading ? (
             <div className="flex justify-center py-12">
               <div className="animate-spin rounded-full h-8 w-8 border-2 border-primary border-t-transparent" aria-hidden />
@@ -663,7 +722,7 @@ export default function PipelinePage() {
               )}
             </div>
           ) : (
-            <div className="flex flex-col min-h-0 overflow-auto">
+            <div ref={timelineScrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-auto">
               <div className="inline-flex min-w-max border border-border rounded-xl overflow-hidden bg-muted/20">
                 <table className="border-collapse table-fixed" style={{ tableLayout: 'fixed', width: 'max-content', minWidth: '100%' }}>
                   <colgroup>
@@ -674,7 +733,7 @@ export default function PipelinePage() {
                   </colgroup>
                   <thead>
                     <tr>
-                      <th style={{ width: 64, minWidth: 64, maxWidth: 64 }} className="sticky left-0 z-10 bg-muted/60 border-b border-r border-border px-0 py-2 text-center" aria-label={t('pipeline.timelineLanes')} />
+                      <th style={{ width: 64, minWidth: 64, maxWidth: 64 }} className="sticky left-0 z-20 bg-muted/80 backdrop-blur-sm border-b border-r border-border px-0 py-2 text-center shadow-[2px_0_6px_-1px_rgba(0,0,0,0.08)]" aria-label={t('pipeline.timelineLanes')} />
                       {timelineDateColumns.map(({ dateKey, label }) => {
                         const isToday = label === t('pipeline.timelineToday');
                         return (
@@ -690,7 +749,7 @@ export default function PipelinePage() {
                       const initials = getLaneInitials(laneLabel, laneKey, t('pipeline.timelineLaneNoCreator'));
                       return (
                       <tr key={laneKey} className="border-b border-border last:border-b-0 hover:bg-muted/20">
-                        <td style={{ width: 64, minWidth: 64, maxWidth: 64 }} className="sticky left-0 z-10 bg-card border-r border-border px-0 py-2 align-top">
+                        <td style={{ width: 64, minWidth: 64, maxWidth: 64 }} className="sticky left-0 z-20 bg-card border-r border-border px-0 py-2 align-top shadow-[2px_0_6px_-1px_rgba(0,0,0,0.08)]">
                           <div className="flex flex-col items-center gap-1 w-full overflow-hidden">
                             <div
                               className="w-10 h-10 rounded-full bg-primary/15 text-primary flex items-center justify-center text-sm font-semibold shrink-0 border border-border/50"

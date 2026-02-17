@@ -3322,7 +3322,7 @@ export class TelegramManager {
       const result = await this.pool.query(
         `SELECT id, organization_id, phone_number, api_id, api_hash, session_string
          FROM bd_accounts
-         WHERE is_active = true AND session_string IS NOT NULL AND session_string != ''`
+         WHERE is_active = true AND (is_demo IS NOT TRUE) AND session_string IS NOT NULL AND session_string != ''`
       );
 
       for (const account of result.rows) {

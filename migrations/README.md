@@ -19,7 +19,8 @@ migrations/
   migrations/              # Migration files (timestamped)
     - 20241225000001_initial_schema.ts
   seeds/                   # Seed files
-    - 001_initial_data.ts
+    - 001_initial_data.ts   # Admin/Test workspaces, pipelines, teams
+    - 002_demo_access.ts   # Demo workspace (5 users, demo Telegram accounts, chats, messages)
   knexfile.ts             # Knex configuration
   run-migrations.ts       # Migration runner script
   package.json            # Dependencies
@@ -89,6 +90,19 @@ After seeding, two users and two workspaces are created with cross-membership:
   - Admin in **Admin Workspace**
 
 Each workspace has: default pipeline and stages, team, company, contact, deal, subscription, and invite link. Use the workspace switcher in the sidebar to change context.
+
+### Demo workspace (для показа заказчикам)
+
+Сид `002_demo_access.ts` создаёт отдельный воркспейс **Demo Workspace** (slug: `demo-workspace`) с готовыми данными «как после 1–2 недель работы»:
+
+- **5 пользователей в команде:** `demo1@getsale.com` … `demo5@getsale.com`, пароль: `demo123`
+- **5 демо-аккаунтов Telegram** (по одному на пользователя): чаты и сообщения только в БД, **без подключения к серверам Telegram**
+- **50 контактов**, по **10 чатов на аккаунт**, в каждом **15–40 сообщений** за последние 14 дней
+- **Воронка и сделки** для фильтрации и сортировки
+
+Демо-аккаунты помечены флагом `is_demo`: отправка сообщений и подключение к Telegram для них отключены. Удобно использовать для демонстрации продукта без риска и нагрузки на Telegram API.
+
+После выполнения сидов (`npm run seed`) войдите под любым из `demo1@getsale.com` … `demo5@getsale.com` и выберите воркспейс **Demo Workspace**.
 
 ## Production Best Practices
 

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useState, useLayoutEffect, useEffect } from 'react';
 
 export interface ContextMenuProps {
   open: boolean;
@@ -18,7 +18,8 @@ const DEFAULT_ESTIMATED_HEIGHT = 280;
 
 /**
  * Переиспользуемое контекстное меню: позиция по клику (x, y), закрытие по onClose.
- * Меню не выходит за пределы экрана: при необходимости открывается вверх и/или сдвигается по горизонтали.
+ * Меню не выходит за пределы экрана; при первом открытии сразу рисуется в (x,y), затем выравнивается.
+ * Закрытие: клик снаружи, Escape, скролл (обрабатываются на странице) + Escape здесь.
  */
 export function ContextMenu({
   open,
@@ -31,8 +32,13 @@ export function ContextMenu({
 }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ left: x, top: y });
+  const lastCoordsRef = useRef({ x: 0, y: 0 });
 
-  useEffect(() => {
+  const isNewOpen = open && (lastCoordsRef.current.x !== x || lastCoordsRef.current.y !== y);
+  const styleLeft = open ? (isNewOpen ? x : position.left) : 0;
+  const styleTop = open ? (isNewOpen ? y : position.top) : 0;
+
+  useLayoutEffect(() => {
     if (!open) return;
     const el = ref.current;
     const height = el ? el.getBoundingClientRect().height : estimatedHeight;
@@ -49,16 +55,30 @@ export function ContextMenu({
     if (left + width + MENU_PADDING > winW) left = Math.max(MENU_PADDING, winW - width - MENU_PADDING);
     else if (left < MENU_PADDING) left = MENU_PADDING;
 
+    lastCoordsRef.current = { x, y };
     setPosition({ left, top });
   }, [open, x, y, estimatedHeight]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [open, onClose]);
 
   if (!open) return null;
   return (
     <div
       ref={ref}
       className={`fixed z-[100] min-w-[140px] py-1 bg-popover border border-border rounded-lg shadow-lg ${className}`}
-      style={{ left: position.left, top: position.top }}
+      style={{ left: styleLeft, top: styleTop }}
       onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
       role="menu"
     >
       {children}

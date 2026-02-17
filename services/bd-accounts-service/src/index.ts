@@ -153,7 +153,7 @@ app.get('/api/bd-accounts', async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT id, organization_id, telegram_id, phone_number, is_active, connected_at, last_activity,
+      `SELECT id, organization_id, telegram_id, phone_number, is_active, is_demo, connected_at, last_activity,
               created_at, sync_status, sync_progress_done, sync_progress_total, sync_error,
               created_by_user_id AS owner_id,
               first_name, last_name, username, bio, photo_file_id, display_name
@@ -222,7 +222,7 @@ app.get('/api/bd-accounts/:id', async (req, res) => {
     const { id } = req.params;
 
     const result = await pool.query(
-      `SELECT id, organization_id, telegram_id, phone_number, is_active, connected_at, last_activity,
+      `SELECT id, organization_id, telegram_id, phone_number, is_active, is_demo, connected_at, last_activity,
               created_at, sync_status, sync_progress_done, sync_progress_total, sync_error,
               created_by_user_id AS owner_id,
               first_name, last_name, username, bio, photo_file_id, display_name
@@ -1995,11 +1995,17 @@ app.post('/api/bd-accounts/:id/send', async (req, res) => {
     }
 
     const accountResult = await pool.query(
-      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      'SELECT id, is_demo FROM bd_accounts WHERE id = $1 AND organization_id = $2',
       [id, user.organizationId]
     );
     if (accountResult.rows.length === 0) {
       return res.status(404).json({ error: 'BD account not found' });
+    }
+    if ((accountResult.rows[0] as { is_demo?: boolean }).is_demo) {
+      return res.status(403).json({
+        error: 'Demo account',
+        message: 'Sending messages is disabled for demo accounts. Connect a real Telegram account to send messages.',
+      });
     }
     if (!telegramManager.isConnected(id)) {
       return res.status(400).json({ error: 'BD account is not connected' });
