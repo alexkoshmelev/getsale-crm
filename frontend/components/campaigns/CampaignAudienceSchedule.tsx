@@ -385,7 +385,7 @@ export function CampaignAudienceSchedule({
             </div>
             {dynamicPipelineId && dynamicStageIds.length > 0 && (
               <p className="text-xs text-muted-foreground">
-                {t('campaigns.dynamicStagesCount', { count: dynamicStageIds.length }, 'Выбрано этапов: {{count}}')}
+                {t('campaigns.dynamicStagesCount', { count: dynamicStageIds.length, defaultValue: 'Выбрано этапов: {{count}}' })}
               </p>
             )}
           </div>

@@ -664,7 +664,7 @@ function StepEditModal({
           </div>
           <div className="space-y-3 border border-border rounded-lg p-3 bg-muted/20">
             <div className="text-sm font-medium text-foreground">
-              {t('campaigns.conditionsSection', 'Условия отправки')}
+              {t('campaigns.conditionsSection', { defaultValue: 'Условия отправки' })}
             </div>
             <div className="flex items-center gap-2">
               <input
@@ -680,7 +680,7 @@ function StepEditModal({
             </div>
             <div>
               <div className="text-xs font-medium text-muted-foreground mb-1.5">
-                {t('campaigns.conditionsContact', 'Поле контакта')}
+                {t('campaigns.conditionsContact', { defaultValue: 'Поле контакта' })}
               </div>
               {contactConditions.map((rule, idx) => (
                 <div key={idx} className="flex flex-wrap items-center gap-2 mb-2">
@@ -719,7 +719,7 @@ function StepEditModal({
                         next[idx] = { ...next[idx]!, value: e.target.value };
                         return next;
                       })}
-                      placeholder={t('campaigns.conditionValue', 'Значение')}
+                      placeholder={t('campaigns.conditionValue', { defaultValue: 'Значение' })}
                       className="flex-1 min-w-[80px] px-2 py-1.5 rounded border border-border bg-background text-foreground text-sm"
                     />
                   )}
@@ -739,12 +739,12 @@ function StepEditModal({
                 className="flex items-center gap-1 text-sm text-primary hover:underline"
               >
                 <Plus className="w-4 h-4" />
-                {t('campaigns.conditionAddContact', 'Добавить правило по полю')}
+                {t('campaigns.conditionAddContact', { defaultValue: 'Добавить правило по полю' })}
               </button>
             </div>
             <div>
               <div className="text-xs font-medium text-muted-foreground mb-1">
-                {t('campaigns.conditionsSendOnlyInStage', 'Отправлять только если в воронке на этапе')}
+                {t('campaigns.conditionsSendOnlyInStage', { defaultValue: 'Отправлять только если в воронке на этапе' })}
               </div>
               <div className="flex flex-wrap gap-2 items-center">
                 <select
@@ -780,7 +780,7 @@ function StepEditModal({
             </div>
             <div>
               <div className="text-xs font-medium text-muted-foreground mb-1">
-                {t('campaigns.conditionsNotSendInStage', 'Не отправлять, если в воронке на этапе')}
+                {t('campaigns.conditionsNotSendInStage', { defaultValue: 'Не отправлять, если в воронке на этапе' })}
               </div>
               <div className="flex flex-wrap gap-2 items-center">
                 <select
@@ -874,7 +874,7 @@ function StepEditModal({
               className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring mb-2"
             >
               <option value="">{t('campaigns.previewPlaceholder')}</option>
-              <option value={SAMPLE_PREVIEW_ID}>{t('campaigns.previewSampleData', 'Тестовые данные (Иван Тестов)')}</option>
+              <option value={SAMPLE_PREVIEW_ID}>{t('campaigns.previewSampleData', { defaultValue: 'Тестовые данные (Иван Тестов)' })}</option>
               {contacts.map((c) => (
                 <option key={c.id} value={c.id}>
                   {(c.first_name ?? '').trim() || (c.display_name ?? c.companyName ?? c.id)}

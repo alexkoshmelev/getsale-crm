@@ -148,7 +148,12 @@
     "deleteAction": "Удалить",
     "shownCount": "Показано {{from}}–{{to}} из {{total}}",
     "loadError": "Не удалось загрузить данные",
-    "deleteError": "Ошибка удаления"
+    "deleteError": "Ошибка удаления",
+    "notes": "Заметки",
+    "addNote": "Добавить заметку...",
+    "reminders": "Напоминания",
+    "reminderTitle": "Текст напоминания",
+    "markDone": "Выполнено"
   },
   "pipeline": {
     "title": "Воронка",

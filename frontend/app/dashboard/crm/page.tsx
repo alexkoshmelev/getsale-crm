@@ -822,7 +822,7 @@ export default function CRMPage() {
                   setImportResult(result);
                   if (result.created > 0 || result.updated > 0) loadContacts();
                 } catch (err) {
-                  setImportResult({ created: 0, updated: 0, errors: [{ row: 0, message: String(err) }], total: 0 });
+                  setImportResult({ created: 0, updated: 0, errors: [{ row: 0, message: String(err) }] });
                 } finally {
                   setImportLoading(false);
                 }
@@ -951,7 +951,7 @@ function ContactDetail({
       <div className="border-t border-border pt-4 space-y-4">
         <h4 className="text-sm font-medium text-foreground flex items-center gap-2">
           <StickyNote className="w-4 h-4" />
-          {t('crm.notes', 'Заметки')}
+          {t('crm.notes')}
         </h4>
         <ul className="space-y-2 max-h-32 overflow-y-auto">
           {notes.map((n) => (
@@ -962,19 +962,19 @@ function ContactDetail({
           ))}
         </ul>
         <div className="flex gap-2">
-          <input type="text" value={noteText} onChange={(e) => setNoteText(e.target.value)} placeholder={t('crm.addNote', 'Добавить заметку...')} className="flex-1 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+          <input type="text" value={noteText} onChange={(e) => setNoteText(e.target.value)} placeholder={t('crm.addNote')} className="flex-1 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
           <Button size="sm" disabled={!noteText.trim() || addingNote} onClick={async () => { if (!noteText.trim()) return; setAddingNote(true); try { await createContactNote(contact.id, noteText.trim()); setNoteText(''); loadNotes(); } finally { setAddingNote(false); } }}>{addingNote ? '...' : t('common.add')}</Button>
         </div>
         <h4 className="text-sm font-medium text-foreground flex items-center gap-2 mt-4">
           <Bell className="w-4 h-4" />
-          {t('crm.reminders', 'Напоминания')}
+          {t('crm.reminders')}
         </h4>
         <ul className="space-y-2 max-h-28 overflow-y-auto">
           {reminders.map((r) => (
             <li key={r.id} className={clsx('flex items-center justify-between gap-2 text-sm rounded-lg p-2', r.done ? 'bg-muted/30 text-muted-foreground' : 'bg-muted/40')}>
               <span className="flex-1 truncate">{r.title || new Date(r.remind_at).toLocaleString()}</span>
               <div className="flex items-center gap-1 shrink-0">
-                {!r.done && <button type="button" onClick={() => updateReminder(r.id, { done: true }).then(loadReminders)} className="p-1 rounded text-green-600 hover:bg-green-500/20" title={t('crm.markDone', 'Выполнено')}><Check className="w-4 h-4" /></button>}
+                {!r.done && <button type="button" onClick={() => updateReminder(r.id, { done: true }).then(loadReminders)} className="p-1 rounded text-green-600 hover:bg-green-500/20" title={t('crm.markDone')}><Check className="w-4 h-4" /></button>}
                 <button type="button" onClick={() => deleteReminder(r.id).then(loadReminders)} className="p-1 rounded text-muted-foreground hover:text-destructive">×</button>
               </div>
             </li>
@@ -982,7 +982,7 @@ function ContactDetail({
         </ul>
         <div className="flex flex-wrap gap-2 items-end">
           <input type="datetime-local" value={remindAt} onChange={(e) => setRemindAt(e.target.value)} className="px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
-          <input type="text" value={remindTitle} onChange={(e) => setRemindTitle(e.target.value)} placeholder={t('crm.reminderTitle', 'Текст напоминания')} className="w-40 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+          <input type="text" value={remindTitle} onChange={(e) => setRemindTitle(e.target.value)} placeholder={t('crm.reminderTitle')} className="w-40 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
           <Button size="sm" disabled={!remindAt || addingReminder} onClick={async () => { if (!remindAt) return; setAddingReminder(true); try { await createContactReminder(contact.id, { remind_at: new Date(remindAt).toISOString(), title: remindTitle.trim() || undefined }); setRemindAt(''); setRemindTitle(''); loadReminders(); } finally { setAddingReminder(false); } }}>{addingReminder ? '...' : t('common.add')}</Button>
         </div>
       </div>
@@ -1058,7 +1058,7 @@ function DealDetail({
       <div className="border-t border-border pt-4 space-y-4">
         <h4 className="text-sm font-medium text-foreground flex items-center gap-2">
           <StickyNote className="w-4 h-4" />
-          {t('crm.notes', 'Заметки')}
+          {t('crm.notes')}
         </h4>
         <ul className="space-y-2 max-h-32 overflow-y-auto">
           {notes.map((n) => (
@@ -1069,19 +1069,19 @@ function DealDetail({
           ))}
         </ul>
         <div className="flex gap-2">
-          <input type="text" value={noteText} onChange={(e) => setNoteText(e.target.value)} placeholder={t('crm.addNote', 'Добавить заметку...')} className="flex-1 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+          <input type="text" value={noteText} onChange={(e) => setNoteText(e.target.value)} placeholder={t('crm.addNote')} className="flex-1 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
           <Button size="sm" disabled={!noteText.trim() || addingNote} onClick={async () => { if (!noteText.trim()) return; setAddingNote(true); try { await createDealNote(deal.id, noteText.trim()); setNoteText(''); loadNotes(); } finally { setAddingNote(false); } }}>{addingNote ? '...' : t('common.add')}</Button>
         </div>
         <h4 className="text-sm font-medium text-foreground flex items-center gap-2 mt-4">
           <Bell className="w-4 h-4" />
-          {t('crm.reminders', 'Напоминания')}
+          {t('crm.reminders')}
         </h4>
         <ul className="space-y-2 max-h-28 overflow-y-auto">
           {reminders.map((r) => (
             <li key={r.id} className={clsx('flex items-center justify-between gap-2 text-sm rounded-lg p-2', r.done ? 'bg-muted/30 text-muted-foreground' : 'bg-muted/40')}>
               <span className="flex-1 truncate">{r.title || new Date(r.remind_at).toLocaleString()}</span>
               <div className="flex items-center gap-1 shrink-0">
-                {!r.done && <button type="button" onClick={() => updateReminder(r.id, { done: true }).then(loadReminders)} className="p-1 rounded text-green-600 hover:bg-green-500/20" title={t('crm.markDone', 'Выполнено')}><Check className="w-4 h-4" /></button>}
+                {!r.done && <button type="button" onClick={() => updateReminder(r.id, { done: true }).then(loadReminders)} className="p-1 rounded text-green-600 hover:bg-green-500/20" title={t('crm.markDone')}><Check className="w-4 h-4" /></button>}
                 <button type="button" onClick={() => deleteReminder(r.id).then(loadReminders)} className="p-1 rounded text-muted-foreground hover:text-destructive">×</button>
               </div>
             </li>
@@ -1089,7 +1089,7 @@ function DealDetail({
         </ul>
         <div className="flex flex-wrap gap-2 items-end">
           <input type="datetime-local" value={remindAt} onChange={(e) => setRemindAt(e.target.value)} className="px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
-          <input type="text" value={remindTitle} onChange={(e) => setRemindTitle(e.target.value)} placeholder={t('crm.reminderTitle', 'Текст напоминания')} className="w-40 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+          <input type="text" value={remindTitle} onChange={(e) => setRemindTitle(e.target.value)} placeholder={t('crm.reminderTitle')} className="w-40 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
           <Button size="sm" disabled={!remindAt || addingReminder} onClick={async () => { if (!remindAt) return; setAddingReminder(true); try { await createDealReminder(deal.id, { remind_at: new Date(remindAt).toISOString(), title: remindTitle.trim() || undefined }); setRemindAt(''); setRemindTitle(''); loadReminders(); } finally { setAddingReminder(false); } }}>{addingReminder ? '...' : t('common.add')}</Button>
         </div>
       </div>

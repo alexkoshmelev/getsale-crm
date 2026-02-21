@@ -3792,7 +3792,7 @@ function BroadcastToGroupsModal({
   accountId: string;
   accountName: string;
   onClose: () => void;
-  t: (key: string, fallback?: string) => string;
+  t: ReturnType<typeof useTranslation>['t'];
 }) {
   const [groups, setGroups] = useState<GroupSource[]>([]);
   const [loading, setLoading] = useState(true);

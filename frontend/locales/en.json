@@ -148,7 +148,12 @@
     "deleteAction": "Delete",
     "shownCount": "Showing {{from}}–{{to}} of {{total}}",
     "loadError": "Failed to load data",
-    "deleteError": "Delete failed"
+    "deleteError": "Delete failed",
+    "notes": "Notes",
+    "addNote": "Add note...",
+    "reminders": "Reminders",
+    "reminderTitle": "Reminder text",
+    "markDone": "Done"
   },
   "pipeline": {
     "title": "Funnel",
