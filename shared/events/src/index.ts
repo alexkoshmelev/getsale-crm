@@ -441,6 +441,28 @@ export interface StageDeletedEvent extends BaseEvent {
   };
 }
 
+// Lead events (pipeline-service)
+export interface LeadCreatedEvent extends BaseEvent {
+  type: EventType.LEAD_CREATED;
+  data: {
+    contactId: string;
+    pipelineId: string;
+    stageId: string;
+    leadId: string;
+  };
+}
+
+export interface LeadStageChangedEvent extends BaseEvent {
+  type: EventType.LEAD_STAGE_CHANGED;
+  data: {
+    contactId: string;
+    pipelineId: string;
+    fromStageId: string;
+    toStageId: string;
+    leadId: string;
+  };
+}
+
 // Automation events
 export interface AutomationRuleCreatedEvent extends BaseEvent {
   type: EventType.AUTOMATION_RULE_CREATED;
@@ -540,6 +562,8 @@ export type Event =
   | StageCreatedEvent
   | StageUpdatedEvent
   | StageDeletedEvent
+  | LeadCreatedEvent
+  | LeadStageChangedEvent
   | AutomationRuleCreatedEvent
   | AutomationRuleTriggeredEvent
   | MetricRecordedEvent;

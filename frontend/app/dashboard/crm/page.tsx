@@ -743,13 +743,12 @@ export default function CRMPage() {
               e.target.value = '';
             }}
           />
-          <label htmlFor="crm-import-csv">
-            <Button type="button" variant="outline" asChild>
-              <span className="cursor-pointer">
-                <FileUp className="w-4 h-4 mr-2 inline" />
-                {importFileContent ? t('crm.importChangeFile', 'Выбрать другой файл') : t('crm.importSelectFile', 'Выбрать CSV')}
-              </span>
-            </Button>
+          <label
+            htmlFor="crm-import-csv"
+            className="inline-flex items-center justify-center font-medium rounded-lg border border-border hover:bg-accent text-foreground px-4 py-2 text-sm cursor-pointer transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            <FileUp className="w-4 h-4 mr-2" />
+            {importFileContent ? t('crm.importChangeFile', 'Выбрать другой файл') : t('crm.importSelectFile', 'Выбрать CSV')}
           </label>
           {importFileContent && (
             <>
