@@ -18,7 +18,7 @@
 10. **team-service** - Управление командами, распределение клиентов, права доступа
 11. **websocket-service** - Real-time WebSocket соединения
 12. **ai-service** - AI Agents System (Draft generation, suggestions)
-13. **campaign-service** - Cold Outreach Engine (TODO)
+13. **campaign-service** - Cold Outreach Engine (базовый CRUD, кампании, шаблоны, sequences, участники, start/pause)
 
 ### Инфраструктура
 

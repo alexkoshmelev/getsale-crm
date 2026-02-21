@@ -69,10 +69,12 @@ export enum EventType {
   TEAM_MEMBER_REMOVED = 'team.member.removed',
   TEAM_INVITATION_SENT = 'team.invitation.sent',
   
-  // Pipeline
+  // Pipeline & Leads
   STAGE_CREATED = 'stage.created',
   STAGE_UPDATED = 'stage.updated',
   STAGE_DELETED = 'stage.deleted',
+  LEAD_CREATED = 'lead.created',
+  LEAD_STAGE_CHANGED = 'lead.stage.changed',
   
   // Automation
   AUTOMATION_RULE_CREATED = 'automation.rule.created',

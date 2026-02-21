@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import axios from 'axios';
 import { UserPlus, Users, Link2, Copy, Loader2, Trash2 } from 'lucide-react';
 import { useAuthStore } from '@/lib/stores/auth-store';
+import { canManageTeam } from '@/lib/permissions';
 import Button from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
@@ -51,7 +52,7 @@ const UNIFIED_ROLES: { value: string; labelKey: string }[] = [
 export default function TeamPage() {
   const { t } = useTranslation();
   const user = useAuthStore((s) => s.user);
-  const canChangeRoles = user?.role === 'owner' || user?.role === 'admin';
+  const canChangeRoles = canManageTeam(user?.role);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [showInviteModal, setShowInviteModal] = useState(false);

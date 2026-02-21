@@ -300,7 +300,11 @@ app.get('/api/messaging/chats', async (req, res) => {
                  AND TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) NOT LIKE 'Telegram %'
                  THEN TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) ELSE NULL END,
             c.username,
-            NULLIF(TRIM(COALESCE(s.title, '')), ''),
+            CASE WHEN NULLIF(TRIM(COALESCE(s.title, '')), '') IS NOT NULL
+                 AND (TRIM(COALESCE(s.title, '')) = NULLIF(TRIM(COALESCE(a.display_name, '')), '')
+                      OR TRIM(COALESCE(s.title, '')) = COALESCE(a.username, '')
+                      OR TRIM(COALESCE(s.title, '')) = NULLIF(TRIM(COALESCE(a.first_name, '')), ''))
+                 THEN NULL ELSE NULLIF(TRIM(COALESCE(s.title, '')), '') END,
             c.telegram_id::text,
             s.telegram_chat_id::text
           ) AS name,
@@ -344,7 +348,11 @@ app.get('/api/messaging/chats', async (req, res) => {
                AND TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) NOT LIKE 'Telegram %'
                THEN TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) ELSE NULL END,
           c.username,
-          NULLIF(TRIM(COALESCE(s.title, '')), ''),
+          CASE WHEN NULLIF(TRIM(COALESCE(s.title, '')), '') IS NOT NULL
+               AND (TRIM(COALESCE(s.title, '')) = NULLIF(TRIM(COALESCE(ba.display_name, '')), '')
+                    OR TRIM(COALESCE(s.title, '')) = COALESCE(ba.username, '')
+                    OR TRIM(COALESCE(s.title, '')) = NULLIF(TRIM(COALESCE(ba.first_name, '')), ''))
+               THEN NULL ELSE NULLIF(TRIM(COALESCE(s.title, '')), '') END,
           c.telegram_id::text,
           m.channel_id
         ) AS name,
@@ -354,6 +362,7 @@ app.get('/api/messaging/chats', async (req, res) => {
       FROM messages m
       LEFT JOIN contacts c ON m.contact_id = c.id
       LEFT JOIN bd_account_sync_chats s ON s.bd_account_id = m.bd_account_id AND s.telegram_chat_id = m.channel_id
+      LEFT JOIN bd_accounts ba ON ba.id = m.bd_account_id
       WHERE m.organization_id = $1
     `;
 
@@ -363,7 +372,7 @@ app.get('/api/messaging/chats', async (req, res) => {
     }
 
     query += `
-      GROUP BY m.organization_id, m.channel, m.channel_id, m.bd_account_id, m.contact_id, s.peer_type, c.first_name, c.last_name, c.email, c.telegram_id, c.display_name, c.username, s.title
+      GROUP BY m.organization_id, m.channel, m.channel_id, m.bd_account_id, m.contact_id, s.peer_type, c.first_name, c.last_name, c.email, c.telegram_id, c.display_name, c.username, s.title, ba.display_name, ba.username, ba.first_name
       ORDER BY last_message_at DESC NULLS LAST
     `;
 

@@ -84,6 +84,7 @@ services:
       - AUTOMATION_SERVICE_URL=http://automation-service:3009
       - ANALYTICS_SERVICE_URL=http://analytics-service:3010
       - TEAM_SERVICE_URL=http://team-service:3011
+      - CAMPAIGN_SERVICE_URL=http://campaign-service:3012
     depends_on:
       redis:
         condition: service_healthy
@@ -443,6 +444,38 @@ services:
       - .:/app
       - /app/node_modules
       - /app/services/team-service/node_modules
+      - /app/shared/types/node_modules
+      - /app/shared/utils/node_modules
+      - /app/shared/events/node_modules
+    networks:
+      - getsale-network
+
+  campaign-service:
+    build:
+      context: .
+      dockerfile: docker/services/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/campaign-service
+    container_name: getsale-campaign-service
+    environment:
+      - NODE_ENV=development
+      - PORT=3012
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - MESSAGING_SERVICE_URL=http://messaging-service:3003
+      - PIPELINE_SERVICE_URL=http://pipeline-service:3008
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/services/campaign-service/node_modules
       - /app/shared/types/node_modules
       - /app/shared/utils/node_modules
       - /app/shared/events/node_modules

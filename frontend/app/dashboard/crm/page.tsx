@@ -15,6 +15,10 @@ import {
   Phone,
   Briefcase,
   Filter,
+  FileUp,
+  StickyNote,
+  Bell,
+  Check,
 } from 'lucide-react';
 import { apiClient } from '@/lib/api/client';
 import {
@@ -24,10 +28,24 @@ import {
   deleteCompany,
   deleteContact,
   deleteDeal,
+  importContactsFromCsv,
+  fetchContactNotes,
+  createContactNote,
+  deleteNote,
+  fetchContactReminders,
+  createContactReminder,
+  updateReminder,
+  deleteReminder,
+  fetchDealNotes,
+  createDealNote,
+  fetchDealReminders,
+  createDealReminder,
   type Company,
   type Contact,
   type Deal,
   type PaginationMeta,
+  type Note,
+  type Reminder,
 } from '@/lib/api/crm';
 import { Modal } from '@/components/ui/Modal';
 import { SearchInput } from '@/components/ui/SearchInput';
@@ -102,6 +120,13 @@ export default function CRMPage() {
 
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: TabId; id: string; name: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  const [importModalOpen, setImportModalOpen] = useState(false);
+  const [importFileContent, setImportFileContent] = useState('');
+  const [importHasHeader, setImportHasHeader] = useState(true);
+  const [importColumnMapping, setImportColumnMapping] = useState<Record<number, string>>({});
+  const [importResult, setImportResult] = useState<{ created: number; updated: number; errors: { row: number; message: string }[] } | null>(null);
+  const [importLoading, setImportLoading] = useState(false);
 
   // Open entity from URL (e.g. from command palette: /dashboard/crm?tab=companies&open=uuid)
   useEffect(() => {
@@ -270,10 +295,16 @@ export default function CRMPage() {
             </Button>
           )}
           {activeTab === 'contacts' && (
-            <Button onClick={() => { setContactEdit(null); setContactModalOpen(true); }}>
-              <Plus className="w-4 h-4 mr-2" />
-              {t('common.contact')}
-            </Button>
+            <>
+              <Button variant="outline" onClick={() => { setImportModalOpen(true); setImportResult(null); setImportFileContent(''); setImportColumnMapping({}); }}>
+                <FileUp className="w-4 h-4 mr-2" />
+                {t('crm.importContacts', 'Импорт')}
+              </Button>
+              <Button onClick={() => { setContactEdit(null); setContactModalOpen(true); }}>
+                <Plus className="w-4 h-4 mr-2" />
+                {t('common.contact')}
+              </Button>
+            </>
           )}
           {activeTab === 'deals' && (
             <Button onClick={() => { setDealEdit(null); setDealModalOpen(true); }}>
@@ -673,6 +704,136 @@ export default function CRMPage() {
           </div>
         )}
       </Modal>
+
+      {/* Contact import from CSV */}
+      <Modal
+        isOpen={importModalOpen}
+        onClose={() => { setImportModalOpen(false); setImportResult(null); setImportFileContent(''); }}
+        title={t('crm.importContacts', 'Импорт контактов из CSV')}
+        size="md"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            {t('crm.importContactsHint', 'Загрузите CSV с колонками: имя, фамилия, email, телефон, Telegram ID. В каждой строке должен быть указан email или Telegram ID.')}
+          </p>
+          <input
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            id="crm-import-csv"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = () => {
+                const text = String(reader.result ?? '');
+                setImportFileContent(text);
+                setImportResult(null);
+                const lines = text.split('\n').filter((l) => l.trim());
+                const first = lines[0];
+                if (first) {
+                  const cols = first.split(',').length;
+                  const defaultMap: Record<number, string> = {};
+                  const defaults = ['firstName', 'lastName', 'email', 'phone', 'telegramId'];
+                  for (let i = 0; i < cols; i++) defaultMap[i] = defaults[i] ?? '';
+                  setImportColumnMapping(defaultMap);
+                }
+              };
+              reader.readAsText(file, 'UTF-8');
+              e.target.value = '';
+            }}
+          />
+          <label htmlFor="crm-import-csv">
+            <Button type="button" variant="outline" asChild>
+              <span className="cursor-pointer">
+                <FileUp className="w-4 h-4 mr-2 inline" />
+                {importFileContent ? t('crm.importChangeFile', 'Выбрать другой файл') : t('crm.importSelectFile', 'Выбрать CSV')}
+              </span>
+            </Button>
+          </label>
+          {importFileContent && (
+            <>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={importHasHeader} onChange={(e) => setImportHasHeader(e.target.checked)} className="rounded border-border" />
+                <span className="text-sm text-foreground">{t('crm.importHasHeader', 'Первая строка — заголовки')}</span>
+              </label>
+              {(() => {
+                const lines = importFileContent.split('\n').filter((l) => l.trim());
+                const firstRow = lines[importHasHeader ? 1 : 0];
+                const colCount = firstRow ? firstRow.split(',').length : 0;
+                const fieldOpts = [
+                  { value: '', label: t('crm.importSkip', '—') },
+                  { value: 'firstName', label: t('crm.importFirstName', 'Имя') },
+                  { value: 'lastName', label: t('crm.importLastName', 'Фамилия') },
+                  { value: 'email', label: t('crm.importEmail', 'Email') },
+                  { value: 'phone', label: t('crm.importPhone', 'Телефон') },
+                  { value: 'telegramId', label: t('crm.importTelegramId', 'Telegram ID') },
+                ];
+                return (
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium text-foreground">{t('crm.importMapping', 'Соответствие колонок')}</span>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {Array.from({ length: colCount }, (_, i) => (
+                        <div key={i} className="flex flex-col gap-1">
+                          <span className="text-xs text-muted-foreground">Кол. {i + 1}</span>
+                          <select
+                            value={importColumnMapping[i] ?? ''}
+                            onChange={(e) => setImportColumnMapping((prev) => ({ ...prev, [i]: e.target.value }))}
+                            className="w-full px-2 py-1.5 rounded-lg border border-border bg-background text-foreground text-sm"
+                          >
+                            {fieldOpts.map((o) => (
+                              <option key={o.value || 'skip'} value={o.value}>{o.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+            </>
+          )}
+          {importResult && (
+            <div className="p-3 rounded-lg bg-muted/50 text-sm">
+              <p className="text-foreground">{t('crm.importCreated', 'Создано')}: {importResult.created}, {t('crm.importUpdated', 'Обновлено')}: {importResult.updated}</p>
+              {importResult.errors.length > 0 && (
+                <p className="text-destructive mt-1">{t('crm.importErrors', 'Ошибки')}: {importResult.errors.length} (строки: {importResult.errors.slice(0, 5).map((e) => e.row).join(', ')}{importResult.errors.length > 5 ? '…' : ''})</p>
+              )}
+            </div>
+          )}
+          <div className="flex gap-2 justify-end pt-2">
+            <Button variant="outline" onClick={() => { setImportModalOpen(false); setImportResult(null); }}>
+              {t('common.close')}
+            </Button>
+            <Button
+              disabled={!importFileContent || importLoading}
+              onClick={async () => {
+                if (!importFileContent) return;
+                setImportLoading(true);
+                try {
+                  const mapping: Record<string, number> = {};
+                  Object.entries(importColumnMapping).forEach(([colIdx, field]) => {
+                    if (field) mapping[field] = parseInt(colIdx, 10);
+                  });
+                  const result = await importContactsFromCsv({
+                    content: importFileContent,
+                    hasHeader: importHasHeader,
+                    mapping: Object.keys(mapping).length ? mapping : undefined,
+                  });
+                  setImportResult(result);
+                  if (result.created > 0 || result.updated > 0) loadContacts();
+                } catch (err) {
+                  setImportResult({ created: 0, updated: 0, errors: [{ row: 0, message: String(err) }], total: 0 });
+                } finally {
+                  setImportLoading(false);
+                }
+              }}
+            >
+              {importLoading ? t('common.loading') : t('crm.importRun', 'Импортировать')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -728,6 +889,23 @@ function ContactDetail({
   t: (key: string) => string;
 }) {
   const name = getContactDisplayName(contact);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [noteText, setNoteText] = useState('');
+  const [remindAt, setRemindAt] = useState('');
+  const [remindTitle, setRemindTitle] = useState('');
+  const [addingNote, setAddingNote] = useState(false);
+  const [addingReminder, setAddingReminder] = useState(false);
+
+  const loadNotes = useCallback(() => {
+    fetchContactNotes(contact.id).then(setNotes).catch(() => setNotes([]));
+  }, [contact.id]);
+  const loadReminders = useCallback(() => {
+    fetchContactReminders(contact.id).then(setReminders).catch(() => setReminders([]));
+  }, [contact.id]);
+
+  useEffect(() => { loadNotes(); loadReminders(); }, [loadNotes, loadReminders]);
+
   return (
     <div className="space-y-6">
       <div className="flex items-start gap-4">
@@ -770,6 +948,46 @@ function ContactDetail({
           </div>
         )}
       </div>
+
+      <div className="border-t border-border pt-4 space-y-4">
+        <h4 className="text-sm font-medium text-foreground flex items-center gap-2">
+          <StickyNote className="w-4 h-4" />
+          {t('crm.notes', 'Заметки')}
+        </h4>
+        <ul className="space-y-2 max-h-32 overflow-y-auto">
+          {notes.map((n) => (
+            <li key={n.id} className="flex items-start justify-between gap-2 text-sm bg-muted/40 rounded-lg p-2">
+              <span className="text-foreground flex-1 break-words">{n.content}</span>
+              <button type="button" onClick={() => deleteNote(n.id).then(loadNotes)} className="text-muted-foreground hover:text-destructive shrink-0" aria-label={t('common.delete')}>×</button>
+            </li>
+          ))}
+        </ul>
+        <div className="flex gap-2">
+          <input type="text" value={noteText} onChange={(e) => setNoteText(e.target.value)} placeholder={t('crm.addNote', 'Добавить заметку...')} className="flex-1 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+          <Button size="sm" disabled={!noteText.trim() || addingNote} onClick={async () => { if (!noteText.trim()) return; setAddingNote(true); try { await createContactNote(contact.id, noteText.trim()); setNoteText(''); loadNotes(); } finally { setAddingNote(false); } }}>{addingNote ? '...' : t('common.add')}</Button>
+        </div>
+        <h4 className="text-sm font-medium text-foreground flex items-center gap-2 mt-4">
+          <Bell className="w-4 h-4" />
+          {t('crm.reminders', 'Напоминания')}
+        </h4>
+        <ul className="space-y-2 max-h-28 overflow-y-auto">
+          {reminders.map((r) => (
+            <li key={r.id} className={clsx('flex items-center justify-between gap-2 text-sm rounded-lg p-2', r.done ? 'bg-muted/30 text-muted-foreground' : 'bg-muted/40')}>
+              <span className="flex-1 truncate">{r.title || new Date(r.remind_at).toLocaleString()}</span>
+              <div className="flex items-center gap-1 shrink-0">
+                {!r.done && <button type="button" onClick={() => updateReminder(r.id, { done: true }).then(loadReminders)} className="p-1 rounded text-green-600 hover:bg-green-500/20" title={t('crm.markDone', 'Выполнено')}><Check className="w-4 h-4" /></button>}
+                <button type="button" onClick={() => deleteReminder(r.id).then(loadReminders)} className="p-1 rounded text-muted-foreground hover:text-destructive">×</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+        <div className="flex flex-wrap gap-2 items-end">
+          <input type="datetime-local" value={remindAt} onChange={(e) => setRemindAt(e.target.value)} className="px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+          <input type="text" value={remindTitle} onChange={(e) => setRemindTitle(e.target.value)} placeholder={t('crm.reminderTitle', 'Текст напоминания')} className="w-40 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+          <Button size="sm" disabled={!remindAt || addingReminder} onClick={async () => { if (!remindAt) return; setAddingReminder(true); try { await createContactReminder(contact.id, { remind_at: new Date(remindAt).toISOString(), title: remindTitle.trim() || undefined }); setRemindAt(''); setRemindTitle(''); loadReminders(); } finally { setAddingReminder(false); } }}>{addingReminder ? '...' : t('common.add')}</Button>
+        </div>
+      </div>
+
       <div className="flex flex-wrap gap-2 pt-4 border-t border-border">
         {onAddToFunnel && (
           <Button variant="outline" size="sm" onClick={onAddToFunnel} className="gap-1.5">
@@ -798,6 +1016,23 @@ function DealDetail({
   const pipelineName = deal.pipelineName ?? deal.pipeline_name ?? '—';
   const stageName = deal.stageName ?? deal.stage_name ?? '—';
   const companyName = deal.companyName ?? deal.company_name ?? '—';
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [noteText, setNoteText] = useState('');
+  const [remindAt, setRemindAt] = useState('');
+  const [remindTitle, setRemindTitle] = useState('');
+  const [addingNote, setAddingNote] = useState(false);
+  const [addingReminder, setAddingReminder] = useState(false);
+
+  const loadNotes = useCallback(() => {
+    fetchDealNotes(deal.id).then(setNotes).catch(() => setNotes([]));
+  }, [deal.id]);
+  const loadReminders = useCallback(() => {
+    fetchDealReminders(deal.id).then(setReminders).catch(() => setReminders([]));
+  }, [deal.id]);
+
+  useEffect(() => { loadNotes(); loadReminders(); }, [loadNotes, loadReminders]);
+
   return (
     <div className="space-y-6">
       <div className="flex items-start gap-4">
@@ -821,6 +1056,44 @@ function DealDetail({
           </dd>
         </div>
       </dl>
+      <div className="border-t border-border pt-4 space-y-4">
+        <h4 className="text-sm font-medium text-foreground flex items-center gap-2">
+          <StickyNote className="w-4 h-4" />
+          {t('crm.notes', 'Заметки')}
+        </h4>
+        <ul className="space-y-2 max-h-32 overflow-y-auto">
+          {notes.map((n) => (
+            <li key={n.id} className="flex items-start justify-between gap-2 text-sm bg-muted/40 rounded-lg p-2">
+              <span className="text-foreground flex-1 break-words">{n.content}</span>
+              <button type="button" onClick={() => deleteNote(n.id).then(loadNotes)} className="text-muted-foreground hover:text-destructive shrink-0" aria-label={t('common.delete')}>×</button>
+            </li>
+          ))}
+        </ul>
+        <div className="flex gap-2">
+          <input type="text" value={noteText} onChange={(e) => setNoteText(e.target.value)} placeholder={t('crm.addNote', 'Добавить заметку...')} className="flex-1 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+          <Button size="sm" disabled={!noteText.trim() || addingNote} onClick={async () => { if (!noteText.trim()) return; setAddingNote(true); try { await createDealNote(deal.id, noteText.trim()); setNoteText(''); loadNotes(); } finally { setAddingNote(false); } }}>{addingNote ? '...' : t('common.add')}</Button>
+        </div>
+        <h4 className="text-sm font-medium text-foreground flex items-center gap-2 mt-4">
+          <Bell className="w-4 h-4" />
+          {t('crm.reminders', 'Напоминания')}
+        </h4>
+        <ul className="space-y-2 max-h-28 overflow-y-auto">
+          {reminders.map((r) => (
+            <li key={r.id} className={clsx('flex items-center justify-between gap-2 text-sm rounded-lg p-2', r.done ? 'bg-muted/30 text-muted-foreground' : 'bg-muted/40')}>
+              <span className="flex-1 truncate">{r.title || new Date(r.remind_at).toLocaleString()}</span>
+              <div className="flex items-center gap-1 shrink-0">
+                {!r.done && <button type="button" onClick={() => updateReminder(r.id, { done: true }).then(loadReminders)} className="p-1 rounded text-green-600 hover:bg-green-500/20" title={t('crm.markDone', 'Выполнено')}><Check className="w-4 h-4" /></button>}
+                <button type="button" onClick={() => deleteReminder(r.id).then(loadReminders)} className="p-1 rounded text-muted-foreground hover:text-destructive">×</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+        <div className="flex flex-wrap gap-2 items-end">
+          <input type="datetime-local" value={remindAt} onChange={(e) => setRemindAt(e.target.value)} className="px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+          <input type="text" value={remindTitle} onChange={(e) => setRemindTitle(e.target.value)} placeholder={t('crm.reminderTitle', 'Текст напоминания')} className="w-40 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+          <Button size="sm" disabled={!remindAt || addingReminder} onClick={async () => { if (!remindAt) return; setAddingReminder(true); try { await createDealReminder(deal.id, { remind_at: new Date(remindAt).toISOString(), title: remindTitle.trim() || undefined }); setRemindAt(''); setRemindTitle(''); loadReminders(); } finally { setAddingReminder(false); } }}>{addingReminder ? '...' : t('common.add')}</Button>
+        </div>
+      </div>
       <div className="flex gap-2 pt-4 border-t border-border">
         <Button variant="outline" size="sm" onClick={onEdit}>{t('crm.editAction')}</Button>
         <Button variant="danger" size="sm" onClick={onDelete}>{t('crm.deleteAction')}</Button>

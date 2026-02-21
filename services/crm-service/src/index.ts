@@ -374,6 +374,98 @@ app.get('/api/crm/contacts/:id', async (req, res, next) => {
   }
 });
 
+/** Parse a single CSV line (handles quoted fields). */
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      inQuotes = !inQuotes;
+    } else if ((c === ',' && !inQuotes) || c === '\r') {
+      out.push(cur.trim());
+      cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+/** Mass import contacts from CSV. Body: { content: string, hasHeader?: boolean, mapping?: Record<string, number> } where mapping keys are firstName|lastName|email|phone|telegramId and values are 0-based column index. */
+app.post('/api/crm/contacts/import', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const body = req.body as { content?: string; hasHeader?: boolean; mapping?: Record<string, number> };
+    if (!body || typeof body.content !== 'string') {
+      throw new AppError(400, 'Missing or invalid body: content (CSV string) is required', ErrorCodes.VALIDATION);
+    }
+    const hasHeader = body.hasHeader !== false;
+    const mapping = body.mapping ?? {
+      firstName: 0,
+      lastName: 1,
+      email: 2,
+      phone: 3,
+      telegramId: 4,
+    };
+    const lines = body.content.split('\n').filter((l) => l.trim());
+    const rows = lines.map((l) => parseCsvLine(l));
+    const dataRows = hasHeader && rows.length > 1 ? rows.slice(1) : rows;
+    let created = 0;
+    let updated = 0;
+    const errors: { row: number; message: string }[] = [];
+    const consentFlagsJson = JSON.stringify({ email: false, sms: false, telegram: false, marketing: false });
+
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i];
+      const get = (key: string) => {
+        const idx = mapping[key];
+        return idx != null && row[idx] !== undefined ? String(row[idx]).trim() || null : null;
+      };
+      const firstName = get('firstName');
+      const lastName = get('lastName');
+      const email = get('email');
+      const phone = get('phone');
+      const telegramId = get('telegramId');
+      if (!email && !telegramId) {
+        errors.push({ row: i + (hasHeader ? 2 : 1), message: 'Each row must have email or telegram_id' });
+        continue;
+      }
+      const existing = await pool.query(
+        `SELECT id FROM contacts WHERE organization_id = $1 AND (($2::text IS NOT NULL AND telegram_id = $2) OR ($3::text IS NOT NULL AND email = $3)) LIMIT 1`,
+        [user.organizationId, telegramId || null, email || null]
+      );
+      if (existing.rows.length > 0) {
+        await pool.query(
+          `UPDATE contacts SET first_name = COALESCE($2, first_name), last_name = COALESCE($3, last_name), email = COALESCE($4, email), phone = COALESCE($5, phone), telegram_id = COALESCE($6, telegram_id), updated_at = NOW() WHERE id = $1 AND organization_id = $7`,
+          [
+            existing.rows[0].id,
+            firstName ?? null,
+            lastName ?? null,
+            email ?? null,
+            phone ?? null,
+            telegramId ?? null,
+            user.organizationId,
+          ]
+        );
+        updated++;
+      } else {
+        await pool.query(
+          `INSERT INTO contacts (organization_id, first_name, last_name, email, phone, telegram_id, consent_flags) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [user.organizationId, firstName ?? null, lastName ?? null, email ?? null, phone ?? null, telegramId ?? null, consentFlagsJson]
+        );
+        created++;
+      }
+    }
+
+    res.json({ created, updated, errors, total: dataRows.length });
+  } catch (e) {
+    next(e);
+  }
+});
+
 app.post('/api/crm/contacts', async (req, res, next) => {
   try {
     const user = getUser(req);
@@ -529,6 +621,261 @@ app.delete('/api/crm/contacts/:id', async (req, res, next) => {
       user.organizationId,
     ]);
     res.status(204).send();
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ---------- Notes (contact or deal) ----------
+async function ensureEntityAccess(
+  organizationId: string,
+  entityType: 'contact' | 'deal',
+  entityId: string
+): Promise<void> {
+  const table = entityType === 'contact' ? 'contacts' : 'deals';
+  const r = await pool.query(
+    `SELECT 1 FROM ${table} WHERE id = $1 AND organization_id = $2`,
+    [entityId, organizationId]
+  );
+  if (r.rows.length === 0) {
+    throw new AppError(404, `${entityType === 'contact' ? 'Contact' : 'Deal'} not found`, ErrorCodes.NOT_FOUND);
+  }
+}
+
+app.get('/api/crm/contacts/:contactId/notes', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const { contactId } = req.params;
+    await ensureEntityAccess(user.organizationId, 'contact', contactId);
+    const result = await pool.query(
+      `SELECT id, entity_type, entity_id, content, user_id, created_at, updated_at
+       FROM notes WHERE organization_id = $1 AND entity_type = 'contact' AND entity_id = $2
+       ORDER BY created_at DESC`,
+      [user.organizationId, contactId]
+    );
+    res.json(result.rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.post('/api/crm/contacts/:contactId/notes', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const { contactId } = req.params;
+    const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
+    if (!content) throw new AppError(400, 'content is required', ErrorCodes.VALIDATION);
+    await ensureEntityAccess(user.organizationId, 'contact', contactId);
+    const result = await pool.query(
+      `INSERT INTO notes (organization_id, entity_type, entity_id, content, user_id)
+       VALUES ($1, 'contact', $2, $3, $4) RETURNING *`,
+      [user.organizationId, contactId, content, user.id || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.get('/api/crm/deals/:dealId/notes', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const { dealId } = req.params;
+    await ensureEntityAccess(user.organizationId, 'deal', dealId);
+    const result = await pool.query(
+      `SELECT id, entity_type, entity_id, content, user_id, created_at, updated_at
+       FROM notes WHERE organization_id = $1 AND entity_type = 'deal' AND entity_id = $2
+       ORDER BY created_at DESC`,
+      [user.organizationId, dealId]
+    );
+    res.json(result.rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.post('/api/crm/deals/:dealId/notes', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const { dealId } = req.params;
+    const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
+    if (!content) throw new AppError(400, 'content is required', ErrorCodes.VALIDATION);
+    await ensureEntityAccess(user.organizationId, 'deal', dealId);
+    const result = await pool.query(
+      `INSERT INTO notes (organization_id, entity_type, entity_id, content, user_id)
+       VALUES ($1, 'deal', $2, $3, $4) RETURNING *`,
+      [user.organizationId, dealId, content, user.id || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.delete('/api/crm/notes/:id', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const result = await pool.query(
+      'DELETE FROM notes WHERE id = $1 AND organization_id = $2 RETURNING id',
+      [id, user.organizationId]
+    );
+    if (result.rows.length === 0) throw new AppError(404, 'Note not found', ErrorCodes.NOT_FOUND);
+    res.status(204).send();
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ---------- Reminders (contact or deal) ----------
+app.get('/api/crm/contacts/:contactId/reminders', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const { contactId } = req.params;
+    await ensureEntityAccess(user.organizationId, 'contact', contactId);
+    const result = await pool.query(
+      `SELECT id, entity_type, entity_id, remind_at, title, done, user_id, created_at
+       FROM reminders WHERE organization_id = $1 AND entity_type = 'contact' AND entity_id = $2
+       ORDER BY remind_at ASC`,
+      [user.organizationId, contactId]
+    );
+    res.json(result.rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.post('/api/crm/contacts/:contactId/reminders', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const { contactId } = req.params;
+    const remindAt = req.body?.remind_at; // ISO string
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 500) : null;
+    if (!remindAt) throw new AppError(400, 'remind_at is required', ErrorCodes.VALIDATION);
+    const at = new Date(remindAt);
+    if (Number.isNaN(at.getTime())) throw new AppError(400, 'remind_at must be a valid date', ErrorCodes.VALIDATION);
+    await ensureEntityAccess(user.organizationId, 'contact', contactId);
+    const result = await pool.query(
+      `INSERT INTO reminders (organization_id, entity_type, entity_id, remind_at, title, user_id)
+       VALUES ($1, 'contact', $2, $3, $4, $5) RETURNING *`,
+      [user.organizationId, contactId, at, title, user.id || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.get('/api/crm/deals/:dealId/reminders', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const { dealId } = req.params;
+    await ensureEntityAccess(user.organizationId, 'deal', dealId);
+    const result = await pool.query(
+      `SELECT id, entity_type, entity_id, remind_at, title, done, user_id, created_at
+       FROM reminders WHERE organization_id = $1 AND entity_type = 'deal' AND entity_id = $2
+       ORDER BY remind_at ASC`,
+      [user.organizationId, dealId]
+    );
+    res.json(result.rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.post('/api/crm/deals/:dealId/reminders', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const { dealId } = req.params;
+    const remindAt = req.body?.remind_at;
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 500) : null;
+    if (!remindAt) throw new AppError(400, 'remind_at is required', ErrorCodes.VALIDATION);
+    const at = new Date(remindAt);
+    if (Number.isNaN(at.getTime())) throw new AppError(400, 'remind_at must be a valid date', ErrorCodes.VALIDATION);
+    await ensureEntityAccess(user.organizationId, 'deal', dealId);
+    const result = await pool.query(
+      `INSERT INTO reminders (organization_id, entity_type, entity_id, remind_at, title, user_id)
+       VALUES ($1, 'deal', $2, $3, $4, $5) RETURNING *`,
+      [user.organizationId, dealId, at, title, user.id || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.patch('/api/crm/reminders/:id', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { done, remind_at, title } = req.body || {};
+    const existing = await pool.query(
+      'SELECT * FROM reminders WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (existing.rows.length === 0) throw new AppError(404, 'Reminder not found', ErrorCodes.NOT_FOUND);
+    const updates: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
+    if (typeof done === 'boolean') {
+      params.push(done);
+      updates.push(`done = $${idx++}`);
+    }
+    if (remind_at != null) {
+      const at = new Date(remind_at);
+      if (!Number.isNaN(at.getTime())) {
+        params.push(at);
+        updates.push(`remind_at = $${idx++}`);
+      }
+    }
+    if (typeof title === 'string') {
+      params.push(title.slice(0, 500));
+      updates.push(`title = $${idx++}`);
+    }
+    if (params.length === 0) return res.json(existing.rows[0]);
+    params.push(id, user.organizationId);
+    const result = await pool.query(
+      `UPDATE reminders SET ${updates.join(', ')} WHERE id = $${idx} AND organization_id = $${idx + 1} RETURNING *`,
+      params
+    );
+    res.json(result.rows[0]);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.delete('/api/crm/reminders/:id', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const result = await pool.query(
+      'DELETE FROM reminders WHERE id = $1 AND organization_id = $2 RETURNING id',
+      [id, user.organizationId]
+    );
+    if (result.rows.length === 0) throw new AppError(404, 'Reminder not found', ErrorCodes.NOT_FOUND);
+    res.status(204).send();
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** Upcoming reminders for the organization (done = false, remind_at from now to +horizon). For widget "Предстоящие напоминания". */
+app.get('/api/crm/reminders/upcoming', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const horizonHours = Math.min(168, Math.max(24, parseInt(String(req.query.hours), 10) || 72)); // default 72h
+    const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit), 10) || 20));
+    const from = new Date();
+    const to = new Date(from.getTime() + horizonHours * 60 * 60 * 1000);
+    const result = await pool.query(
+      `SELECT r.id, r.entity_type, r.entity_id, r.remind_at, r.title, r.done, r.user_id, r.created_at
+       FROM reminders r
+       WHERE r.organization_id = $1 AND r.done = false AND r.remind_at >= $2 AND r.remind_at <= $3
+       ORDER BY r.remind_at ASC
+       LIMIT $4`,
+      [user.organizationId, from, to, limit]
+    );
+    res.json(result.rows);
   } catch (e) {
     next(e);
   }

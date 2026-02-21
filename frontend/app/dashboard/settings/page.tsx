@@ -1,9 +1,11 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
 import { useAuthStore } from '@/lib/stores/auth-store';
+import { canAccessWorkspaceSettings } from '@/lib/permissions';
 import { User, CreditCard, Key, Bell, Building2, FileText } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
@@ -23,8 +25,15 @@ const tabsConfig: { id: SettingsTab; i18nKey: string; icon: typeof User; ownerAd
 
 export default function SettingsPage() {
   const { t } = useTranslation();
+  const router = useRouter();
   const { user } = useAuthStore();
-  const canEditWorkspace = user?.role === 'owner' || user?.role === 'admin';
+  const canEditWorkspace = canAccessWorkspaceSettings(user?.role);
+
+  useEffect(() => {
+    if (user != null && !canAccessWorkspaceSettings(user.role)) {
+      router.replace('/dashboard');
+    }
+  }, [user, router]);
   const [profile, setProfile] = useState<any>(null);
   const [subscription, setSubscription] = useState<any>(null);
   const [loading, setLoading] = useState(true);

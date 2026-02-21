@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'crypto';
 import { Pool } from 'pg';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
@@ -441,11 +442,11 @@ app.get('/api/pipeline/leads', async (req, res) => {
   }
 });
 
-// Add contact to funnel (create lead). stageId defaults to first stage of pipeline.
+// Add contact to funnel (create lead). stageId defaults to first stage of pipeline. Optional responsibleId (user uuid) for lead owner.
 app.post('/api/pipeline/leads', async (req, res) => {
   try {
     const user = getUser(req);
-    const { contactId, pipelineId, stageId } = req.body;
+    const { contactId, pipelineId, stageId, responsibleId } = req.body;
     if (!contactId || !pipelineId) {
       return res.status(400).json({ error: 'contactId and pipelineId are required' });
     }
@@ -494,6 +495,15 @@ app.post('/api/pipeline/leads', async (req, res) => {
       return res.status(409).json({ error: 'Contact is already in this pipeline', code: 'ALREADY_IN_PIPELINE', leadId: existing.rows[0].id });
     }
 
+    let responsibleIdValid: string | null = null;
+    if (responsibleId && typeof responsibleId === 'string') {
+      const userCheck = await pool.query(
+        'SELECT id FROM users WHERE id = $1 AND id IN (SELECT user_id FROM organization_members WHERE organization_id = $2)',
+        [responsibleId, user.organizationId]
+      );
+      if (userCheck.rows.length > 0) responsibleIdValid = responsibleId;
+    }
+
     const maxOrder = await pool.query(
       'SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM leads WHERE stage_id = $1',
       [targetStageId]
@@ -501,10 +511,22 @@ app.post('/api/pipeline/leads', async (req, res) => {
     const orderIndex = maxOrder.rows[0]?.next ?? 0;
 
     const insert = await pool.query(
-      `INSERT INTO leads (organization_id, contact_id, pipeline_id, stage_id, order_index)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [user.organizationId, contactId, pipelineId, targetStageId, orderIndex]
+      `INSERT INTO leads (organization_id, contact_id, pipeline_id, stage_id, order_index, responsible_id)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [user.organizationId, contactId, pipelineId, targetStageId, orderIndex, responsibleIdValid]
     );
+    try {
+      await rabbitmq.publishEvent({
+        id: crypto.randomUUID(),
+        type: EventType.LEAD_CREATED,
+        timestamp: new Date(),
+        organizationId: user.organizationId,
+        userId: user.id,
+        data: { contactId, pipelineId, stageId: targetStageId, leadId: insert.rows[0].id },
+      } as Event);
+    } catch (e) {
+      console.error('Failed to publish LEAD_CREATED:', e);
+    }
     res.status(201).json(insert.rows[0]);
   } catch (error) {
     console.error('Error creating lead:', error);
@@ -555,6 +577,27 @@ app.patch('/api/pipeline/leads/:id', async (req, res) => {
       `UPDATE leads SET ${updates.join(', ')} WHERE id = $${idx} AND organization_id = $${idx + 1} RETURNING *`,
       params
     );
+    const fromStageId = existing.rows[0].stage_id;
+    if (stageId != null && fromStageId !== stageId) {
+      try {
+        await rabbitmq.publishEvent({
+          id: crypto.randomUUID(),
+          type: EventType.LEAD_STAGE_CHANGED,
+          timestamp: new Date(),
+          organizationId: user.organizationId,
+          userId: user.id,
+          data: {
+            contactId: existing.rows[0].contact_id,
+            pipelineId: existing.rows[0].pipeline_id,
+            fromStageId,
+            toStageId: stageId,
+            leadId: id,
+          },
+        } as Event);
+      } catch (e) {
+        console.error('Failed to publish LEAD_STAGE_CHANGED:', e);
+      }
+    }
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Error updating lead:', error);

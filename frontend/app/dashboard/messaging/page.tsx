@@ -27,6 +27,8 @@ import { MediaViewer } from '@/components/messaging/MediaViewer';
 import { FolderManageModal } from '@/components/messaging/FolderManageModal';
 import { AddToFunnelModal } from '@/components/crm/AddToFunnelModal';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { Modal } from '@/components/ui/Modal';
+import { fetchGroupSources, type GroupSource } from '@/lib/api/campaigns';
 import { blobUrlCache, avatarAccountKey, avatarChatKey, mediaKey } from '@/lib/cache/blob-url-cache';
 
 interface BDAccount {
@@ -543,6 +545,9 @@ export default function MessagingPage() {
   const [folderIconPickerId, setFolderIconPickerId] = useState<string | null>(null);
   const [syncFoldersPushing, setSyncFoldersPushing] = useState(false);
   const [showFolderManageModal, setShowFolderManageModal] = useState(false);
+  const [broadcastModalOpen, setBroadcastModalOpen] = useState(false);
+  /** Временно скрыта кнопка «Синхронизировать папки с Telegram» на фронте */
+  const SHOW_SYNC_FOLDERS_TO_TELEGRAM = false;
   const FOLDER_ICON_OPTIONS = ['📁', '📂', '💬', '⭐', '🔴', '📥', '📤', '✏️'];
   const [pinnedChannelIds, setPinnedChannelIds] = useState<string[]>([]);
   const [chatContextMenu, setChatContextMenu] = useState<{ x: number; y: number; chat: Chat } | null>(null);
@@ -1086,13 +1091,16 @@ export default function MessagingPage() {
       }
       if (msg.bdAccountId === selectedAccountId && selectedChat && (msg.channelId === selectedChat.channel_id || msg.channelId == null)) {
         setMessages((prev) => {
-          const existing = prev.find((m) => m.id === msg.messageId);
-          if (existing) {
+          const existingById = prev.find((m) => m.id === msg.messageId);
+          if (existingById) {
             // Обновить существующее (например temp → с telegram_message_id)
-            if (msg.telegramMessageId != null && !existing.telegram_message_id)
+            if (msg.telegramMessageId != null && !existingById.telegram_message_id)
               return prev.map((m) => m.id === msg.messageId ? { ...m, telegram_message_id: String(msg.telegramMessageId), status: 'delivered' } : m);
             return prev;
           }
+          // Не дублировать: если уже есть сообщение с тем же telegram_message_id в этом чате — не добавлять (событие могло прийти раньше ответа send)
+          const tgId = msg.telegramMessageId != null ? String(msg.telegramMessageId) : null;
+          if (tgId && prev.some((m) => m.telegram_message_id === tgId && m.channel_id === selectedChat.channel_id)) return prev;
           return [
             ...prev,
             {
@@ -1104,7 +1112,7 @@ export default function MessagingPage() {
               contact_id: msg.contactId ?? null,
               channel: selectedChat.channel,
               channel_id: selectedChat.channel_id,
-              telegram_message_id: msg.telegramMessageId != null ? String(msg.telegramMessageId) : null,
+              telegram_message_id: tgId,
               reply_to_telegram_id: msg.replyToTelegramId != null ? String(msg.replyToTelegramId) : null,
               telegram_media: msg.telegramMedia ?? null,
               telegram_entities: msg.telegramEntities ?? null,
@@ -1787,9 +1795,16 @@ export default function MessagingPage() {
         telegram_entities: Array.isArray(serverMessage.telegram_entities) ? serverMessage.telegram_entities as Array<Record<string, unknown>> : tempMessage.telegram_entities,
       };
 
-      setMessages((prev) =>
-        prev.map((msg) => (msg.id === tempMessage.id ? merged : msg))
-      );
+      setMessages((prev) => {
+        const next = prev.map((msg) => (msg.id === tempMessage.id ? merged : msg));
+        // Убрать дубликаты по id (если событие new-message пришло раньше ответа, мог появиться второй элемент с тем же id)
+        const seen = new Set<string>();
+        return next.filter((m) => {
+          if (seen.has(m.id)) return false;
+          seen.add(m.id);
+          return true;
+        });
+      });
       // Очистить черновик в Telegram после успешной отправки
       if (selectedAccountId && selectedChat) {
         apiClient.post(`/api/bd-accounts/${selectedAccountId}/draft`, { channelId: selectedChat.channel_id, text: '' }).catch(() => {});
@@ -2591,32 +2606,34 @@ export default function MessagingPage() {
                   </div>
                   {isSelectedAccountMine && (
                     <>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          if (!selectedAccountId) return;
-                          setSyncFoldersPushing(true);
-                          try {
-                            const res = await apiClient.post<{ success: boolean; updated?: number; errors?: string[] }>(
-                              `/api/bd-accounts/${selectedAccountId}/sync-folders-push-to-telegram`
-                            );
-                            if (res.data.errors?.length) {
-                              alert(t('messaging.syncFoldersToTelegramDoneWithErrors', { count: res.data.updated ?? 0, errors: res.data.errors.join('\n') }));
-                            } else {
-                              alert(t('messaging.syncFoldersToTelegramDone', { count: res.data.updated ?? 0 }));
+                      {SHOW_SYNC_FOLDERS_TO_TELEGRAM && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!selectedAccountId) return;
+                            setSyncFoldersPushing(true);
+                            try {
+                              const res = await apiClient.post<{ success: boolean; updated?: number; errors?: string[] }>(
+                                `/api/bd-accounts/${selectedAccountId}/sync-folders-push-to-telegram`
+                              );
+                              if (res.data.errors?.length) {
+                                alert(t('messaging.syncFoldersToTelegramDoneWithErrors', { count: res.data.updated ?? 0, errors: res.data.errors.join('\n') }));
+                              } else {
+                                alert(t('messaging.syncFoldersToTelegramDone', { count: res.data.updated ?? 0 }));
+                              }
+                            } catch (err: any) {
+                              alert(err?.response?.data?.message || err?.response?.data?.error || t('messaging.syncFoldersToTelegramError'));
+                            } finally {
+                              setSyncFoldersPushing(false);
                             }
-                          } catch (err: any) {
-                            alert(err?.response?.data?.message || err?.response?.data?.error || t('messaging.syncFoldersToTelegramError'));
-                          } finally {
-                            setSyncFoldersPushing(false);
-                          }
-                        }}
-                        disabled={syncFoldersPushing}
-                        className="py-1.5 px-1 text-[10px] text-muted-foreground hover:text-foreground border-t border-border/50 disabled:opacity-50 truncate w-full shrink-0"
-                        title={t('messaging.syncFoldersToTelegram')}
-                      >
-                        {syncFoldersPushing ? '…' : t('messaging.syncFoldersToTelegramShort')}
-                      </button>
+                          }}
+                          disabled={syncFoldersPushing}
+                          className="py-1.5 px-1 text-[10px] text-muted-foreground hover:text-foreground border-t border-border/50 disabled:opacity-50 truncate w-full shrink-0"
+                          title={t('messaging.syncFoldersToTelegram')}
+                        >
+                          {syncFoldersPushing ? '…' : t('messaging.syncFoldersToTelegramShort')}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => setShowFolderManageModal(true)}
@@ -2699,7 +2716,7 @@ export default function MessagingPage() {
             {selectedAccountId && (
               <div className="w-16 flex-shrink-0 flex flex-col border-r border-border bg-muted/30 min-h-0">
                 {/* Sync/Re-sync — на одном уровне с переключателем Все/Личные/Группы справа. Ширина w-16 = как свернутая навигация, не меняется при сворачивании панели чатов */}
-<div className="shrink-0 border-b border-border/50 flex items-center justify-center py-2">
+<div className="shrink-0 border-b border-border/50 flex items-center justify-center gap-0.5 py-2">
                     <button
                       type="button"
                       onClick={() => window.location.href = `/dashboard/bd-accounts?accountId=${selectedAccountId}&openSelectChats=1`}
@@ -2708,6 +2725,15 @@ export default function MessagingPage() {
                       aria-label={t('messaging.syncChatsTitle')}
                     >
                       <RefreshCw className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBroadcastModalOpen(true)}
+                      className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                      title={t('messaging.broadcastToGroups', 'Рассылка в группы')}
+                      aria-label={t('messaging.broadcastToGroups', 'Рассылка в группы')}
+                    >
+                      <Users className="w-4 h-4" />
                     </button>
                   </div>
                   <div className="flex-1 min-h-0 overflow-y-auto pt-2 pb-1 flex flex-col scroll-thin-overlay">
@@ -2736,32 +2762,34 @@ export default function MessagingPage() {
                 </div>
                 {isSelectedAccountMine && (
                   <>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        if (!selectedAccountId) return;
-                        setSyncFoldersPushing(true);
-                        try {
-                          const res = await apiClient.post<{ success: boolean; updated?: number; errors?: string[] }>(
-                            `/api/bd-accounts/${selectedAccountId}/sync-folders-push-to-telegram`
-                          );
-                          if (res.data.errors?.length) {
-                            alert(t('messaging.syncFoldersToTelegramDoneWithErrors', { count: res.data.updated ?? 0, errors: res.data.errors.join('\n') }));
-                          } else {
-                            alert(t('messaging.syncFoldersToTelegramDone', { count: res.data.updated ?? 0 }));
+                    {SHOW_SYNC_FOLDERS_TO_TELEGRAM && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!selectedAccountId) return;
+                          setSyncFoldersPushing(true);
+                          try {
+                            const res = await apiClient.post<{ success: boolean; updated?: number; errors?: string[] }>(
+                              `/api/bd-accounts/${selectedAccountId}/sync-folders-push-to-telegram`
+                            );
+                            if (res.data.errors?.length) {
+                              alert(t('messaging.syncFoldersToTelegramDoneWithErrors', { count: res.data.updated ?? 0, errors: res.data.errors.join('\n') }));
+                            } else {
+                              alert(t('messaging.syncFoldersToTelegramDone', { count: res.data.updated ?? 0 }));
+                            }
+                          } catch (err: any) {
+                            alert(err?.response?.data?.message || err?.response?.data?.error || t('messaging.syncFoldersToTelegramError'));
+                          } finally {
+                            setSyncFoldersPushing(false);
                           }
-                        } catch (err: any) {
-                          alert(err?.response?.data?.message || err?.response?.data?.error || t('messaging.syncFoldersToTelegramError'));
-                        } finally {
-                          setSyncFoldersPushing(false);
-                        }
-                      }}
-                      disabled={syncFoldersPushing}
-                      className="py-1.5 px-1 text-[10px] text-muted-foreground hover:text-foreground border-t border-border/50 disabled:opacity-50 truncate w-full"
-                      title={t('messaging.syncFoldersToTelegram')}
-                    >
-                      {syncFoldersPushing ? '…' : t('messaging.syncFoldersToTelegramShort')}
-                    </button>
+                        }}
+                        disabled={syncFoldersPushing}
+                        className="py-1.5 px-1 text-[10px] text-muted-foreground hover:text-foreground border-t border-border/50 disabled:opacity-50 truncate w-full"
+                        title={t('messaging.syncFoldersToTelegram')}
+                      >
+                        {syncFoldersPushing ? '…' : t('messaging.syncFoldersToTelegramShort')}
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => setShowFolderManageModal(true)}
@@ -3508,6 +3536,15 @@ export default function MessagingPage() {
         defaultPipelineId={typeof window !== 'undefined' ? window.localStorage.getItem('pipeline.selectedPipelineId') : null}
       />
 
+      {broadcastModalOpen && selectedAccountId && (
+        <BroadcastToGroupsModal
+          accountId={selectedAccountId}
+          accountName={accounts.find((a) => a.id === selectedAccountId) ? getAccountDisplayName(accounts.find((a) => a.id === selectedAccountId)!) : ''}
+          onClose={() => setBroadcastModalOpen(false)}
+          t={t}
+        />
+      )}
+
       <ContextMenu
         open={!!accountContextMenu}
         onClose={() => setAccountContextMenu(null)}
@@ -3742,6 +3779,127 @@ export default function MessagingPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function BroadcastToGroupsModal({
+  accountId,
+  accountName,
+  onClose,
+  t,
+}: {
+  accountId: string;
+  accountName: string;
+  onClose: () => void;
+  t: (key: string, fallback?: string) => string;
+}) {
+  const [groups, setGroups] = useState<GroupSource[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [text, setText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState<{ sent: number; failed: { channelId: string; error: string }[] } | null>(null);
+
+  useEffect(() => {
+    fetchGroupSources()
+      .then((list) => setGroups(list.filter((g) => g.bd_account_id === accountId)))
+      .catch(() => setGroups([]))
+      .finally(() => setLoading(false));
+  }, [accountId]);
+
+  const toggle = (telegramChatId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(telegramChatId)) next.delete(telegramChatId);
+      else next.add(telegramChatId);
+      return next;
+    });
+  };
+
+  const handleSend = async () => {
+    if (selectedIds.size === 0 || !text.trim()) return;
+    setSending(true);
+    setResult(null);
+    try {
+      const res = await apiClient.post<{ sent: number; failed: { channelId: string; error: string }[] }>(
+        `/api/bd-accounts/${accountId}/send-bulk`,
+        { channelIds: Array.from(selectedIds), text: text.trim() }
+      );
+      setResult(res.data);
+    } catch (err: any) {
+      setResult({ sent: 0, failed: [{ channelId: '', error: err?.response?.data?.message || err?.response?.data?.error || String(err) }] });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-card rounded-xl shadow-xl border border-border max-w-lg w-full mx-4 max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-4 border-b border-border font-semibold text-foreground">
+          {t('messaging.broadcastToGroups', 'Рассылка в группы')} — {accountName}
+        </div>
+        <div className="flex-1 overflow-y-auto min-h-0 p-4 space-y-3">
+          {loading ? (
+            <div className="flex items-center justify-center py-8 text-muted-foreground">
+              <Loader2 className="w-6 h-6 animate-spin" />
+            </div>
+          ) : groups.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-4">{t('messaging.noGroupsSynced', 'Нет групповых чатов')}</p>
+          ) : (
+            <>
+              <p className="text-sm text-muted-foreground">{t('messaging.broadcastSelectGroups', 'Выберите группы и введите сообщение')}</p>
+              <div className="max-h-48 overflow-y-auto border border-border rounded-lg divide-y divide-border">
+                {groups.map((g) => (
+                  <label
+                    key={g.telegram_chat_id}
+                    className="flex items-center gap-3 px-3 py-2 hover:bg-muted/30 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(g.telegram_chat_id)}
+                      onChange={() => toggle(g.telegram_chat_id)}
+                      className="rounded border-border"
+                    />
+                    <span className="text-sm text-foreground truncate flex-1">{g.title || g.telegram_chat_id}</span>
+                  </label>
+                ))}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-1">{t('messaging.message', 'Сообщение')}</label>
+                <textarea
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder={t('messaging.typeMessage', 'Введите текст...')}
+                  rows={4}
+                  className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-none"
+                />
+              </div>
+              {result && (
+                <div className="p-3 rounded-lg bg-muted/50 text-sm text-foreground">
+                  {t('messaging.sent', 'Отправлено')}: {result.sent}
+                  {result.failed.length > 0 && (
+                    <span className="text-destructive ml-2">{t('messaging.failed', 'Ошибки')}: {result.failed.length}</span>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <div className="p-4 border-t border-border flex gap-2 justify-end">
+          <Button variant="outline" onClick={onClose}>{t('common.close')}</Button>
+          <Button
+            disabled={loading || selectedIds.size === 0 || !text.trim() || sending}
+            onClick={handleSend}
+          >
+            {sending ? t('common.sending', 'Отправка...') : t('messaging.sendToGroups', 'Отправить в выбранные')}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -10,6 +10,7 @@ const PATH_LABELS: Record<string, string> = {
   dashboard: 'nav.home',
   crm: 'nav.crm',
   pipeline: 'nav.pipeline',
+  campaigns: 'nav.campaigns',
   messaging: 'nav.messaging',
   'bd-accounts': 'nav.bdAccounts',
   analytics: 'nav.analytics',
