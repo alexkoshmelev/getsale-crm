@@ -4,6 +4,7 @@ import { ReactNode, useState, useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/lib/stores/auth-store';
+import { canAccessWorkspaceSettings } from '@/lib/permissions';
 import { useLayoutStore } from '@/lib/stores/layout-store';
 import { useThemeStore, type ThemeMode } from '@/lib/stores/theme-store';
 import { useLocaleStore } from '@/lib/stores/locale-store';
@@ -29,6 +30,7 @@ import {
   VolumeX,
   ChevronDown,
   Loader2,
+  Send,
 } from 'lucide-react';
 import { useNotificationsStore } from '@/lib/stores/notifications-store';
 import { clsx } from 'clsx';
@@ -48,6 +50,7 @@ const productItems: { href: string; i18nKey: string; icon: typeof LayoutDashboar
   { href: '/dashboard', i18nKey: 'home', icon: LayoutDashboard },
   { href: '/dashboard/crm', i18nKey: 'crm', icon: Building2 },
   { href: '/dashboard/pipeline', i18nKey: 'pipeline', icon: Workflow },
+  { href: '/dashboard/campaigns', i18nKey: 'campaigns', icon: Send },
   { href: '/dashboard/bd-accounts', i18nKey: 'bdAccounts', icon: Smartphone },
   { href: '/dashboard/analytics', i18nKey: 'analytics', icon: BarChart3 },
   { href: '/dashboard/team', i18nKey: 'team', icon: Users },
@@ -66,7 +69,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const { t } = useTranslation();
   const router = useRouter();
   const pathname = usePathname();
-  const { user, logout, workspaces, fetchWorkspaces, switchWorkspace } = useAuthStore();
+  const { user, logout, workspaces, fetchWorkspaces, switchWorkspace, refreshUser } = useAuthStore();
   const { sidebarCollapsed, toggleSidebar } = useLayoutStore();
   const { mode: themeMode, setMode: setThemeMode } = useThemeStore();
   const { locale, setLocale } = useLocaleStore();
@@ -78,6 +81,10 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   useEffect(() => {
     if (user?.id) fetchWorkspaces();
   }, [user?.id, fetchWorkspaces]);
+
+  useEffect(() => {
+    refreshUser();
+  }, [refreshUser]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -99,7 +106,8 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
 
   const sidebarWidth = sidebarCollapsed ? 'w-16' : 'w-64';
   const mainMargin = sidebarCollapsed ? 'ml-16' : 'ml-64';
-  const allItems = [...productItems, ...accountItems];
+  const visibleAccountItems = accountItems.filter(() => canAccessWorkspaceSettings(user?.role));
+  const allItems = [...productItems, ...visibleAccountItems];
   const currentItem = allItems.find((m) => m.href === pathname);
   const pageTitle = currentItem ? t(`nav.${currentItem.i18nKey}`) : t('dashboard.title');
 
@@ -175,7 +183,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
               {t('nav.account')}
             </p>
           )}
-          {accountItems.map((item) => {
+          {visibleAccountItems.map((item) => {
             const Icon = item.icon;
             const isActive = pathname === item.href;
             const label = t(`nav.${item.i18nKey}`);

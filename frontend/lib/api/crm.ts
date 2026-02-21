@@ -124,6 +124,22 @@ export async function createContact(body: {
   return data;
 }
 
+export interface ContactImportResult {
+  created: number;
+  updated: number;
+  errors: { row: number; message: string }[];
+  total: number;
+}
+
+export async function importContactsFromCsv(body: {
+  content: string;
+  hasHeader?: boolean;
+  mapping?: Record<string, number>;
+}): Promise<ContactImportResult> {
+  const { data } = await apiClient.post<ContactImportResult>('/api/crm/contacts/import', body);
+  return data;
+}
+
 export async function updateContact(
   id: string,
   body: Partial<{
@@ -144,6 +160,87 @@ export async function updateContact(
 
 export async function deleteContact(id: string): Promise<void> {
   await apiClient.delete(`/api/crm/contacts/${id}`);
+}
+
+// Notes
+export interface Note {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  content: string;
+  user_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchContactNotes(contactId: string): Promise<Note[]> {
+  const { data } = await apiClient.get<Note[]>(`/api/crm/contacts/${contactId}/notes`);
+  return data;
+}
+
+export async function createContactNote(contactId: string, content: string): Promise<Note> {
+  const { data } = await apiClient.post<Note>(`/api/crm/contacts/${contactId}/notes`, { content });
+  return data;
+}
+
+export async function fetchDealNotes(dealId: string): Promise<Note[]> {
+  const { data } = await apiClient.get<Note[]>(`/api/crm/deals/${dealId}/notes`);
+  return data;
+}
+
+export async function createDealNote(dealId: string, content: string): Promise<Note> {
+  const { data } = await apiClient.post<Note>(`/api/crm/deals/${dealId}/notes`, { content });
+  return data;
+}
+
+export async function deleteNote(noteId: string): Promise<void> {
+  await apiClient.delete(`/api/crm/notes/${noteId}`);
+}
+
+// Reminders
+export interface Reminder {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  remind_at: string;
+  title: string | null;
+  done: boolean;
+  user_id: string | null;
+  created_at: string;
+}
+
+export async function fetchContactReminders(contactId: string): Promise<Reminder[]> {
+  const { data } = await apiClient.get<Reminder[]>(`/api/crm/contacts/${contactId}/reminders`);
+  return data;
+}
+
+export async function createContactReminder(contactId: string, body: { remind_at: string; title?: string }): Promise<Reminder> {
+  const { data } = await apiClient.post<Reminder>(`/api/crm/contacts/${contactId}/reminders`, body);
+  return data;
+}
+
+export async function fetchDealReminders(dealId: string): Promise<Reminder[]> {
+  const { data } = await apiClient.get<Reminder[]>(`/api/crm/deals/${dealId}/reminders`);
+  return data;
+}
+
+export async function createDealReminder(dealId: string, body: { remind_at: string; title?: string }): Promise<Reminder> {
+  const { data } = await apiClient.post<Reminder>(`/api/crm/deals/${dealId}/reminders`, body);
+  return data;
+}
+
+export async function updateReminder(reminderId: string, body: { done?: boolean; remind_at?: string; title?: string }): Promise<Reminder> {
+  const { data } = await apiClient.patch<Reminder>(`/api/crm/reminders/${reminderId}`, body);
+  return data;
+}
+
+export async function deleteReminder(reminderId: string): Promise<void> {
+  await apiClient.delete(`/api/crm/reminders/${reminderId}`);
+}
+
+export async function fetchUpcomingReminders(params?: { hours?: number; limit?: number }): Promise<Reminder[]> {
+  const { data } = await apiClient.get<Reminder[]>('/api/crm/reminders/upcoming', { params: params ?? {} });
+  return data;
 }
 
 // Deals

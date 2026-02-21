@@ -29,6 +29,7 @@ const PIPELINE_SERVICE = process.env.PIPELINE_SERVICE_URL || 'http://localhost:3
 const AUTOMATION_SERVICE = process.env.AUTOMATION_SERVICE_URL || 'http://localhost:3009';
 const ANALYTICS_SERVICE = process.env.ANALYTICS_SERVICE_URL || 'http://localhost:3010';
 const TEAM_SERVICE = process.env.TEAM_SERVICE_URL || 'http://localhost:3011';
+const CAMPAIGN_SERVICE = process.env.CAMPAIGN_SERVICE_URL || 'http://localhost:3012';
 
 // CORS middleware for API Gateway
 app.use((req, res, next) => {
@@ -382,12 +383,30 @@ const teamProxy = createProxyMiddleware({
   },
 });
 
+const campaignProxy = createProxyMiddleware({
+  target: CAMPAIGN_SERVICE,
+  changeOrigin: true,
+  pathRewrite: { '^/api/campaigns': '/api/campaigns' },
+  onProxyReq: (proxyReq, req) => {
+    const user = (req as any).user;
+    if (user && user.id && user.organizationId) {
+      proxyReq.setHeader('X-User-Id', user.id);
+      proxyReq.setHeader('X-Organization-Id', user.organizationId);
+    }
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  },
+});
+
 app.use('/api/users', authenticate, rateLimit, userProxy);
 app.use('/api/bd-accounts', authenticate, rateLimit, bdAccountsProxy);
 app.use('/api/pipeline', authenticate, rateLimit, pipelineProxy);
 app.use('/api/automation', authenticate, rateLimit, automationProxy);
 app.use('/api/analytics', authenticate, rateLimit, analyticsProxy);
 app.use('/api/team', authenticate, rateLimit, teamProxy);
+app.use('/api/campaigns', authenticate, rateLimit, campaignProxy);
 
 // Admin routes
 app.use('/api/admin', authenticate, requireRole(UserRole.OWNER, UserRole.ADMIN), rateLimit);

@@ -26,6 +26,7 @@ interface AuthState {
   refreshAccessToken: () => Promise<void>;
   fetchWorkspaces: () => Promise<void>;
   switchWorkspace: (organizationId: string) => Promise<void>;
+  refreshUser: () => Promise<void>;
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -154,6 +155,30 @@ export const useAuthStore = create<AuthState>()(
         axios.defaults.headers.common['Authorization'] = `Bearer ${newAccessToken}`;
         if (typeof window !== 'undefined') {
           window.location.href = '/dashboard';
+        }
+      },
+
+      refreshUser: async () => {
+        const { accessToken } = get();
+        if (!accessToken) return;
+        try {
+          const response = await axios.post<{ id: string; email: string; organization_id: string; organizationId: string; role: string }>(
+            `${API_URL}/api/auth/verify`,
+            { token: accessToken }
+          );
+          const u = response.data;
+          set({
+            user: u
+              ? {
+                  id: u.id,
+                  email: u.email,
+                  organizationId: u.organizationId ?? u.organization_id,
+                  role: u.role ?? '',
+                }
+              : null,
+          });
+        } catch {
+          // Token invalid or expired — leave user as is; interceptor may trigger refresh or logout
         }
       },
     }),

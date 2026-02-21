@@ -2670,7 +2670,12 @@ export class TelegramManager {
       `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
        VALUES ($1, $2, $3, $4, false, $5)
        ON CONFLICT (bd_account_id, telegram_chat_id) DO UPDATE SET
-         title = EXCLUDED.title,
+         title = CASE WHEN EXISTS (
+           SELECT 1 FROM bd_accounts a WHERE a.id = EXCLUDED.bd_account_id
+             AND (NULLIF(TRIM(COALESCE(a.display_name, '')), '') = TRIM(EXCLUDED.title)
+               OR a.username = TRIM(EXCLUDED.title)
+               OR NULLIF(TRIM(COALESCE(a.first_name, '')), '') = TRIM(EXCLUDED.title))
+         ) THEN bd_account_sync_chats.title ELSE EXCLUDED.title END,
          peer_type = EXCLUDED.peer_type,
          folder_id = COALESCE(bd_account_sync_chats.folder_id, EXCLUDED.folder_id)`,
       [accountId, chatId, title, peerType, folderId]

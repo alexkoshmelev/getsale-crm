@@ -4,9 +4,10 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
 import axios from 'axios';
-import { Building2, Users, MessageSquare, TrendingUp, ArrowRight } from 'lucide-react';
+import { Building2, Users, MessageSquare, TrendingUp, ArrowRight, Bell } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
+import { fetchUpcomingReminders, type Reminder } from '@/lib/api/crm';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -26,6 +27,7 @@ export default function DashboardPage() {
     deals: 0,
   });
   const [loading, setLoading] = useState(true);
+  const [upcomingReminders, setUpcomingReminders] = useState<Reminder[]>([]);
 
   useEffect(() => {
     const fetchStats = async () => {
@@ -51,6 +53,12 @@ export default function DashboardPage() {
     };
 
     fetchStats();
+  }, []);
+
+  useEffect(() => {
+    fetchUpcomingReminders({ hours: 72, limit: 10 })
+      .then(setUpcomingReminders)
+      .catch(() => setUpcomingReminders([]));
   }, []);
 
   if (loading) {
@@ -103,6 +111,30 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {upcomingReminders.length > 0 && (
+          <Card title={t('dashboard.upcomingReminders', 'Предстоящие напоминания')} className="flex flex-col">
+            <ul className="space-y-2 flex-1 min-h-0">
+              {upcomingReminders.slice(0, 8).map((r) => (
+                <li key={r.id} className="flex items-center justify-between gap-2 text-sm">
+                  <Link
+                    href={r.entity_type === 'contact' ? `/dashboard/crm?tab=contacts&open=${r.entity_id}` : `/dashboard/crm?tab=deals&open=${r.entity_id}`}
+                    className="text-primary hover:underline truncate flex-1 min-w-0"
+                  >
+                    {r.title || new Date(r.remind_at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}
+                  </Link>
+                  <span className="text-muted-foreground shrink-0">
+                    {new Date(r.remind_at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <Link href="/dashboard/crm" className="text-sm text-primary hover:underline mt-2 flex items-center gap-1">
+              {t('dashboard.allReminders', 'Все напоминания в CRM')}
+              <ArrowRight className="w-3 h-3" />
+            </Link>
+          </Card>
+        )}
+
         <Card title={t('dashboard.recentActivity')}>
           <p className="text-muted-foreground text-sm leading-relaxed">
             {t('dashboard.recentActivityPlaceholder')}

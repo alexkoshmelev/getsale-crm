@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
-import { Search, Building2, User, TrendingUp, ArrowRight, Loader2, MessageSquare } from 'lucide-react';
+import { Search, Building2, User, TrendingUp, ArrowRight, Loader2, MessageSquare, Send } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { clsx } from 'clsx';
 import { fetchCompanies, fetchContacts, fetchDeals, type Company, type Contact, type Deal } from '@/lib/api/crm';
@@ -12,6 +12,7 @@ import { searchChats, type MessagingChatSearchItem } from '@/lib/api/messaging';
 const QUICK_LINKS = [
   { href: '/dashboard/crm', key: 'crm', icon: Building2 },
   { href: '/dashboard/pipeline', key: 'pipeline', icon: TrendingUp },
+  { href: '/dashboard/campaigns', key: 'campaigns', icon: Send },
   { href: '/dashboard/messaging', key: 'messaging', icon: User },
 ];
 

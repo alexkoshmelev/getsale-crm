@@ -997,7 +997,12 @@ app.post('/api/bd-accounts/:id/sync-folders', async (req, res) => {
           `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
            VALUES ($1, $2, $3, $4, false, $5)
            ON CONFLICT (bd_account_id, telegram_chat_id) DO UPDATE SET
-             title = EXCLUDED.title,
+             title = CASE WHEN EXISTS (
+               SELECT 1 FROM bd_accounts a WHERE a.id = EXCLUDED.bd_account_id
+                 AND (NULLIF(TRIM(COALESCE(a.display_name, '')), '') = TRIM(EXCLUDED.title)
+                   OR a.username = TRIM(EXCLUDED.title)
+                   OR NULLIF(TRIM(COALESCE(a.first_name, '')), '') = TRIM(EXCLUDED.title))
+             ) THEN bd_account_sync_chats.title ELSE EXCLUDED.title END,
              peer_type = EXCLUDED.peer_type,
              folder_id = EXCLUDED.folder_id`,
           [id, chatId, title, peerType, folderId]
@@ -1389,7 +1394,12 @@ async function refreshChatsFromFolders(
           `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
            VALUES ($1, $2, $3, $4, false, $5)
            ON CONFLICT (bd_account_id, telegram_chat_id) DO UPDATE SET
-             title = EXCLUDED.title,
+             title = CASE WHEN EXISTS (
+               SELECT 1 FROM bd_accounts a WHERE a.id = EXCLUDED.bd_account_id
+                 AND (NULLIF(TRIM(COALESCE(a.display_name, '')), '') = TRIM(EXCLUDED.title)
+                   OR a.username = TRIM(EXCLUDED.title)
+                   OR NULLIF(TRIM(COALESCE(a.first_name, '')), '') = TRIM(EXCLUDED.title))
+             ) THEN bd_account_sync_chats.title ELSE EXCLUDED.title END,
              peer_type = EXCLUDED.peer_type,
              folder_id = COALESCE(bd_account_sync_chats.folder_id, EXCLUDED.folder_id)`,
           [accountId, chatId, title, peerType, folderId]
@@ -2041,6 +2051,63 @@ app.post('/api/bd-accounts/:id/send', async (req, res) => {
     res.status(500).json({
       error: 'Internal server error',
       message: error.message || 'Failed to send message',
+    });
+  }
+});
+
+// Send one message to multiple group/channel chats (e.g. broadcast to groups). Body: { channelIds: string[], text }. Delay between sends to reduce flood risk.
+const BULK_SEND_DELAY_MS = 2000;
+app.post('/api/bd-accounts/:id/send-bulk', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const { channelIds, text } = req.body;
+
+    if (!Array.isArray(channelIds) || channelIds.length === 0) {
+      return res.status(400).json({ error: 'Missing or invalid channelIds array (at least one chat required)' });
+    }
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'Missing required field: text' });
+    }
+
+    const accountResult = await pool.query(
+      'SELECT id, is_demo FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    if ((accountResult.rows[0] as { is_demo?: boolean }).is_demo) {
+      return res.status(403).json({
+        error: 'Demo account',
+        message: 'Sending messages is disabled for demo accounts.',
+      });
+    }
+    if (!telegramManager.isConnected(id)) {
+      return res.status(400).json({ error: 'BD account is not connected' });
+    }
+
+    const failed: { channelId: string; error: string }[] = [];
+    let sent = 0;
+    for (let i = 0; i < channelIds.length; i++) {
+      const chatId = String(channelIds[i]).trim();
+      if (!chatId) continue;
+      try {
+        await telegramManager.sendMessage(id, chatId, text, {});
+        sent++;
+      } catch (err: any) {
+        failed.push({ channelId: chatId, error: err?.message || String(err) });
+      }
+      if (i < channelIds.length - 1) {
+        await new Promise((r) => setTimeout(r, BULK_SEND_DELAY_MS));
+      }
+    }
+    res.json({ sent, failed });
+  } catch (error: any) {
+    console.error('Error in send-bulk:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message || 'Failed to send bulk messages',
     });
   }
 });
