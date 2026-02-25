@@ -75,7 +75,12 @@ export enum EventType {
   STAGE_DELETED = 'stage.deleted',
   LEAD_CREATED = 'lead.created',
   LEAD_STAGE_CHANGED = 'lead.stage.changed',
-  
+  LEAD_CONVERTED = 'lead.converted',
+  /** ЭТАП 6: SLA — лид в стадии дольше max_days (cron публикует). */
+  LEAD_SLA_BREACH = 'lead.sla.breach',
+  /** ЭТАП 6: SLA — сделка в стадии дольше max_days (cron публикует). */
+  DEAL_SLA_BREACH = 'deal.sla.breach',
+
   // Automation
   AUTOMATION_RULE_CREATED = 'automation.rule.created',
   AUTOMATION_RULE_TRIGGERED = 'automation.rule.triggered',
@@ -463,6 +468,35 @@ export interface LeadStageChangedEvent extends BaseEvent {
   };
 }
 
+/** ЭТАП 6: SLA breach — лид в стадии дольше max_days. breachDate = логический день в org TZ (YYYY-MM-DD). */
+export interface LeadSlaBreachEvent extends BaseEvent {
+  type: EventType.LEAD_SLA_BREACH;
+  data: {
+    leadId: string;
+    pipelineId: string;
+    stageId: string;
+    organizationId: string;
+    contactId?: string;
+    daysInStage: number;
+    breachDate: string;
+    correlationId: string;
+  };
+}
+
+/** ЭТАП 6: SLA breach — сделка в стадии дольше max_days. breachDate = логический день в org TZ (YYYY-MM-DD). */
+export interface DealSlaBreachEvent extends BaseEvent {
+  type: EventType.DEAL_SLA_BREACH;
+  data: {
+    dealId: string;
+    pipelineId: string;
+    stageId: string;
+    organizationId: string;
+    daysInStage: number;
+    breachDate: string;
+    correlationId: string;
+  };
+}
+
 // Automation events
 export interface AutomationRuleCreatedEvent extends BaseEvent {
   type: EventType.AUTOMATION_RULE_CREATED;
@@ -509,7 +543,12 @@ export interface ContactUpdatedEvent extends BaseEvent {
 
 export interface DealCreatedEvent extends BaseEvent {
   type: EventType.DEAL_CREATED;
-  data: { dealId: string; pipelineId?: string };
+  data: { dealId: string; pipelineId?: string; stageId?: string; leadId?: string };
+}
+
+export interface LeadConvertedEvent extends BaseEvent {
+  type: EventType.LEAD_CONVERTED;
+  data: { leadId: string; dealId: string; pipelineId: string; convertedAt: string };
 }
 
 export interface DealUpdatedEvent extends BaseEvent {
@@ -564,6 +603,9 @@ export type Event =
   | StageDeletedEvent
   | LeadCreatedEvent
   | LeadStageChangedEvent
+  | LeadConvertedEvent
+  | LeadSlaBreachEvent
+  | DealSlaBreachEvent
   | AutomationRuleCreatedEvent
   | AutomationRuleTriggeredEvent
   | MetricRecordedEvent;

@@ -20,7 +20,10 @@
     "migrate:rollback": "cd migrations && npm run migrate:rollback",
     "migrate:status": "cd migrations && npm run migrate:status",
     "migrate:make": "cd migrations && npm run migrate:make",
-    "seed": "cd migrations && npm run seed"
+    "seed": "cd migrations && npm run seed",
+    "stage2-closure": "node scripts/stage2-closure-check.mjs",
+    "stage3-ids": "node scripts/print-stage3-ids.mjs",
+    "stage3-e2e": "node scripts/stage3-e2e-test.mjs"
   },
   "engines": {
     "node": ">=18.0.0",
@@ -28,6 +31,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
+    "pg": "^8.11.3",
     "typescript": "^5.3.0"
   }
 }

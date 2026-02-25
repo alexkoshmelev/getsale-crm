@@ -1,8 +1,10 @@
 import express from 'express';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
+import { register, Counter } from 'prom-client';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
+import { createLogger } from '@getsale/logger';
 import {
   AppError,
   isAppError,
@@ -20,6 +22,10 @@ import {
 
 const app = express();
 const PORT = process.env.PORT || 3002;
+const log = createLogger('crm-service');
+
+const dealCreatedTotal = new Counter({ name: 'deal_created_total', help: 'Deals created', registers: [register] });
+const dealStageChangedTotal = new Counter({ name: 'deal_stage_changed_total', help: 'Deal stage transitions', registers: [register] });
 
 const pool = new Pool({
   connectionString:
@@ -88,6 +94,23 @@ app.use(express.json());
 // ---------- Health ----------
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'crm-service' });
+});
+
+app.get('/ready', async (_req, res) => {
+  let postgres = false;
+  try {
+    await pool.query('SELECT 1');
+    postgres = true;
+  } catch {
+    // ignore
+  }
+  const ok = postgres;
+  res.status(ok ? 200 : 503).json({ status: ok ? 'ready' : 'not ready', checks: { postgres: ok } });
+});
+
+app.get('/metrics', async (_req, res) => {
+  res.setHeader('Content-Type', register.contentType);
+  res.end(await register.metrics());
 });
 
 // ---------- Companies ----------
@@ -968,6 +991,7 @@ app.get('/api/crm/deals', async (req, res, next) => {
         null;
       return {
         ...deal,
+        leadId: deal.lead_id ?? undefined,
         companyName: company_name,
         pipelineName: pipeline_name,
         stageName: stage_name,
@@ -1030,6 +1054,7 @@ app.get('/api/crm/deals/:id', async (req, res, next) => {
       null;
     res.json({
       ...deal,
+      leadId: deal.lead_id ?? undefined,
       companyName: company_name,
       pipelineName: pipeline_name,
       stageName: stage_name,
@@ -1059,6 +1084,7 @@ app.post('/api/crm/deals', async (req, res, next) => {
       contactId,
       pipelineId,
       stageId: bodyStageId,
+      leadId,
       title,
       value,
       currency,
@@ -1072,12 +1098,160 @@ app.post('/api/crm/deals', async (req, res, next) => {
 
     const fromChat = bdAccountId != null && channel != null && channelId != null;
     const fromContactOnly = contactId != null && !fromChat && (companyId == null || companyId === '');
-    if (!fromChat && !fromContactOnly && (companyId == null || companyId === '')) {
+    if (!fromChat && !fromContactOnly && (companyId == null || companyId === '') && !leadId) {
       throw new AppError(
         400,
-        'Either companyId, (bdAccountId + channel + channelId), or contactId is required',
+        'Either companyId, (bdAccountId + channel + channelId), contactId, or leadId is required',
         ErrorCodes.VALIDATION
       );
+    }
+
+    // --- ЭТАП 3: создание сделки из лида (leadId) — одна транзакция, перевод лида в Converted, lead.converted ---
+    if (leadId) {
+      const leadRow = await pool.query(
+        'SELECT id, contact_id, pipeline_id, stage_id, organization_id FROM leads WHERE id = $1 AND organization_id = $2',
+        [leadId, user.organizationId]
+      );
+      if (leadRow.rows.length === 0) {
+        throw new AppError(404, 'Lead not found or access denied', ErrorCodes.NOT_FOUND);
+      }
+      const lead = leadRow.rows[0] as { id: string; contact_id: string; pipeline_id: string; stage_id: string; organization_id: string };
+      const existingDeal = await pool.query('SELECT 1 FROM deals WHERE lead_id = $1', [leadId]);
+      if (existingDeal.rows.length > 0) {
+        throw new AppError(409, 'This lead is already linked to a deal', ErrorCodes.CONFLICT);
+      }
+      if (pipelineId != null && pipelineId !== lead.pipeline_id) {
+        throw new AppError(400, "pipelineId must match lead's pipeline", ErrorCodes.VALIDATION);
+      }
+      if (contactId != null && contactId !== lead.contact_id) {
+        throw new AppError(400, "contactId must match lead's contact", ErrorCodes.VALIDATION);
+      }
+      const convertedStage = await pool.query(
+        "SELECT id FROM stages WHERE pipeline_id = $1 AND organization_id = $2 AND name = 'Converted' LIMIT 1",
+        [lead.pipeline_id, user.organizationId]
+      );
+      if (convertedStage.rows.length === 0) {
+        throw new AppError(400, 'Pipeline must have a Converted stage', ErrorCodes.VALIDATION);
+      }
+      const convertedStageId = convertedStage.rows[0].id as string;
+      const correlationId = (req.headers['x-correlation-id'] as string) ?? null;
+      let resolvedCompanyId = companyId ?? null;
+      if (companyId) {
+        const companyCheck = await pool.query(
+          'SELECT 1 FROM companies WHERE id = $1 AND organization_id = $2',
+          [companyId, user.organizationId]
+        );
+        if (companyCheck.rows.length === 0) {
+          throw new AppError(400, 'Company not found or access denied', ErrorCodes.VALIDATION);
+        }
+      } else {
+        const contactRow = await pool.query(
+          'SELECT company_id FROM contacts WHERE id = $1 AND organization_id = $2',
+          [lead.contact_id, user.organizationId]
+        );
+        if (contactRow.rows.length > 0 && contactRow.rows[0].company_id) {
+          resolvedCompanyId = contactRow.rows[0].company_id;
+        }
+      }
+      let stageId = bodyStageId ?? null;
+      if (!stageId) {
+        stageId = await getFirstStageId(lead.pipeline_id, user.organizationId);
+        if (!stageId) {
+          throw new AppError(400, 'Pipeline has no stages', ErrorCodes.VALIDATION);
+        }
+      } else {
+        await ensureStageInPipeline(stageId, lead.pipeline_id, user.organizationId);
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const insertResult = await client.query(
+          `INSERT INTO deals (organization_id, company_id, contact_id, pipeline_id, stage_id, owner_id, created_by_id, lead_id, title, value, currency, probability, expected_close_date, comments, history, bd_account_id, channel, channel_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING *`,
+          [
+            user.organizationId,
+            resolvedCompanyId,
+            lead.contact_id,
+            lead.pipeline_id,
+            stageId,
+            user.id,
+            user.id,
+            leadId,
+            title,
+            value ?? null,
+            currency ?? null,
+            probability ?? null,
+            expectedCloseDate ?? null,
+            comments ?? null,
+            JSON.stringify([
+              { id: randomUUID(), action: 'created', toStageId: stageId, performedBy: user.id, timestamp: new Date() },
+            ]),
+            bdAccountId ?? null,
+            channel ?? null,
+            channelId ?? null,
+          ]
+        );
+        const deal = insertResult.rows[0];
+        await client.query(
+          'UPDATE leads SET stage_id = $1, updated_at = NOW() WHERE id = $2',
+          [convertedStageId, leadId]
+        );
+        await client.query(
+          `INSERT INTO stage_history (organization_id, entity_type, entity_id, pipeline_id, from_stage_id, to_stage_id, changed_by, reason, source, correlation_id)
+           VALUES ($1, 'lead', $2, $3, $4, $5, $6, $7, 'manual', $8)`,
+          [user.organizationId, leadId, lead.pipeline_id, lead.stage_id, convertedStageId, user.id, 'Converted to deal', correlationId]
+        );
+        await client.query('COMMIT');
+
+        dealCreatedTotal.inc();
+        log.info({
+          message: 'deal created',
+          correlation_id: correlationId ?? undefined,
+          entity_type: 'deal',
+          entity_id: deal.id,
+          lead_id: leadId,
+        });
+
+        try {
+          await rabbitmq.publishEvent({
+            id: randomUUID(),
+            type: EventType.DEAL_CREATED,
+            timestamp: new Date(),
+            organizationId: user.organizationId,
+            userId: user.id,
+            data: { dealId: deal.id, pipelineId: lead.pipeline_id, stageId, leadId },
+          } as Event);
+          await rabbitmq.publishEvent({
+            id: randomUUID(),
+            type: EventType.LEAD_CONVERTED,
+            timestamp: new Date(),
+            organizationId: user.organizationId,
+            userId: user.id,
+            data: {
+              leadId,
+              dealId: deal.id,
+              pipelineId: lead.pipeline_id,
+              convertedAt: new Date().toISOString(),
+            },
+          } as Event);
+        } catch (pubErr) {
+          console.error('Failed to publish deal.created/lead.converted:', pubErr);
+        }
+        const { lead_id, ...rest } = deal;
+        res.status(201).json({ ...rest, leadId: lead_id ?? undefined });
+      } catch (txErr) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw txErr;
+      } finally {
+        client.release();
+      }
+      return;
+    }
+
+    // --- Без leadId: обычный флоу ---
+    if (!fromChat && !fromContactOnly && (pipelineId == null || pipelineId === '')) {
+      throw new AppError(400, 'pipelineId is required when leadId is not provided', ErrorCodes.VALIDATION);
     }
     let resolvedCompanyId = companyId ?? null;
     if (!fromChat && !fromContactOnly && companyId) {
@@ -1106,9 +1280,10 @@ app.post('/api/crm/deals', async (req, res, next) => {
       throw new AppError(400, 'Pipeline not found or access denied', ErrorCodes.VALIDATION);
     }
 
+    const resolvedPipelineId = pipelineId!;
     let stageId = bodyStageId ?? null;
     if (!stageId) {
-      stageId = await getFirstStageId(pipelineId, user.organizationId);
+      stageId = await getFirstStageId(resolvedPipelineId, user.organizationId);
       if (!stageId) {
         throw new AppError(
           400,
@@ -1117,7 +1292,7 @@ app.post('/api/crm/deals', async (req, res, next) => {
         );
       }
     } else {
-      await ensureStageInPipeline(stageId, pipelineId, user.organizationId);
+      await ensureStageInPipeline(stageId, resolvedPipelineId, user.organizationId);
     }
 
     if (contactId) {
@@ -1161,6 +1336,7 @@ app.post('/api/crm/deals', async (req, res, next) => {
         channelId ?? null,
       ]
     );
+    dealCreatedTotal.inc();
     await rabbitmq.publishEvent({
       id: randomUUID(),
       type: EventType.DEAL_CREATED,
@@ -1236,6 +1412,8 @@ app.put('/api/crm/deals/:id', async (req, res, next) => {
   }
 });
 
+// SINGLE SOURCE OF TRUTH FOR DEAL STAGE TRANSITIONS: only this handler updates deals.stage_id,
+// writes to deals.history and stage_history, and publishes deal.stage.changed.
 app.patch('/api/crm/deals/:id/stage', async (req, res, next) => {
   try {
     const user = getUser(req);
@@ -1248,7 +1426,8 @@ app.patch('/api/crm/deals/:id/stage', async (req, res, next) => {
         ErrorCodes.VALIDATION
       );
     }
-    const { stageId, reason } = parsed.data;
+    const { stageId, reason, autoMoved = false } = parsed.data;
+    const correlationId = (req.headers['x-correlation-id'] as string) ?? null;
     const dealResult = await pool.query(
       'SELECT * FROM deals WHERE id = $1 AND organization_id = $2',
       [id, user.organizationId]
@@ -1275,13 +1454,31 @@ app.patch('/api/crm/deals/:id/stage', async (req, res, next) => {
       [stageId, JSON.stringify(history), id]
     );
 
+    dealStageChangedTotal.inc();
+    // Audit log for analytics (ЭТАП 2: entity_type/entity_id/source; ЭТАП 5: correlation_id).
+    await pool.query(
+      `INSERT INTO stage_history (organization_id, entity_type, entity_id, pipeline_id, from_stage_id, to_stage_id, changed_by, reason, source, correlation_id)
+       VALUES ($1, 'deal', $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        user.organizationId,
+        id,
+        deal.pipeline_id,
+        deal.stage_id,
+        stageId,
+        user.id,
+        reason ?? null,
+        autoMoved ? 'automation' : 'manual',
+        correlationId,
+      ]
+    );
+
     await rabbitmq.publishEvent({
       id: randomUUID(),
       type: EventType.DEAL_STAGE_CHANGED,
       timestamp: new Date(),
       organizationId: user.organizationId,
       userId: user.id,
-      data: { dealId: id, fromStageId: deal.stage_id, toStageId: stageId, reason },
+      data: { dealId: id, fromStageId: deal.stage_id, toStageId: stageId, reason, autoMoved },
     } as Event);
     res.json({ success: true });
   } catch (e) {
@@ -1300,12 +1497,56 @@ app.delete('/api/crm/deals/:id', async (req, res, next) => {
     if (existing.rows.length === 0) {
       throw new AppError(404, 'Deal not found', ErrorCodes.NOT_FOUND);
     }
-    await pool.query('DELETE FROM stage_history WHERE deal_id = $1', [id]);
+    await pool.query("DELETE FROM stage_history WHERE entity_type = 'deal' AND entity_id = $1", [id]);
     await pool.query('DELETE FROM deals WHERE id = $1 AND organization_id = $2', [
       id,
       user.organizationId,
     ]);
     res.status(204).send();
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ---------- Analytics: conversion (Lead → Deal baseline) ----------
+// GET /api/crm/analytics/conversion?pipelineId=...
+// Returns totalLeads, convertedLeads, conversionRate. Optional pipelineId scopes to one pipeline.
+app.get('/api/crm/analytics/conversion', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const pipelineId = typeof req.query.pipelineId === 'string' ? req.query.pipelineId : undefined;
+
+    let leadsWhere = 'WHERE l.organization_id = $1';
+    let dealsWhere = 'WHERE d.organization_id = $1 AND d.lead_id IS NOT NULL';
+    const params: unknown[] = [user.organizationId];
+
+    if (pipelineId) {
+      params.push(pipelineId);
+      leadsWhere += ` AND l.pipeline_id = $${params.length}`;
+      dealsWhere += ` AND d.pipeline_id = $${params.length}`;
+    }
+
+    const [leadsResult, dealsResult] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*)::int AS total FROM leads l ${leadsWhere}`,
+        params
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS total FROM deals d ${dealsWhere}`,
+        params
+      ),
+    ]);
+
+    const totalLeads = leadsResult.rows[0].total;
+    const convertedLeads = dealsResult.rows[0].total;
+    const conversionRate =
+      totalLeads > 0 ? Math.round((convertedLeads / totalLeads) * 10000) / 10000 : 0;
+
+    res.json({
+      totalLeads,
+      convertedLeads,
+      conversionRate,
+    });
   } catch (e) {
     next(e);
   }

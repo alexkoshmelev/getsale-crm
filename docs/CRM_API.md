@@ -37,23 +37,32 @@
 
 ## Сделки (Deals) и воронка
 
-Сделка связывает **компанию** (обязательно), опционально **контакт**, **воронку** (pipeline) и **стадию** (stage). Попадание контакта/компании в воронку = создание сделки с указанием `pipelineId`; `stageId` можно не передавать — тогда подставится **первая стадия** воронки (по `order_index`).
+Сделка связывает **компанию** (опционально при создании из лида), опционально **контакт**, **воронку** (pipeline) и **стадию** (stage). Связь **Lead → Deal (1:1):** при создании сделки с `leadId` лид переводится в стадию **Converted**, публикуется `lead.converted`; в ответе сделки есть `leadId`.
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/crm/deals` | Список с пагинацией. Query: `page`, `limit`, `search` (по title), `companyId`, `contactId`, `pipelineId`, `stageId`, `ownerId` |
-| GET | `/api/crm/deals/:id` | Детали сделки (включая `companyName`, `pipelineName`, `stageName`, `stageOrder`). 404 если не найдена |
-| POST | `/api/crm/deals` | Создание. Body: `companyId` (обяз.), `contactId` (опц.), `pipelineId` (обяз.), `stageId` (опц. — если нет, берётся первая стадия воронки), `title` (обяз.), `value`, `currency` (3 символа) |
+| GET | `/api/crm/deals` | Список с пагинацией. Query: `page`, `limit`, `search` (по title), `companyId`, `contactId`, `pipelineId`, `stageId`, `ownerId`. В каждом элементе: `leadId` (если сделка создана из лида). |
+| GET | `/api/crm/deals/:id` | Детали сделки (включая `companyName`, `pipelineName`, `stageName`, `stageOrder`, `leadId`). 404 если не найдена |
+| POST | `/api/crm/deals` | Создание. Body: `companyId` (опц.), `contactId` (опц.), `pipelineId` (обяз. без leadId), `stageId` (опц.), **`leadId`** (опц.). При **leadId**: лид в организации, у лида нет сделки; `contact_id` и `pipeline_id` берутся из лида; лид переводится в стадию Converted; публикуются `deal.created` и `lead.converted`. Без leadId: как раньше. `title` (обяз.), `value`, `currency`. 409 если лид уже привязан к сделке. |
 | PUT | `/api/crm/deals/:id` | Обновление (частичное). Поля: `title`, `value`, `currency`, `contactId`, `ownerId` |
-| PATCH | `/api/crm/deals/:id/stage` | Перемещение по стадии. Body: `stageId` (обяз.), `reason` (опц.). Стадия должна принадлежать той же воронке |
+| PATCH | `/api/crm/deals/:id/stage` | **Единственная точка смены стадии сделки.** Body: `stageId` (обяз.), `reason` (опц.), `autoMoved` (опц.). Обновляет `deals.stage_id`, дописывает `deals.history`, пишет в `stage_history`, публикует `deal.stage.changed`. Стадия должна принадлежать той же воронке. |
 | DELETE | `/api/crm/deals/:id` | Удаление сделки и записей в `stage_history` |
 
 **Валидация при создании/обновлении сделки:**
 - `companyId`, `contactId`, `pipelineId`, `stageId` должны принадлежать организации пользователя.
+- При **leadId**: лид должен быть в организации; `pipelineId`/`contactId` в body должны совпадать с лидом (или не передаваться — подставляются из лида); воронка лида должна содержать стадию **Converted**.
 - `stageId` должен относиться к указанной воронке (`pipelineId`).
 - Если воронка без стадий — POST вернёт 400: «Pipeline has no stages. Create at least one stage first.»
 
-**Ответ списка сделок:** `{ items: [...], pagination: { page, limit, total, totalPages } }`. В каждом элементе: `companyName`, `pipelineName`, `stageName`, `stageOrder`.
+**Ответ списка/сделки:** в каждом элементе: `companyName`, `pipelineName`, `stageName`, `stageOrder`, **`leadId`** (если сделка создана из лида).
+
+---
+
+## Аналитика (Analytics)
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| GET | `/api/crm/analytics/conversion` | Метрика конверсии Lead → Deal. Query: `pipelineId` (опц.). Ответ: `{ totalLeads, convertedLeads, conversionRate }`. conversionRate = convertedLeads / totalLeads (при totalLeads = 0 → 0). Baseline до ЭТАПА 2. |
 
 ---
 
@@ -65,7 +74,7 @@
 |----------|------|----------|
 | 400 | VALIDATION | Невалидные данные (Zod) или бизнес-правило (стадия не из воронки, сущность не найдена в организации) |
 | 404 | NOT_FOUND | Компания / контакт / сделка не найдена или не принадлежит организации |
-| 409 | CONFLICT | Нельзя удалить компанию, у которой есть сделки |
+| 409 | CONFLICT | Нельзя удалить компанию, у которой есть сделки; лид уже привязан к сделке (при POST с leadId) |
 | 500 | INTERNAL_ERROR | Внутренняя ошибка сервера |
 
 ---
@@ -77,5 +86,6 @@
 - `company.created`, `company.updated`
 - `contact.created`, `contact.updated`
 - `deal.created`, `deal.updated`, `deal.stage.changed`
+- **`lead.converted`** (при создании сделки с leadId: data: leadId, dealId, pipelineId, convertedAt)
 
 Их могут использовать Analytics, Automation, WebSocket и другие сервисы.

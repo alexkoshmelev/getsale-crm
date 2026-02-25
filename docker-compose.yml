@@ -113,6 +113,8 @@ services:
       args:
         SERVICE_PATH: services/auth-service
     container_name: getsale-auth-service
+    ports:
+      - "3001:3001"
     environment:
       - NODE_ENV=development
       - PORT=3001
@@ -145,6 +147,8 @@ services:
       args:
         SERVICE_PATH: services/crm-service
     container_name: getsale-crm-service
+    ports:
+      - "3002:3002"
     environment:
       - NODE_ENV=development
       - PORT=3002
@@ -175,6 +179,8 @@ services:
       args:
         SERVICE_PATH: services/messaging-service
     container_name: getsale-messaging-service
+    ports:
+      - "3003:3003"
     environment:
       - NODE_ENV=development
       - PORT=3003
@@ -239,6 +245,8 @@ services:
       args:
         SERVICE_PATH: services/ai-service
     container_name: getsale-ai-service
+    ports:
+      - "3005:3005"
     environment:
       - NODE_ENV=development
       - PORT=3005
@@ -267,6 +275,8 @@ services:
       args:
         SERVICE_PATH: services/user-service
     container_name: getsale-user-service
+    ports:
+      - "3006:3006"
     environment:
       - NODE_ENV=development
       - PORT=3006
@@ -298,6 +308,8 @@ services:
       args:
         SERVICE_PATH: services/bd-accounts-service
     container_name: getsale-bd-accounts-service
+    ports:
+      - "3007:3007"
     environment:
       - NODE_ENV=development
       - PORT=3007
@@ -336,6 +348,8 @@ services:
       args:
         SERVICE_PATH: services/pipeline-service
     container_name: getsale-pipeline-service
+    ports:
+      - "3008:3008"
     environment:
       - NODE_ENV=development
       - PORT=3008
@@ -366,6 +380,8 @@ services:
       args:
         SERVICE_PATH: services/automation-service
     container_name: getsale-automation-service
+    ports:
+      - "3009:3009"
     environment:
       - NODE_ENV=development
       - PORT=3009
@@ -397,6 +413,8 @@ services:
       args:
         SERVICE_PATH: services/analytics-service
     container_name: getsale-analytics-service
+    ports:
+      - "3010:3010"
     environment:
       - NODE_ENV=development
       - PORT=3010
@@ -427,6 +445,8 @@ services:
       args:
         SERVICE_PATH: services/team-service
     container_name: getsale-team-service
+    ports:
+      - "3011:3011"
     environment:
       - NODE_ENV=development
       - PORT=3011
@@ -457,6 +477,8 @@ services:
       args:
         SERVICE_PATH: services/campaign-service
     container_name: getsale-campaign-service
+    ports:
+      - "3012:3012"
     environment:
       - NODE_ENV=development
       - PORT=3012

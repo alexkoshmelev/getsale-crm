@@ -1,11 +1,27 @@
 import express from 'express';
 import crypto from 'crypto';
 import { Pool } from 'pg';
+import { register, Counter } from 'prom-client';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
+import { createLogger } from '@getsale/logger';
 
 const app = express();
 const PORT = process.env.PORT || 3008;
+const log = createLogger('pipeline-service');
+
+const eventPublishTotal = new Counter({
+  name: 'event_publish_total',
+  help: 'Events published to RabbitMQ',
+  labelNames: ['event_type'],
+  registers: [register],
+});
+const eventPublishFailedTotal = new Counter({
+  name: 'event_publish_failed_total',
+  help: 'Event publish failures',
+  labelNames: ['event_type'],
+  registers: [register],
+});
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
@@ -36,6 +52,28 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'pipeline-service' });
 });
 
+app.get('/ready', async (_req, res) => {
+  const checks: { postgres?: boolean; rabbitmq?: boolean } = {};
+  try {
+    await pool.query('SELECT 1');
+    checks.postgres = true;
+  } catch {
+    checks.postgres = false;
+  }
+  try {
+    checks.rabbitmq = rabbitmq.isConnected();
+  } catch {
+    checks.rabbitmq = false;
+  }
+  const ok = checks.postgres === true;
+  res.status(ok ? 200 : 503).json({ status: ok ? 'ready' : 'not ready', checks });
+});
+
+app.get('/metrics', async (_req, res) => {
+  res.setHeader('Content-Type', register.contentType);
+  res.end(await register.metrics());
+});
+
 // Pipelines
 app.get('/api/pipeline', async (req, res) => {
   try {
@@ -58,6 +96,7 @@ const DEFAULT_STAGES = [
   { name: 'Negotiation', order_index: 3, color: '#EF4444' },
   { name: 'Closed Won', order_index: 4, color: '#8B5CF6' },
   { name: 'Closed Lost', order_index: 5, color: '#6B7280' },
+  { name: 'Converted', order_index: 6, color: '#059669' }, // системная финальная стадия (лид конвертирован в сделку)
 ];
 
 app.post('/api/pipeline', async (req, res) => {
@@ -326,47 +365,60 @@ app.delete('/api/pipeline/stages/:id', async (req, res) => {
   }
 });
 
-// Move client to stage
+/**
+ * @deprecated This endpoint proxies deal stage changes to CRM (when body.dealId is set).
+ * Will be removed after migration. Use PATCH /api/crm/deals/:id/stage for deal stage transitions.
+ */
+// Move client to stage (deals: proxy to CRM; leads: not used here — use PATCH /api/pipeline/leads/:id)
 app.put('/api/pipeline/clients/:clientId/stage', async (req, res) => {
   try {
-    const user = getUser(req);
     const { clientId } = req.params;
     const { stageId, dealId, reason, autoMoved } = req.body;
 
-    // Get current stage from deal or client
-    const currentStageResult = await pool.query(
-      'SELECT stage_id FROM deals WHERE id = $1 OR client_id = $1',
-      [dealId || clientId]
-    );
+    const dealIdFromBody = dealId || null;
+    const dealIdFromPath = dealIdFromBody
+      ? null
+      : (await pool.query('SELECT id FROM deals WHERE id = $1', [clientId])).rows[0]?.id || null;
+    const resolvedDealId = dealIdFromBody || dealIdFromPath;
 
-    const fromStageId = currentStageResult.rows[0]?.stage_id;
-
-    // Save history
-    await pool.query(
-      `INSERT INTO stage_history (client_id, deal_id, from_stage_id, to_stage_id, moved_by, auto_moved, reason)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [clientId, dealId, fromStageId, stageId, user.id, autoMoved || false, reason]
-    );
-
-    // Update deal stage
-    if (dealId) {
-      await pool.query(
-        'UPDATE deals SET stage_id = $1, updated_at = NOW() WHERE id = $2',
-        [stageId, dealId]
+    if (resolvedDealId && stageId) {
+      const crmUrl = process.env.CRM_SERVICE_URL || 'http://crm-service:3002';
+      const dealRow = await pool.query(
+        'SELECT organization_id FROM deals WHERE id = $1',
+        [resolvedDealId]
       );
+      if (dealRow.rows.length === 0) {
+        return res.status(404).json({ error: 'Deal not found' });
+      }
+      const organizationId = dealRow.rows[0].organization_id;
+      const userRow = await pool.query(
+        'SELECT id FROM users WHERE organization_id = $1 LIMIT 1',
+        [organizationId]
+      );
+      const userId = userRow.rows[0]?.id || '';
+      const proxyRes = await fetch(`${crmUrl}/api/crm/deals/${resolvedDealId}/stage`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Id': userId,
+          'X-Organization-Id': organizationId,
+        },
+        body: JSON.stringify({ stageId, reason, autoMoved: !!autoMoved }),
+      });
+      if (!proxyRes.ok) {
+        const text = await proxyRes.text();
+        return res.status(proxyRes.status >= 500 ? 502 : proxyRes.status).json({
+          error: 'CRM deal stage update failed',
+          detail: text,
+        });
+      }
+      const data = await proxyRes.json().catch(() => ({}));
+      return res.json(data);
     }
 
-    // Publish event
-    await rabbitmq.publishEvent({
-      id: crypto.randomUUID(),
-      type: EventType.DEAL_STAGE_CHANGED,
-      timestamp: new Date(),
-      organizationId: user.organizationId,
-      userId: user.id,
-      data: { dealId: dealId || clientId, fromStageId, toStageId: stageId, reason, autoMoved },
-    } as Event);
-
-    res.json({ success: true });
+    return res.status(400).json({
+      error: 'Deal stage changes must be done via CRM. Use PATCH /api/crm/deals/:id/stage or provide dealId in body.',
+    });
   } catch (error) {
     console.error('Error moving client to stage:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -534,7 +586,7 @@ app.post('/api/pipeline/leads', async (req, res) => {
   }
 });
 
-// Update lead (move to stage / reorder)
+// Update lead (move to stage / reorder). Converted — финальная стадия, переходы из неё запрещены.
 app.patch('/api/pipeline/leads/:id', async (req, res) => {
   try {
     const user = getUser(req);
@@ -542,11 +594,14 @@ app.patch('/api/pipeline/leads/:id', async (req, res) => {
     const { stageId, orderIndex } = req.body;
 
     const existing = await pool.query(
-      'SELECT * FROM leads WHERE id = $1 AND organization_id = $2',
+      'SELECT l.*, s.name AS stage_name FROM leads l JOIN stages s ON s.id = l.stage_id WHERE l.id = $1 AND l.organization_id = $2',
       [id, user.organizationId]
     );
     if (existing.rows.length === 0) {
       return res.status(404).json({ error: 'Lead not found' });
+    }
+    if (stageId != null && String((existing.rows[0] as any).stage_name) === 'Converted') {
+      return res.status(400).json({ error: 'Cannot move lead from Converted stage' });
     }
 
     const updates: string[] = ['updated_at = NOW()'];
@@ -579,23 +634,40 @@ app.patch('/api/pipeline/leads/:id', async (req, res) => {
     );
     const fromStageId = existing.rows[0].stage_id;
     if (stageId != null && fromStageId !== stageId) {
+      const eventId = crypto.randomUUID();
+      const event = {
+        id: eventId,
+        type: EventType.LEAD_STAGE_CHANGED,
+        timestamp: new Date(),
+        organizationId: user.organizationId,
+        userId: user.id,
+        data: {
+          contactId: existing.rows[0].contact_id,
+          pipelineId: existing.rows[0].pipeline_id,
+          fromStageId,
+          toStageId: stageId,
+          leadId: id,
+          correlationId: eventId,
+        },
+      } as Event;
       try {
-        await rabbitmq.publishEvent({
-          id: crypto.randomUUID(),
-          type: EventType.LEAD_STAGE_CHANGED,
-          timestamp: new Date(),
-          organizationId: user.organizationId,
-          userId: user.id,
-          data: {
-            contactId: existing.rows[0].contact_id,
-            pipelineId: existing.rows[0].pipeline_id,
-            fromStageId,
-            toStageId: stageId,
-            leadId: id,
-          },
-        } as Event);
+        log.info({
+          message: 'publish lead.stage.changed',
+          event_id: eventId,
+          correlation_id: eventId,
+          entity_type: 'lead',
+          entity_id: id,
+        });
+        await rabbitmq.publishEvent(event);
+        eventPublishTotal.inc({ event_type: EventType.LEAD_STAGE_CHANGED });
       } catch (e) {
-        console.error('Failed to publish LEAD_STAGE_CHANGED:', e);
+        eventPublishFailedTotal.inc({ event_type: EventType.LEAD_STAGE_CHANGED });
+        log.error({
+          message: 'Failed to publish LEAD_STAGE_CHANGED',
+          event_id: eventId,
+          correlation_id: eventId,
+          error: e instanceof Error ? e.message : String(e),
+        });
       }
     }
     res.json(result.rows[0]);

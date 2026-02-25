@@ -97,18 +97,18 @@ app.get('/api/analytics/conversion-rates', async (req, res) => {
     const user = getUser(req);
     const { fromStage, toStage, startDate, endDate } = req.query;
 
-    // Use CTE to calculate time differences first, then aggregate
+    // Use CTE to calculate time differences first, then aggregate (ЭТАП 2: entity_type, entity_id, created_at).
     let query = `
       WITH stage_transitions AS (
         SELECT 
           sh.*,
           fs.name as from_stage,
           ts.name as to_stage,
-          LAG(sh.moved_at) OVER (PARTITION BY sh.client_id ORDER BY sh.moved_at) as prev_moved_at
+          LAG(sh.created_at) OVER (PARTITION BY sh.entity_type, sh.entity_id ORDER BY sh.created_at) as prev_created_at
         FROM stage_history sh
         LEFT JOIN stages fs ON sh.from_stage_id = fs.id
         LEFT JOIN stages ts ON sh.to_stage_id = ts.id
-        WHERE ts.organization_id = $1
+        WHERE sh.organization_id = $1
     `;
     const params: any[] = [user.organizationId];
 
@@ -123,12 +123,12 @@ app.get('/api/analytics/conversion-rates', async (req, res) => {
     }
 
     if (startDate) {
-      query += ` AND sh.moved_at >= $${params.length + 1}`;
+      query += ` AND sh.created_at >= $${params.length + 1}`;
       params.push(startDate);
     }
 
     if (endDate) {
-      query += ` AND sh.moved_at <= $${params.length + 1}`;
+      query += ` AND sh.created_at <= $${params.length + 1}`;
       params.push(endDate);
     }
 
@@ -138,9 +138,9 @@ app.get('/api/analytics/conversion-rates', async (req, res) => {
         from_stage,
         to_stage,
         COUNT(*) as transitions,
-        AVG(EXTRACT(EPOCH FROM (moved_at - prev_moved_at))) / 3600 as avg_hours
+        AVG(EXTRACT(EPOCH FROM (created_at - prev_created_at))) / 3600 as avg_hours
       FROM stage_transitions
-      WHERE prev_moved_at IS NOT NULL
+      WHERE prev_created_at IS NOT NULL
       GROUP BY from_stage, to_stage
     `;
 

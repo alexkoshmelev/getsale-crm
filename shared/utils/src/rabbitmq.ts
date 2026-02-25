@@ -13,6 +13,10 @@ export class RabbitMQClient {
     this.url = url;
   }
 
+  isConnected(): boolean {
+    return this.connection != null && this.channel != null;
+  }
+
   async connect(retries: number = 10, initialDelay: number = 1000): Promise<void> {
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
@@ -61,6 +65,24 @@ export class RabbitMQClient {
     });
 
     this.channel.publish(exchange, routingKey, Buffer.from(message), {
+      persistent: true,
+      messageId: event.id,
+      timestamp: Date.now(),
+    });
+  }
+
+  /** Publish event to a DLQ (durable queue). Uses default exchange; queue must exist. */
+  async publishToDlq(queueName: string, event: Event): Promise<void> {
+    if (!this.channel) {
+      console.warn('RabbitMQ channel not initialized, DLQ publish skipped:', queueName);
+      return;
+    }
+    await this.channel.assertQueue(queueName, { durable: true });
+    const message = JSON.stringify({
+      ...event,
+      timestamp: event.timestamp instanceof Date ? event.timestamp.toISOString() : event.timestamp,
+    });
+    this.channel.sendToQueue(queueName, Buffer.from(message), {
       persistent: true,
       messageId: event.id,
       timestamp: Date.now(),

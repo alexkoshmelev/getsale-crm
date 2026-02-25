@@ -68,6 +68,7 @@ export interface Deal {
   pipelineId: string;
   stageId: string;
   ownerId: string;
+  leadId?: string | null;
   title: string;
   value?: number;
   currency?: string;
