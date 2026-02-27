@@ -10,7 +10,7 @@ env:
   REGISTRY: registry.digitalocean.com/regestry-getsale-ai
 
 jobs:
-  # 12 backend services in parallel (matrix)
+  # Backend services in parallel (matrix)
   build-backend:
     name: 'Build ${{ matrix.service }}'
     runs-on: ubuntu-latest
@@ -30,6 +30,7 @@ jobs:
           - automation-service
           - analytics-service
           - team-service
+          - campaign-service
     steps:
       - name: 'Checkout repository'
         uses: actions/checkout@v4
