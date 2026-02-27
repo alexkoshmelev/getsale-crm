@@ -386,6 +386,8 @@ const teamProxy = createProxyMiddleware({
 const campaignProxy = createProxyMiddleware({
   target: CAMPAIGN_SERVICE,
   changeOrigin: true,
+  timeout: 30000,
+  proxyTimeout: 30000,
   pathRewrite: { '^/api/campaigns': '/api/campaigns' },
   onProxyReq: (proxyReq, req) => {
     const user = (req as any).user;

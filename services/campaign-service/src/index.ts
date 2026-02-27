@@ -12,6 +12,7 @@ const pool = new Pool({
   connectionString:
     process.env.DATABASE_URL ||
     `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
+  connectionTimeoutMillis: 10000,
 });
 
 const rabbitmq = new RabbitMQClient(

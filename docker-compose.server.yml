@@ -87,6 +87,7 @@ services:
       - AUTOMATION_SERVICE_URL=http://automation-service:3009
       - ANALYTICS_SERVICE_URL=http://analytics-service:3010
       - TEAM_SERVICE_URL=http://team-service:3011
+      - CAMPAIGN_SERVICE_URL=http://campaign-service:3012
     depends_on:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
@@ -303,6 +304,25 @@ services:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      - default
+
+  campaign-service:
+    image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:campaign-service
+    container_name: getsale-crm-campaign-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3012
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
+      - MESSAGING_SERVICE_URL=http://messaging-service:3003
+      - PIPELINE_SERVICE_URL=http://pipeline-service:3008
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
