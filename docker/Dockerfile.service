@@ -14,10 +14,11 @@ COPY ${SERVICE_PATH}/package*.json ./${SERVICE_PATH}/
 # Install all dependencies including dev (tsc etc.) for build; NODE_ENV=production skips dev by default
 RUN npm install --include=dev
 
-# Build shared packages (types -> events -> utils)
+# Build shared packages (types -> events -> utils -> logger)
 RUN npm run build --workspace=shared/types && \
     npm run build --workspace=shared/events && \
-    npm run build --workspace=shared/utils
+    npm run build --workspace=shared/utils && \
+    npm run build --workspace=shared/logger
 
 # Copy service source and build
 COPY ${SERVICE_PATH}/ ./${SERVICE_PATH}/

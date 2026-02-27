@@ -708,7 +708,7 @@ export default function MessagingPage() {
           username: (r.username as string) ?? null,
           name: nameStr || null,
           unread_count: Number(r.unread_count) || 0,
-          last_message_at: (r.last_message_at && String(r.last_message_at)) || '',
+          last_message_at: (r.last_message_at != null ? String(r.last_message_at) : ''),
           last_message: (r.last_message as string) ?? null,
           conversation_id: (r.conversation_id as string) ?? null,
           lead_id: (r.lead_id as string) ?? null,
