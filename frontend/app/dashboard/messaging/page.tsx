@@ -3993,7 +3993,7 @@ export default function MessagingPage() {
               {t('common.cancel')}
             </Button>
             <Button
-              variant="destructive"
+              variant="danger"
               onClick={async () => {
                 if (!leadContext) return;
                 setMarkLostSubmitting(true);
