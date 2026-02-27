@@ -76,6 +76,8 @@ export enum EventType {
   LEAD_CREATED = 'lead.created',
   LEAD_STAGE_CHANGED = 'lead.stage.changed',
   LEAD_CONVERTED = 'lead.converted',
+  /** ЭТАП 7: лид создан из кампании (reply + auto_create_lead). Messaging подписывается и вызывает attachLead. */
+  LEAD_CREATED_FROM_CAMPAIGN = 'lead.created.from.campaign',
   /** ЭТАП 6: SLA — лид в стадии дольше max_days (cron публикует). */
   LEAD_SLA_BREACH = 'lead.sla.breach',
   /** ЭТАП 6: SLA — сделка в стадии дольше max_days (cron публикует). */
@@ -468,6 +470,21 @@ export interface LeadStageChangedEvent extends BaseEvent {
   };
 }
 
+/** ЭТАП 7: лид создан из кампании. Messaging подписывается и вызывает attachLead (idempotent). */
+export interface LeadCreatedFromCampaignEvent extends BaseEvent {
+  type: EventType.LEAD_CREATED_FROM_CAMPAIGN;
+  data: {
+    leadId: string;
+    contactId: string;
+    campaignId: string;
+    organizationId: string;
+    conversationId?: string;
+    pipelineId: string;
+    stageId: string;
+    repliedAt?: string;
+  };
+}
+
 /** ЭТАП 6: SLA breach — лид в стадии дольше max_days. breachDate = логический день в org TZ (YYYY-MM-DD). */
 export interface LeadSlaBreachEvent extends BaseEvent {
   type: EventType.LEAD_SLA_BREACH;
@@ -603,6 +620,7 @@ export type Event =
   | StageDeletedEvent
   | LeadCreatedEvent
   | LeadStageChangedEvent
+  | LeadCreatedFromCampaignEvent
   | LeadConvertedEvent
   | LeadSlaBreachEvent
   | DealSlaBreachEvent

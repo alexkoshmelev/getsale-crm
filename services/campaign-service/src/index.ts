@@ -146,11 +146,19 @@ function nextSendAtWithSchedule(from: Date, delayHours: number, schedule: Schedu
   return d;
 }
 
+function delayHoursFromStep(step: { delay_hours?: number; delay_minutes?: number } | null | undefined): number {
+  if (!step) return 24;
+  const h = step.delay_hours ?? 24;
+  const m = step.delay_minutes ?? 0;
+  return h + m / 60;
+}
+
 /** When outside schedule, retry in 15 min. */
 function nextSlotRetry(schedule: Schedule): Date {
   return new Date(Date.now() + 15 * 60 * 1000);
 }
 
+/** Возвращает leadId (при 201 — новый, при 409 — существующий), или null при ошибке. */
 async function ensureLeadInPipeline(
   organizationId: string,
   contactId: string,
@@ -158,7 +166,7 @@ async function ensureLeadInPipeline(
   stageId: string | null,
   systemUserId: string,
   responsibleId?: string | null
-): Promise<void> {
+): Promise<string | null> {
   try {
     const res = await fetch(`${PIPELINE_SERVICE_URL}/api/pipeline/leads`, {
       method: 'POST',
@@ -174,12 +182,18 @@ async function ensureLeadInPipeline(
         ...(responsibleId ? { responsibleId } : {}),
       }),
     });
-    if (res.status === 409) return; // already in pipeline
-    if (!res.ok) console.error('Pipeline create lead failed:', await res.text());
+    const body = (await res.json().catch(() => ({}))) as { id?: string; leadId?: string };
+    if (res.status === 409) return body.leadId ?? body.id ?? null;
+    if (res.ok && res.status === 201) return body.id ?? null;
+    console.error('Pipeline create lead failed:', await res.text());
+    return null;
   } catch (e) {
     console.error('Pipeline create lead error:', e);
+    return null;
   }
 }
+
+const CHANNEL_TELEGRAM = 'telegram';
 
 /** Parse CSV line (handles quoted fields). */
 function parseCsvLine(line: string): string[] {
@@ -211,10 +225,16 @@ function substituteVariables(
   contact: { first_name?: string | null; last_name?: string | null },
   company: { name?: string | null } | null
 ): string {
-  return content
-    .replace(/\{\{contact\.first_name\}\}/g, (contact?.first_name ?? '').trim() || '…')
-    .replace(/\{\{contact\.last_name\}\}/g, (contact?.last_name ?? '').trim() || '…')
-    .replace(/\{\{company\.name\}\}/g, (company?.name ?? '').trim() || '…');
+  const first = (contact?.first_name ?? '').trim();
+  const last = (contact?.last_name ?? '').trim();
+  const companyName = (company?.name ?? '').trim();
+  let out = content
+    .replace(/\{\{contact\.first_name\}\}/g, first)
+    .replace(/\{\{contact\.last_name\}\}/g, last)
+    .replace(/\{\{company\.name\}\}/g, companyName);
+  // Убираем лишние пробелы: несколько подряд — в один, обрезка по краям
+  out = out.replace(/[ \t]+/g, ' ').replace(/\n +/g, '\n').replace(/ +\n/g, '\n').trim();
+  return out;
 }
 
 (async () => {
@@ -239,11 +259,12 @@ function substituteVariables(
         }
         const contactId = event.data?.contactId;
         if (!contactId) return;
+        // Учитываем и активные, и завершённые кампании; участник может быть completed (все шаги отправлены), но ответ пришёл позже — помечаем replied и создаём лида при on_reply.
         const participants = await pool.query(
-          `SELECT cp.id, cp.campaign_id, cp.current_step, cp.next_send_at
+          `SELECT cp.id, cp.campaign_id, cp.current_step, cp.next_send_at, cp.bd_account_id, cp.channel_id
            FROM campaign_participants cp
            JOIN campaigns c ON c.id = cp.campaign_id
-           WHERE cp.contact_id = $1 AND c.status = 'active' AND cp.status IN ('pending', 'sent')`,
+           WHERE cp.contact_id = $1 AND c.status IN ('active', 'completed') AND cp.status IN ('pending', 'sent', 'completed')`,
           [contactId]
         );
         for (const p of participants.rows) {
@@ -269,8 +290,8 @@ function substituteVariables(
               [p.campaign_id]
             );
             const c = camp.rows[0];
-      const lcs = c?.lead_creation_settings as { trigger?: string; default_stage_id?: string; default_responsible_id?: string } | null;
-      if (c && lcs?.trigger === 'on_reply' && c.pipeline_id) {
+            const lcs = c?.lead_creation_settings as { trigger?: string; default_stage_id?: string; default_responsible_id?: string } | null;
+            if (c && lcs?.trigger === 'on_reply' && c.pipeline_id) {
               const userRow = await pool.query('SELECT id FROM users WHERE organization_id = $1 LIMIT 1', [c.organization_id]);
               const systemUserId = userRow.rows[0]?.id || '';
               let stageId = lcs.default_stage_id || null;
@@ -281,7 +302,54 @@ function substituteVariables(
                 );
                 stageId = stageRow.rows[0]?.id || null;
               }
-              if (stageId) await ensureLeadInPipeline(c.organization_id, contactId, c.pipeline_id, stageId, systemUserId, lcs?.default_responsible_id);
+              if (stageId) {
+                const leadId = await ensureLeadInPipeline(c.organization_id, contactId, c.pipeline_id, stageId, systemUserId, lcs?.default_responsible_id);
+                if (leadId) {
+                  let conversationId: string | null = null;
+                  const bdAccountId = p.bd_account_id ?? null;
+                  const channelId = p.channel_id ?? null;
+                  if (bdAccountId && channelId) {
+                    const conv = await pool.query(
+                      `SELECT id FROM conversations WHERE organization_id = $1 AND bd_account_id = $2 AND channel = $3 AND channel_id = $4 LIMIT 1`,
+                      [c.organization_id, bdAccountId, CHANNEL_TELEGRAM, channelId]
+                    );
+                    conversationId = conv.rows[0]?.id ?? null;
+                  }
+                  const repliedAt = new Date();
+                  try {
+                    await pool.query(
+                      `INSERT INTO lead_activity_log (id, lead_id, type, metadata, created_at) VALUES (gen_random_uuid(), $1, 'campaign_reply_received', $2, $3)`,
+                      [leadId, JSON.stringify({ campaign_id: p.campaign_id }), repliedAt]
+                    );
+                    await pool.query(
+                      `INSERT INTO lead_activity_log (id, lead_id, type, metadata, created_at) VALUES (gen_random_uuid(), $1, 'lead_created', $2, $3)`,
+                      [leadId, JSON.stringify({ source: 'campaign', campaign_id: p.campaign_id, conversation_id: conversationId }), repliedAt]
+                    );
+                  } catch (logErr) {
+                    console.error('Lead activity log insert error:', logErr);
+                  }
+                  try {
+                    await rabbitmq.publishEvent({
+                      id: randomUUID(),
+                      type: EventType.LEAD_CREATED_FROM_CAMPAIGN,
+                      timestamp: repliedAt,
+                      organizationId: c.organization_id,
+                      data: {
+                        leadId,
+                        contactId,
+                        campaignId: p.campaign_id,
+                        organizationId: c.organization_id,
+                        conversationId: conversationId ?? undefined,
+                        pipelineId: c.pipeline_id,
+                        stageId,
+                        repliedAt: repliedAt.toISOString(),
+                      },
+                    } as any);
+                  } catch (pubErr) {
+                    console.error('LEAD_CREATED_FROM_CAMPAIGN publish error:', pubErr);
+                  }
+                }
+              }
             }
           }
         }
@@ -349,57 +417,6 @@ async function addContactToDynamicCampaigns(
 
 async function processCampaignSends(): Promise<void> {
   try {
-    const due = await pool.query(
-      `SELECT cp.id as participant_id, cp.campaign_id, cp.contact_id, cp.bd_account_id, cp.channel_id, cp.current_step, cp.status as status, c.organization_id
-       FROM campaign_participants cp
-       JOIN campaigns c ON c.id = cp.campaign_id
-       WHERE c.status = $1 AND cp.status IN ('pending', 'sent') AND cp.next_send_at IS NOT NULL AND cp.next_send_at <= NOW()
-       ORDER BY cp.next_send_at
-       LIMIT 20`,
-      [CampaignStatus.ACTIVE]
-    );
-    if (due.rows.length === 0) return;
-
-    const campaignIds = [...new Set(due.rows.map((r: any) => r.campaign_id))];
-    const campaignsRes = await pool.query(
-      'SELECT id, schedule, target_audience, pipeline_id, lead_creation_settings FROM campaigns WHERE id = ANY($1)',
-      [campaignIds]
-    );
-    const campaignMeta = new Map<string, {
-      schedule: Schedule;
-      sendDelaySeconds: number;
-      pipeline_id: string | null;
-      lead_creation_settings: { trigger?: string; default_stage_id?: string; default_responsible_id?: string } | null;
-    }>();
-    for (const c of campaignsRes.rows) {
-      const schedule = (c.schedule as Schedule) ?? null;
-      const aud = (c.target_audience || {}) as { sendDelaySeconds?: number };
-      const lcs = c.lead_creation_settings as { trigger?: string; default_stage_id?: string; default_responsible_id?: string } | null;
-      campaignMeta.set(c.id, {
-        schedule,
-        sendDelaySeconds: Math.max(0, aud.sendDelaySeconds ?? 0),
-        pipeline_id: c.pipeline_id ?? null,
-        lead_creation_settings: lcs ?? null,
-      });
-    }
-
-    const stepsByCampaign = new Map<string, any[]>();
-    for (const row of due.rows) {
-      if (!stepsByCampaign.has(row.campaign_id)) {
-        const seq = await pool.query(
-          `SELECT cs.id, cs.order_index, cs.template_id, cs.delay_hours, cs.trigger_type, cs.conditions, ct.content
-           FROM campaign_sequences cs
-           JOIN campaign_templates ct ON ct.id = cs.template_id
-           WHERE cs.campaign_id = $1 ORDER BY cs.order_index`,
-          [row.campaign_id]
-        );
-        stepsByCampaign.set(row.campaign_id, seq.rows);
-      }
-    }
-
-    const userRow = await pool.query('SELECT id FROM users WHERE organization_id = $1 LIMIT 1', [due.rows[0].organization_id]);
-    const systemUserId = userRow.rows[0]?.id || '';
-
     const today = new Date().toISOString().slice(0, 10);
     const sentTodayByAccount = await pool.query(
       `SELECT cp.bd_account_id, COUNT(*)::int AS cnt
@@ -411,147 +428,220 @@ async function processCampaignSends(): Promise<void> {
       [today]
     );
     const sentMap = new Map((sentTodayByAccount.rows as { bd_account_id: string; cnt: number }[]).map((r) => [r.bd_account_id, r.cnt]));
+    const campaignMeta = new Map<string, {
+      schedule: Schedule;
+      sendDelaySeconds: number;
+      pipeline_id: string | null;
+      lead_creation_settings: { trigger?: string; default_stage_id?: string; default_responsible_id?: string } | null;
+    }>();
+    const stepsByCampaign = new Map<string, any[]>();
+    const processedCampaignIds = new Set<string>();
+    const BATCH = 20;
 
-    for (const row of due.rows) {
-      const meta = campaignMeta.get(row.campaign_id);
-      const schedule = meta?.schedule ?? null;
-      const sendDelaySeconds = meta?.sendDelaySeconds ?? 0;
-
-      if (!isWithinSchedule(schedule)) {
-        await pool.query(
-          `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
-          [nextSlotRetry(schedule), row.participant_id]
+    for (let i = 0; i < BATCH; i++) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const due = await client.query(
+          `SELECT cp.id as participant_id, cp.campaign_id, cp.contact_id, cp.bd_account_id, cp.channel_id, cp.current_step, cp.status as status, c.organization_id
+           FROM campaign_participants cp
+           JOIN campaigns c ON c.id = cp.campaign_id
+           WHERE c.status = $1 AND cp.status IN ('pending', 'sent') AND cp.next_send_at IS NOT NULL AND cp.next_send_at <= NOW()
+           ORDER BY cp.next_send_at
+           LIMIT 1
+           FOR UPDATE OF cp SKIP LOCKED`,
+          [CampaignStatus.ACTIVE]
         );
-        continue;
-      }
-
-      const sentToday = sentMap.get(row.bd_account_id) ?? 0;
-      if (sentToday >= CAMPAIGN_MAX_SENDS_PER_ACCOUNT_PER_DAY) {
-        const tomorrowStart = new Date(today + 'T00:00:00.000Z');
-        tomorrowStart.setUTCDate(tomorrowStart.getUTCDate() + 1);
-        await pool.query(
-          `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
-          [nextSendAtWithSchedule(tomorrowStart, 0, schedule), row.participant_id]
-        );
-        continue;
-      }
-
-      const steps = stepsByCampaign.get(row.campaign_id) || [];
-      const step = steps[row.current_step];
-      if (!step) {
-        await pool.query(
-          `UPDATE campaign_participants SET status = 'completed', next_send_at = NULL, updated_at = NOW() WHERE id = $1`,
-          [row.participant_id]
-        );
-        continue;
-      }
-
-      const contactRes = await pool.query(
-        `SELECT c.first_name, c.last_name, c.email, c.phone, c.telegram_id, co.name as company_name
-         FROM contacts c LEFT JOIN companies co ON co.id = c.company_id WHERE c.id = $1`,
-        [row.contact_id]
-      );
-      const contact = contactRes.rows[0] || {};
-      const company = contact.company_name != null ? { name: contact.company_name } : null;
-
-      const conditions = (step as { conditions?: StepConditions }).conditions;
-      const shouldSend = await evaluateStepConditions(
-        row.organization_id,
-        row.contact_id,
-        conditions,
-        contact,
-        row.status
-      );
-      if (!shouldSend) {
-        const nextStep = steps[row.current_step + 1];
-        const now = new Date();
-        if (nextStep) {
-          const nextTriggerType = (nextStep as { trigger_type?: string }).trigger_type || 'delay';
-          const nextSendAt =
-            nextTriggerType === 'after_reply'
-              ? null
-              : nextSendAtWithSchedule(now, (nextStep as { delay_hours?: number }).delay_hours || 24, schedule);
-          await pool.query(
-            `UPDATE campaign_participants SET current_step = $1, status = 'sent', next_send_at = $2, updated_at = NOW() WHERE id = $3`,
-            [row.current_step + 1, nextSendAt, row.participant_id]
-          );
-        } else {
-          await pool.query(
-            `UPDATE campaign_participants SET current_step = $1, status = 'completed', next_send_at = NULL, updated_at = NOW() WHERE id = $2`,
-            [row.current_step + 1, row.participant_id]
-          );
+        if (due.rows.length === 0) {
+          await client.query('COMMIT');
+          break;
         }
-        continue;
-      }
+        const row = due.rows[0] as any;
+        processedCampaignIds.add(row.campaign_id);
 
-      const content = substituteVariables(step.content || '', contact, company);
-
-      const res = await fetch(`${MESSAGING_SERVICE_URL}/api/messaging/send`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-User-Id': systemUserId,
-          'X-Organization-Id': row.organization_id,
-        },
-        body: JSON.stringify({
-          contactId: row.contact_id,
-          channel: 'telegram',
-          channelId: row.channel_id,
-          content,
-          bdAccountId: row.bd_account_id,
-        }),
-      });
-
-      if (res.ok) {
-        const nextStep = steps[row.current_step + 1];
-        const now = new Date();
-        if (nextStep) {
-          const triggerType = (step as { trigger_type?: string }).trigger_type || 'delay';
-          const nextSendAt =
-            triggerType === 'after_reply'
-              ? null
-              : nextSendAtWithSchedule(now, step.delay_hours || 24, schedule);
-          await pool.query(
-            `UPDATE campaign_participants SET current_step = $1, status = 'sent', next_send_at = $2, updated_at = NOW() WHERE id = $3`,
-            [row.current_step + 1, nextSendAt, row.participant_id]
+        if (!campaignMeta.has(row.campaign_id)) {
+          const campaignsRes = await pool.query(
+            'SELECT id, schedule, target_audience, pipeline_id, lead_creation_settings FROM campaigns WHERE id = $1',
+            [row.campaign_id]
           );
-        } else {
-          await pool.query(
-            `UPDATE campaign_participants SET current_step = $1, status = 'completed', next_send_at = NULL, updated_at = NOW() WHERE id = $2`,
-            [row.current_step + 1, row.participant_id]
-          );
-        }
-        const msgJson = await res.json().catch(() => ({}));
-        await pool.query(
-          `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status) VALUES ($1, $2, $3, NOW(), 'sent')`,
-          [row.participant_id, row.current_step, (msgJson as any).id || null]
-        );
-        sentMap.set(row.bd_account_id, (sentMap.get(row.bd_account_id) ?? 0) + 1);
-
-        const lcs = meta?.lead_creation_settings;
-        const pipelineId = meta?.pipeline_id;
-        if (row.current_step === 0 && lcs?.trigger === 'on_first_send' && pipelineId) {
-          let stageId = lcs.default_stage_id || null;
-          if (!stageId) {
-            const stageRow = await pool.query(
-              'SELECT id FROM stages WHERE pipeline_id = $1 AND organization_id = $2 ORDER BY order_index ASC LIMIT 1',
-              [pipelineId, row.organization_id]
-            );
-            stageId = stageRow.rows[0]?.id || null;
+          const c = campaignsRes.rows[0];
+          if (c) {
+            const schedule = (c.schedule as Schedule) ?? null;
+            const aud = (c.target_audience || {}) as { sendDelaySeconds?: number };
+            const lcs = c.lead_creation_settings as { trigger?: string; default_stage_id?: string; default_responsible_id?: string } | null;
+            campaignMeta.set(c.id, {
+              schedule,
+              sendDelaySeconds: Math.max(0, aud.sendDelaySeconds ?? 0),
+              pipeline_id: c.pipeline_id ?? null,
+              lead_creation_settings: lcs ?? null,
+            });
           }
-          if (stageId) await ensureLeadInPipeline(row.organization_id, row.contact_id, pipelineId, stageId, systemUserId, lcs?.default_responsible_id);
+        }
+        if (!stepsByCampaign.has(row.campaign_id)) {
+          const seq = await pool.query(
+            `SELECT cs.id, cs.order_index, cs.template_id, cs.delay_hours, cs.delay_minutes, cs.trigger_type, cs.conditions, ct.content
+             FROM campaign_sequences cs
+             JOIN campaign_templates ct ON ct.id = cs.template_id
+             WHERE cs.campaign_id = $1 ORDER BY cs.order_index`,
+            [row.campaign_id]
+          );
+          stepsByCampaign.set(row.campaign_id, seq.rows);
         }
 
-        if (sendDelaySeconds > 0) await new Promise((r) => setTimeout(r, sendDelaySeconds * 1000));
-      } else {
-        await pool.query(
-          `UPDATE campaign_participants SET status = 'failed', metadata = $1, updated_at = NOW() WHERE id = $2`,
-          [JSON.stringify({ lastError: await res.text() }), row.participant_id]
+        const meta = campaignMeta.get(row.campaign_id);
+        const schedule = meta?.schedule ?? null;
+        const sendDelaySeconds = meta?.sendDelaySeconds ?? 0;
+
+        if (!isWithinSchedule(schedule)) {
+          await client.query(
+            `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
+            [nextSlotRetry(schedule), row.participant_id]
+          );
+          await client.query('COMMIT');
+          continue;
+        }
+
+        const sentToday = sentMap.get(row.bd_account_id) ?? 0;
+        if (sentToday >= CAMPAIGN_MAX_SENDS_PER_ACCOUNT_PER_DAY) {
+          const tomorrowStart = new Date(today + 'T00:00:00.000Z');
+          tomorrowStart.setUTCDate(tomorrowStart.getUTCDate() + 1);
+          await client.query(
+            `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
+            [nextSendAtWithSchedule(tomorrowStart, 0, schedule), row.participant_id]
+          );
+          await client.query('COMMIT');
+          continue;
+        }
+
+        const steps = stepsByCampaign.get(row.campaign_id) || [];
+        const step = steps[row.current_step];
+        if (!step) {
+          await client.query(
+            `UPDATE campaign_participants SET status = 'completed', next_send_at = NULL, updated_at = NOW() WHERE id = $1`,
+            [row.participant_id]
+          );
+          await client.query('COMMIT');
+          continue;
+        }
+
+        const contactRes = await pool.query(
+          `SELECT c.first_name, c.last_name, c.email, c.phone, c.telegram_id, co.name as company_name
+           FROM contacts c LEFT JOIN companies co ON co.id = c.company_id WHERE c.id = $1`,
+          [row.contact_id]
         );
+        const contact = contactRes.rows[0] || {};
+        const company = contact.company_name != null ? { name: contact.company_name } : null;
+
+        const conditions = (step as { conditions?: StepConditions }).conditions;
+        const shouldSend = await evaluateStepConditions(
+          row.organization_id,
+          row.contact_id,
+          conditions,
+          contact,
+          row.status
+        );
+        if (!shouldSend) {
+          const nextStep = steps[row.current_step + 1];
+          const now = new Date();
+          if (nextStep) {
+            const nextTriggerType = (nextStep as { trigger_type?: string }).trigger_type || 'delay';
+            const nextSendAt =
+              nextTriggerType === 'after_reply'
+                ? null
+                : nextSendAtWithSchedule(now, delayHoursFromStep(nextStep), schedule);
+            await client.query(
+              `UPDATE campaign_participants SET current_step = $1, status = 'sent', next_send_at = $2, updated_at = NOW() WHERE id = $3`,
+              [row.current_step + 1, nextSendAt, row.participant_id]
+            );
+          } else {
+            await client.query(
+              `UPDATE campaign_participants SET current_step = $1, status = 'completed', next_send_at = NULL, updated_at = NOW() WHERE id = $2`,
+              [row.current_step + 1, row.participant_id]
+            );
+          }
+          await client.query('COMMIT');
+          continue;
+        }
+
+        const userRow = await pool.query('SELECT id FROM users WHERE organization_id = $1 LIMIT 1', [row.organization_id]);
+        const systemUserId = userRow.rows[0]?.id || '';
+        const content = substituteVariables(step.content || '', contact, company);
+
+        const res = await fetch(`${MESSAGING_SERVICE_URL}/api/messaging/send`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-User-Id': systemUserId,
+            'X-Organization-Id': row.organization_id,
+          },
+          body: JSON.stringify({
+            contactId: row.contact_id,
+            channel: 'telegram',
+            channelId: row.channel_id,
+            content,
+            bdAccountId: row.bd_account_id,
+          }),
+        });
+
+        if (res.ok) {
+          const nextStep = steps[row.current_step + 1];
+          const now = new Date();
+          if (nextStep) {
+            const triggerType = (step as { trigger_type?: string }).trigger_type || 'delay';
+            const nextSendAt =
+              triggerType === 'after_reply'
+                ? null
+                : nextSendAtWithSchedule(now, delayHoursFromStep(step), schedule);
+            await client.query(
+              `UPDATE campaign_participants SET current_step = $1, status = 'sent', next_send_at = $2, updated_at = NOW() WHERE id = $3`,
+              [row.current_step + 1, nextSendAt, row.participant_id]
+            );
+          } else {
+            await client.query(
+              `UPDATE campaign_participants SET current_step = $1, status = 'completed', next_send_at = NULL, updated_at = NOW() WHERE id = $2`,
+              [row.current_step + 1, row.participant_id]
+            );
+          }
+          const msgJson = await res.json().catch(() => ({}));
+          await client.query(
+            `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status) VALUES ($1, $2, $3, NOW(), 'sent')`,
+            [row.participant_id, row.current_step, (msgJson as any).id || null]
+          );
+          await client.query('COMMIT');
+          sentMap.set(row.bd_account_id, (sentMap.get(row.bd_account_id) ?? 0) + 1);
+
+          const lcs = meta?.lead_creation_settings;
+          const pipelineId = meta?.pipeline_id;
+          if (row.current_step === 0 && lcs?.trigger === 'on_first_send' && pipelineId) {
+            let stageId = lcs.default_stage_id || null;
+            if (!stageId) {
+              const stageRow = await pool.query(
+                'SELECT id FROM stages WHERE pipeline_id = $1 AND organization_id = $2 ORDER BY order_index ASC LIMIT 1',
+                [pipelineId, row.organization_id]
+              );
+              stageId = stageRow.rows[0]?.id || null;
+            }
+            if (stageId) await ensureLeadInPipeline(row.organization_id, row.contact_id, pipelineId, stageId, systemUserId, lcs?.default_responsible_id);
+          }
+
+          if (sendDelaySeconds > 0) await new Promise((r) => setTimeout(r, sendDelaySeconds * 1000));
+        } else {
+          await client.query(
+            `UPDATE campaign_participants SET status = 'failed', metadata = $1, updated_at = NOW() WHERE id = $2`,
+            [JSON.stringify({ lastError: await res.text() }), row.participant_id]
+          );
+          await client.query('COMMIT');
+        }
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        client.release();
       }
     }
 
-    if (campaignIds.length > 0) {
+    if (processedCampaignIds.size > 0) {
+      const campaignIds = Array.from(processedCampaignIds);
       const completed = await pool.query(
         `SELECT c.id FROM campaigns c
          WHERE c.id = ANY($1::uuid[]) AND c.status = $2
@@ -591,6 +681,7 @@ app.get('/health', (req, res) => {
 
 // --- Campaigns ---
 
+// PHASE 2.5 §11г — список кампаний с мини-KPI в строке (total_sent, total_read, total_replied, total_converted_to_shared_chat).
 app.get('/api/campaigns', async (req, res) => {
   try {
     const user = getUser(req);
@@ -603,7 +694,56 @@ app.get('/api/campaigns', async (req, res) => {
     }
     query += ' ORDER BY created_at DESC';
     const result = await pool.query(query, params);
-    res.json(result.rows);
+    const campaigns = result.rows as { id: string }[];
+    if (campaigns.length === 0) {
+      return res.json([]);
+    }
+    const ids = campaigns.map((c) => c.id);
+    const [sentRes, repliedRes, sharedRes, readRes, wonRes, revenueRes] = await Promise.all([
+      pool.query(
+        `SELECT cp.campaign_id, COUNT(DISTINCT cp.id)::int AS cnt
+         FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+         WHERE cp.campaign_id = ANY($1::uuid[]) GROUP BY cp.campaign_id`,
+        [ids]
+      ),
+      pool.query(
+        `SELECT campaign_id, COUNT(*)::int AS cnt FROM campaign_participants WHERE campaign_id = ANY($1::uuid[]) AND status = 'replied' GROUP BY campaign_id`,
+        [ids]
+      ),
+      pool.query(
+        `SELECT campaign_id, COUNT(*)::int AS cnt FROM conversations WHERE campaign_id = ANY($1::uuid[]) AND shared_chat_created_at IS NOT NULL GROUP BY campaign_id`,
+        [ids]
+      ),
+      pool.query(
+        `SELECT first_sends.campaign_id, COUNT(*)::int AS cnt FROM (
+           SELECT DISTINCT ON (cp.id) cp.campaign_id, cs.message_id AS mid
+           FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+           WHERE cp.campaign_id = ANY($1::uuid[])
+           ORDER BY cp.id, cs.sent_at
+         ) first_sends
+         JOIN messages m ON m.id = first_sends.mid AND m.status = 'read'
+         GROUP BY first_sends.campaign_id`,
+        [ids]
+      ),
+      pool.query(`SELECT campaign_id, COUNT(*)::int AS cnt FROM conversations WHERE campaign_id = ANY($1::uuid[]) AND won_at IS NOT NULL GROUP BY campaign_id`, [ids]),
+      pool.query(`SELECT campaign_id, COALESCE(SUM(revenue_amount), 0)::numeric AS total FROM conversations WHERE campaign_id = ANY($1::uuid[]) AND won_at IS NOT NULL GROUP BY campaign_id`, [ids]),
+    ]);
+    const sentMap = new Map((sentRes.rows as { campaign_id: string; cnt: number }[]).map((r) => [r.campaign_id, r.cnt]));
+    const repliedMap = new Map((repliedRes.rows as { campaign_id: string; cnt: number }[]).map((r) => [r.campaign_id, r.cnt]));
+    const sharedMap = new Map((sharedRes.rows as { campaign_id: string; cnt: number }[]).map((r) => [r.campaign_id, r.cnt]));
+    const readMap = new Map((readRes.rows as { campaign_id: string; cnt: number }[]).map((r) => [r.campaign_id, r.cnt]));
+    const wonMap = new Map((wonRes.rows as { campaign_id: string; cnt: number }[]).map((r) => [r.campaign_id, r.cnt]));
+    const revenueMap = new Map((revenueRes.rows as { campaign_id: string; total: string }[]).map((r) => [r.campaign_id, Number(r.total)]));
+    const withKpi = campaigns.map((c) => ({
+      ...c,
+      total_sent: sentMap.get(c.id) ?? 0,
+      total_read: readMap.get(c.id) ?? 0,
+      total_replied: repliedMap.get(c.id) ?? 0,
+      total_converted_to_shared_chat: sharedMap.get(c.id) ?? 0,
+      total_won: wonMap.get(c.id) ?? 0,
+      total_revenue: revenueMap.get(c.id) ?? 0,
+    }));
+    res.json(withKpi);
   } catch (error) {
     console.error('Error fetching campaigns:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -732,7 +872,7 @@ app.get('/api/campaigns/contacts-for-picker', async (req, res) => {
     const { limit = 500, outreachStatus, search } = req.query;
     const limitNum = Math.min(1000, Math.max(1, parseInt(String(limit), 10)));
     let query = `
-      SELECT c.id, c.first_name, c.last_name, c.telegram_id, c.display_name,
+      SELECT c.id, c.first_name, c.last_name, c.display_name, c.username, c.telegram_id, c.email, c.phone,
         CASE WHEN EXISTS (
           SELECT 1 FROM campaign_participants cp
           JOIN campaigns c2 ON c2.id = cp.campaign_id
@@ -750,7 +890,7 @@ app.get('/api/campaigns/contacts-for-picker', async (req, res) => {
     }
     if (search && typeof search === 'string' && search.trim()) {
       const term = `%${search.trim().replace(/%/g, '\\%')}%`;
-      query += ` AND (c.first_name ILIKE $${idx} OR c.last_name ILIKE $${idx} OR c.display_name ILIKE $${idx} OR c.telegram_id ILIKE $${idx})`;
+      query += ` AND (c.first_name ILIKE $${idx} OR c.last_name ILIKE $${idx} OR c.display_name ILIKE $${idx} OR c.username ILIKE $${idx} OR c.telegram_id ILIKE $${idx} OR c.email ILIKE $${idx} OR c.phone ILIKE $${idx})`;
       params.push(term);
       idx++;
     }
@@ -776,7 +916,10 @@ app.get('/api/campaigns/:id', async (req, res) => {
       return res.status(404).json({ error: 'Campaign not found' });
     }
     const campaign = campaignRes.rows[0];
-    const [templatesRes, sequencesRes] = await Promise.all([
+    const aud = (campaign.target_audience || {}) as { contactIds?: string[] };
+    const contactIds = Array.isArray(aud.contactIds) ? aud.contactIds : [];
+    const isDraftOrPaused = campaign.status === 'draft' || campaign.status === 'paused';
+    const [templatesRes, sequencesRes, selectedContactsRes] = await Promise.all([
       pool.query(
         'SELECT * FROM campaign_templates WHERE campaign_id = $1 ORDER BY created_at',
         [id]
@@ -785,11 +928,19 @@ app.get('/api/campaigns/:id', async (req, res) => {
         'SELECT cs.*, ct.name as template_name, ct.channel, ct.content FROM campaign_sequences cs JOIN campaign_templates ct ON ct.id = cs.template_id WHERE cs.campaign_id = $1 ORDER BY cs.order_index',
         [id]
       ),
+      isDraftOrPaused && contactIds.length > 0
+        ? pool.query(
+            'SELECT id, first_name, last_name, display_name, username, telegram_id, email, phone FROM contacts WHERE id = ANY($1) AND organization_id = $2',
+            [contactIds, user.organizationId]
+          )
+        : Promise.resolve({ rows: [] }),
     ]);
+    const selected_contacts = selectedContactsRes?.rows ?? [];
     res.json({
       ...campaign,
       templates: templatesRes.rows,
       sequences: sequencesRes.rows,
+      ...(selected_contacts.length > 0 ? { selected_contacts } : {}),
     });
   } catch (error) {
     console.error('Error fetching campaign:', error);
@@ -1317,7 +1468,7 @@ app.post('/api/campaigns/:id/sequences', async (req, res) => {
   try {
     const user = getUser(req);
     const { id } = req.params;
-    const { orderIndex, templateId, delayHours, conditions, triggerType } = req.body;
+    const { orderIndex, templateId, delayHours, delayMinutes, conditions, triggerType } = req.body;
     const campaign = await pool.query(
       'SELECT id FROM campaigns WHERE id = $1 AND organization_id = $2',
       [id, user.organizationId]
@@ -1335,14 +1486,15 @@ app.post('/api/campaigns/:id/sequences', async (req, res) => {
     const seqId = randomUUID();
     const trigger = triggerType === 'after_reply' ? 'after_reply' : 'delay';
     await pool.query(
-      `INSERT INTO campaign_sequences (id, campaign_id, order_index, template_id, delay_hours, conditions, trigger_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      `INSERT INTO campaign_sequences (id, campaign_id, order_index, template_id, delay_hours, delay_minutes, conditions, trigger_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         seqId,
         id,
         typeof orderIndex === 'number' ? orderIndex : 0,
         templateId,
         typeof delayHours === 'number' ? Math.max(0, delayHours) : 24,
+        typeof delayMinutes === 'number' ? Math.max(0, Math.min(59, delayMinutes)) : 0,
         JSON.stringify(conditions || {}),
         trigger,
       ]
@@ -1362,7 +1514,7 @@ app.patch('/api/campaigns/:campaignId/sequences/:stepId', async (req, res) => {
   try {
     const user = getUser(req);
     const { campaignId, stepId } = req.params;
-    const { orderIndex, templateId, delayHours, conditions, triggerType } = req.body;
+    const { orderIndex, templateId, delayHours, delayMinutes, conditions, triggerType } = req.body;
     const campaign = await pool.query(
       'SELECT id FROM campaigns WHERE id = $1 AND organization_id = $2',
       [campaignId, user.organizationId]
@@ -1384,6 +1536,10 @@ app.patch('/api/campaigns/:campaignId/sequences/:stepId', async (req, res) => {
     if (typeof delayHours === 'number') {
       params.push(Math.max(0, delayHours));
       updates.push(`delay_hours = $${idx++}`);
+    }
+    if (typeof delayMinutes === 'number') {
+      params.push(Math.max(0, Math.min(59, delayMinutes)));
+      updates.push(`delay_minutes = $${idx++}`);
     }
     if (conditions !== undefined) {
       params.push(JSON.stringify(conditions || {}));
@@ -1462,12 +1618,125 @@ app.get('/api/campaigns/:id/stats', async (req, res) => {
       `SELECT status, COUNT(*)::int AS cnt FROM campaign_participants WHERE campaign_id = $1 GROUP BY status`,
       [id]
     );
+    const totalSendsRes = await pool.query(
+      `SELECT COUNT(*)::int AS cnt FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id WHERE cp.campaign_id = $1`,
+      [id]
+    );
+    const contactsSentRes = await pool.query(
+      `SELECT COUNT(DISTINCT cp.id)::int AS cnt
+       FROM campaign_sends cs
+       JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+       WHERE cp.campaign_id = $1`,
+      [id]
+    );
+    const dateRangeRes = await pool.query(
+      `SELECT MIN(cs.sent_at) AS first_send_at, MAX(cs.sent_at) AS last_send_at
+       FROM campaign_sends cs
+       JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+       WHERE cp.campaign_id = $1`,
+      [id]
+    );
+    // PHASE 2.5 §11г — total_read: участники, у которых первое сообщение кампании прочитано (message.status = 'read')
+    const totalReadRes = await pool.query(
+      `SELECT COUNT(*)::int AS cnt FROM (
+         SELECT DISTINCT ON (cp.id) cs.message_id AS mid
+         FROM campaign_sends cs
+         JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+         WHERE cp.campaign_id = $1
+         ORDER BY cp.id, cs.sent_at
+       ) first_sends
+       JOIN messages m ON m.id = first_sends.mid AND m.status = 'read'`,
+      [id]
+    );
+    // total_converted_to_shared_chat: conversations с campaign_id и shared_chat_created_at IS NOT NULL
+    const totalSharedRes = await pool.query(
+      `SELECT COUNT(*)::int AS cnt FROM conversations WHERE campaign_id = $1 AND shared_chat_created_at IS NOT NULL`,
+      [id]
+    );
+    // PHASE 2.6 — avg_time_to_shared: среднее время от первой отправки до создания общего чата (часы)
+    const avgTimeToSharedRes = await pool.query(
+      `SELECT AVG(EXTRACT(EPOCH FROM (c.shared_chat_created_at - fs.first_sent_at)) / 3600.0) AS avg_hours
+       FROM conversations c
+       JOIN LATERAL (
+         SELECT MIN(cs.sent_at) AS first_sent_at
+         FROM campaign_sends cs
+         JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+         WHERE cp.campaign_id = c.campaign_id AND cp.bd_account_id = c.bd_account_id AND cp.channel_id = c.channel_id
+       ) fs ON fs.first_sent_at IS NOT NULL
+       WHERE c.campaign_id = $1 AND c.shared_chat_created_at IS NOT NULL`,
+      [id]
+    );
+    // PHASE 2.7 — Won + Revenue
+    const [totalWonRes, totalLostRes, totalRevenueRes, avgTimeToWonRes] = await Promise.all([
+      pool.query(`SELECT COUNT(*)::int AS cnt FROM conversations WHERE campaign_id = $1 AND won_at IS NOT NULL`, [id]),
+      pool.query(`SELECT COUNT(*)::int AS cnt FROM conversations WHERE campaign_id = $1 AND lost_at IS NOT NULL`, [id]),
+      pool.query(`SELECT COALESCE(SUM(revenue_amount), 0)::numeric AS total FROM conversations WHERE campaign_id = $1 AND won_at IS NOT NULL`, [id]),
+      pool.query(
+        `SELECT AVG(EXTRACT(EPOCH FROM (c.won_at - fs.first_sent_at)) / 3600.0) AS avg_hours
+         FROM conversations c
+         JOIN LATERAL (
+           SELECT MIN(cs.sent_at) AS first_sent_at
+           FROM campaign_sends cs
+           JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+           WHERE cp.campaign_id = c.campaign_id AND cp.bd_account_id = c.bd_account_id AND cp.channel_id = c.channel_id
+         ) fs ON fs.first_sent_at IS NOT NULL
+         WHERE c.campaign_id = $1 AND c.won_at IS NOT NULL`,
+        [id]
+      ),
+    ]);
     const total = totalRes.rows[0]?.total ?? 0;
     const byStatus: Record<string, number> = {};
     for (const r of byStatusRes.rows as { status: string; cnt: number }[]) {
       byStatus[r.status] = r.cnt;
     }
-    res.json({ total, byStatus });
+    const totalSends = totalSendsRes.rows[0]?.cnt ?? 0;
+    const contactsSent = contactsSentRes.rows[0]?.cnt ?? 0;
+    const totalSent = contactsSent; // PHASE 2.5: distinct conversations/participants sent to
+    const totalRead = totalReadRes.rows[0]?.cnt ?? 0;
+    const replied = byStatus.replied ?? 0;
+    const totalReplied = replied;
+    const totalConvertedToSharedChat = totalSharedRes.rows[0]?.cnt ?? 0;
+    const conversionRate = total > 0 ? Math.round((replied / total) * 100) : 0;
+    const readRate = totalSent > 0 ? Math.round((totalRead / totalSent) * 1000) / 10 : 0;
+    const replyRate = totalRead > 0 ? Math.round((totalReplied / totalRead) * 1000) / 10 : 0;
+    const sharedConversionRate = totalReplied > 0 ? Math.round((totalConvertedToSharedChat / totalReplied) * 1000) / 10 : 0;
+    const avgHoursRaw = avgTimeToSharedRes.rows[0] as { avg_hours: string | null } | undefined;
+    const avgTimeToSharedHours = avgHoursRaw?.avg_hours != null ? Math.round(parseFloat(avgHoursRaw.avg_hours) * 10) / 10 : null;
+    const totalWon = (totalWonRes.rows[0] as { cnt: number } | undefined)?.cnt ?? 0;
+    const totalLost = (totalLostRes.rows[0] as { cnt: number } | undefined)?.cnt ?? 0;
+    const totalRevenue = Number((totalRevenueRes.rows[0] as { total: string } | undefined)?.total ?? 0);
+    const avgTimeToWonRaw = avgTimeToWonRes.rows[0] as { avg_hours: string | null } | undefined;
+    const avgTimeToWonHours = avgTimeToWonRaw?.avg_hours != null ? Math.round(parseFloat(avgTimeToWonRaw.avg_hours) * 10) / 10 : null;
+    const winRate = totalReplied > 0 ? Math.round((totalWon / totalReplied) * 1000) / 10 : 0;
+    const revenuePerSent = totalSent > 0 ? Math.round((totalRevenue / totalSent) * 100) / 100 : 0;
+    const revenuePerReply = totalReplied > 0 ? Math.round((totalRevenue / totalReplied) * 100) / 100 : 0;
+    const avgRevenuePerWon = totalWon > 0 ? Math.round((totalRevenue / totalWon) * 100) / 100 : 0;
+    const dr = dateRangeRes.rows[0] as { first_send_at: string | null; last_send_at: string | null };
+    res.json({
+      total,
+      byStatus,
+      totalSends,
+      contactsSent,
+      conversionRate,
+      firstSendAt: dr?.first_send_at ?? null,
+      lastSendAt: dr?.last_send_at ?? null,
+      total_sent: totalSent,
+      total_read: totalRead,
+      total_replied: totalReplied,
+      total_converted_to_shared_chat: totalConvertedToSharedChat,
+      read_rate: readRate,
+      reply_rate: replyRate,
+      conversion_rate: sharedConversionRate,
+      avg_time_to_shared_hours: avgTimeToSharedHours,
+      total_won: totalWon,
+      total_lost: totalLost,
+      total_revenue: totalRevenue,
+      win_rate: winRate,
+      revenue_per_sent: revenuePerSent,
+      revenue_per_reply: revenuePerReply,
+      avg_revenue_per_won: avgRevenuePerWon,
+      avg_time_to_won_hours: avgTimeToWonHours,
+    });
   } catch (error) {
     console.error('Error fetching campaign stats:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -1487,8 +1756,9 @@ app.get('/api/campaigns/:id/analytics', async (req, res) => {
       return res.status(404).json({ error: 'Campaign not found' });
     }
     const daysNum = Math.min(90, Math.max(1, parseInt(String(days), 10)));
+    // По дням: число уникальных контактов (участников), которым отправили хотя бы одно сообщение в этот день (не число сообщений).
     const sendsByDay = await pool.query(
-      `SELECT cs.sent_at::date AS day, COUNT(*)::int AS sends
+      `SELECT cs.sent_at::date AS day, COUNT(DISTINCT cp.id)::int AS sends
        FROM campaign_sends cs
        JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
        WHERE cp.campaign_id = $1 AND cs.sent_at >= NOW() - ($2::int || ' days')::interval
@@ -1514,11 +1784,12 @@ app.get('/api/campaigns/:id/analytics', async (req, res) => {
   }
 });
 
+// PHASE 2.5 §11г — участники с полями для воронки: contact, status_phase (sent|read|replied|shared), stage, sent_at, replied_at, conversation_id. Фильтр: all | replied | not_replied | shared.
 app.get('/api/campaigns/:id/participants', async (req, res) => {
   try {
     const user = getUser(req);
     const { id } = req.params;
-    const { page = 1, limit = 50, status } = req.query;
+    const { page = 1, limit = 50, status, filter } = req.query;
     const campaign = await pool.query(
       'SELECT id FROM campaigns WHERE id = $1 AND organization_id = $2',
       [id, user.organizationId]
@@ -1530,24 +1801,68 @@ app.get('/api/campaigns/:id/participants', async (req, res) => {
     const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10)));
     const offset = (pageNum - 1) * limitNum;
     let whereStatus = '';
+    let whereFilter = '';
     const params: any[] = [id];
-    if (status && typeof status === 'string') {
+    const statusParam = status && typeof status === 'string' ? status : (filter && typeof filter === 'string' ? filter : null);
+    if (statusParam === 'replied') {
       whereStatus = ' AND cp.status = $2';
-      params.push(status);
+      params.push('replied');
+    } else if (statusParam === 'not_replied') {
+      whereStatus = " AND (cp.status IS NULL OR cp.status != 'replied')";
+    } else if (statusParam === 'shared') {
+      whereFilter = ' AND conv.shared_chat_created_at IS NOT NULL';
     }
     const limitIdx = params.length + 1;
     const offsetIdx = params.length + 2;
     params.push(limitNum, offset);
     const result = await pool.query(
-      `SELECT cp.*, c.first_name, c.last_name, c.telegram_id
+      `SELECT
+         cp.id AS participant_id,
+         cp.contact_id,
+         cp.bd_account_id,
+         cp.channel_id,
+         cp.status AS participant_status,
+         cp.created_at AS participant_created_at,
+         cp.updated_at AS participant_updated_at,
+         COALESCE(NULLIF(TRIM(c.display_name), ''), NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), ''), c.username, c.telegram_id::text) AS contact_name,
+         conv.id AS conversation_id,
+         conv.shared_chat_created_at,
+         st.name AS pipeline_stage_name,
+         fs.first_sent_at AS sent_at,
+         CASE WHEN cp.status = 'replied' THEN cp.updated_at ELSE NULL END AS replied_at,
+         (m_first.status = 'read') AS first_message_read
        FROM campaign_participants cp
        JOIN contacts c ON c.id = cp.contact_id
-       WHERE cp.campaign_id = $1 ${whereStatus}
-       ORDER BY cp.created_at
+       LEFT JOIN LATERAL (
+         SELECT cs.sent_at AS first_sent_at, cs.message_id AS first_message_id
+         FROM campaign_sends cs WHERE cs.campaign_participant_id = cp.id ORDER BY cs.sent_at LIMIT 1
+       ) fs ON true
+       LEFT JOIN messages m_first ON m_first.id = fs.first_message_id
+       LEFT JOIN conversations conv ON conv.campaign_id = cp.campaign_id AND conv.bd_account_id = cp.bd_account_id AND conv.channel = 'telegram' AND conv.channel_id = cp.channel_id
+       LEFT JOIN leads l ON l.id = conv.lead_id
+       LEFT JOIN stages st ON st.id = l.stage_id
+       WHERE cp.campaign_id = $1 ${whereStatus} ${whereFilter}
+       ORDER BY fs.first_sent_at DESC NULLS LAST, cp.created_at
        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       params
     );
-    res.json(result.rows);
+    const rows = (result.rows as any[]).map((r) => {
+      const phase = r.shared_chat_created_at ? 'shared' : r.participant_status === 'replied' ? 'replied' : r.first_message_read ? 'read' : 'sent';
+      return {
+        participant_id: r.participant_id,
+        contact_id: r.contact_id,
+        contact_name: r.contact_name ?? '',
+        conversation_id: r.conversation_id,
+        bd_account_id: r.bd_account_id ?? null,
+        channel_id: r.channel_id ?? null,
+        status_phase: phase,
+        pipeline_stage_name: r.pipeline_stage_name ?? null,
+        sent_at: r.sent_at instanceof Date ? r.sent_at.toISOString() : r.sent_at,
+        replied_at: r.replied_at instanceof Date ? r.replied_at.toISOString() : r.replied_at,
+        shared_chat_created_at: r.shared_chat_created_at instanceof Date ? r.shared_chat_created_at.toISOString() : r.shared_chat_created_at,
+      };
+    });
+    res.json(rows);
   } catch (error) {
     console.error('Error fetching participants:', error);
     res.status(500).json({ error: 'Internal server error' });

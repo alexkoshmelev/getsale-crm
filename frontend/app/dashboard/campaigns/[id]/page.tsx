@@ -17,6 +17,8 @@ import {
   MessageCircle,
   UserX,
   Clock,
+  Calendar,
+  Percent,
 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import {
@@ -26,6 +28,7 @@ import {
   startCampaign,
   pauseCampaign,
   updateCampaign,
+  enrichContactsFromTelegram,
   type CampaignWithDetails,
   type CampaignStats,
   type CampaignAnalytics,
@@ -44,11 +47,38 @@ import {
   Tooltip,
   ResponsiveContainer,
   Legend,
+  Line,
+  ComposedChart,
 } from 'recharts';
 
 const PRELAUNCH_SEEN_KEY = 'getsale-campaign-prelaunch-seen';
 
 type Tab = 'overview' | 'participants' | 'sequence' | 'audience';
+
+/** Форматирует длительность динамически: минуты, часы, дни, недели. */
+function formatDuration(start: string, end: string, t: (key: string, opts?: Record<string, unknown>) => string): string {
+  const a = new Date(start).getTime();
+  const b = new Date(end).getTime();
+  const diffMs = Math.max(0, b - a);
+  const diffMin = Math.floor(diffMs / (60 * 1000));
+  const diffHours = Math.floor(diffMs / (60 * 60 * 1000));
+  const diffDays = Math.floor(diffMs / (24 * 60 * 60 * 1000));
+  const diffWeeks = Math.floor(diffDays / 7);
+  if (diffMin < 60) return t('campaigns.durationMinutes', { count: diffMin });
+  if (diffHours < 24) return t('campaigns.durationHours', { count: diffHours });
+  if (diffDays < 7) return t('campaigns.durationDays', { count: diffDays });
+  return t('campaigns.durationWeeks', { count: diffWeeks });
+}
+
+function formatDateTime(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
 
 function CampaignAnalyticsChart({
   analytics,
@@ -61,36 +91,47 @@ function CampaignAnalyticsChart({
   const repliedMap = new Map(analytics.repliedByDay.map((r) => [r.date, r.replied]));
   const allDates = new Set([...sendsMap.keys(), ...repliedMap.keys()]);
   const sortedDates = Array.from(allDates).sort();
-  const chartData = sortedDates.map((date) => ({
-    date: new Date(date).toLocaleDateString(undefined, { day: '2-digit', month: 'short' }),
-    fullDate: date,
-    sends: sendsMap.get(date) ?? 0,
-    replied: repliedMap.get(date) ?? 0,
-  }));
+  const chartData = sortedDates.map((date) => {
+    const sends = sendsMap.get(date) ?? 0;
+    const replied = repliedMap.get(date) ?? 0;
+    const conversion = sends > 0 ? Math.round((replied / sends) * 100) : 0;
+    return {
+      date: new Date(date).toLocaleDateString(undefined, { day: '2-digit', month: 'short' }),
+      fullDate: date,
+      sends,
+      replied,
+      conversion,
+    };
+  });
 
   if (chartData.length === 0) return null;
 
   return (
-    <div className="h-[280px] w-full">
+    <div className="h-[300px] w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-          <XAxis dataKey="date" tick={{ fontSize: 12 }} className="text-muted-foreground" />
-          <YAxis tick={{ fontSize: 12 }} allowDecimals={false} />
+        <ComposedChart data={chartData} margin={{ top: 8, right: 32, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" className="stroke-muted" vertical={false} />
+          <XAxis dataKey="date" tick={{ fontSize: 11 }} className="text-muted-foreground" />
+          <YAxis yAxisId="left" tick={{ fontSize: 11 }} allowDecimals={false} width={28} />
+          <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} width={32} tickFormatter={(v) => `${v}%`} domain={[0, 100]} />
           <Tooltip
-            contentStyle={{ borderRadius: 8, border: '1px solid var(--border)' }}
+            contentStyle={{ borderRadius: 10, border: '1px solid var(--border)', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
             labelFormatter={(_, payload) => payload?.[0]?.payload?.fullDate}
-            formatter={(value: number, name: string) => [
-              value,
-              name === 'sends' ? t('campaigns.sent') : t('campaigns.replied'),
-            ]}
+            formatter={(value: number, name: string, props: { payload?: { conversion?: number } }) => {
+              if (name === 'conversion') return [props.payload?.conversion ?? 0, t('campaigns.conversion')];
+              return [value, name === 'sends' ? t('campaigns.sent') : t('campaigns.replied')];
+            }}
+            labelStyle={{ fontWeight: 600 }}
           />
           <Legend
-            formatter={(value) => (value === 'sends' ? t('campaigns.sent') : t('campaigns.replied'))}
+            formatter={(value) =>
+              value === 'conversion' ? t('campaigns.conversion') : value === 'sends' ? t('campaigns.sent') : t('campaigns.replied')
+            }
           />
-          <Bar dataKey="sends" fill="hsl(var(--primary))" name="sends" radius={[4, 4, 0, 0]} />
-          <Bar dataKey="replied" fill="hsl(142.1 76.2% 36.3%)" name="replied" radius={[4, 4, 0, 0]} />
-        </BarChart>
+          <Bar dataKey="sends" fill="hsl(var(--primary) / 0.85)" name="sends" radius={[4, 4, 0, 0]} yAxisId="left" maxBarSize={36} />
+          <Bar dataKey="replied" fill="hsl(142.1 56% 42%)" name="replied" radius={[4, 4, 0, 0]} yAxisId="left" maxBarSize={36} />
+          <Line type="monotone" dataKey="conversion" name="conversion" stroke="hsl(38 92% 50%)" strokeWidth={2} dot={{ r: 3 }} yAxisId="right" />
+        </ComposedChart>
       </ResponsiveContainer>
     </div>
   );
@@ -165,9 +206,18 @@ export default function CampaignDetailPage() {
   }, [id, isActive]);
 
   const doStart = async () => {
-    if (!id) return;
+    if (!id || !campaign) return;
     setActionLoading(true);
     try {
+      const aud = campaign.target_audience || {};
+      const contactIds = Array.isArray(aud.contactIds) ? aud.contactIds : [];
+      if (aud.enrichContactsBeforeStart && contactIds.length > 0) {
+        try {
+          await enrichContactsFromTelegram(contactIds, aud.bdAccountId);
+        } catch (e) {
+          console.warn('Enrich contacts before start failed:', e);
+        }
+      }
       await startCampaign(id);
       load();
     } catch (e) {
@@ -368,6 +418,7 @@ export default function CampaignDetailPage() {
               {t('campaigns.bestPracticesLink')}
             </button>
           </div>
+
           {stats && (
             <>
               {isActive && (
@@ -379,70 +430,193 @@ export default function CampaignDetailPage() {
                   {t('campaigns.live')}
                 </div>
               )}
-              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-4">
-                <div className="rounded-xl border border-border bg-card p-4 flex items-start gap-3">
-                  <div className="rounded-lg bg-muted p-2">
-                    <Users className="w-5 h-5 text-muted-foreground" />
+
+              {/* PHASE 2.5 + 2.7 — KPI: Sent, Read, Replied, Shared, Won, Lost, Revenue */}
+              {(stats.total_sent != null && stats.total_sent > 0) && (
+                <>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3">
+                    <div className="rounded-xl border border-border bg-card p-4">
+                      <p className="text-2xl font-bold text-foreground tabular-nums">{stats.total_sent ?? 0}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{t('campaigns.sent')}</p>
+                    </div>
+                    <div className="rounded-xl border border-border bg-card p-4">
+                      <p className="text-2xl font-bold text-foreground tabular-nums">{stats.total_read ?? 0}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{stats.read_rate != null ? `${stats.read_rate}%` : ''} {t('campaigns.read')}</p>
+                    </div>
+                    <div className="rounded-xl border border-border bg-card p-4">
+                      <p className="text-2xl font-bold text-foreground tabular-nums">{stats.total_replied ?? 0}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{stats.reply_rate != null ? `${stats.reply_rate}%` : ''} {t('campaigns.replied')}</p>
+                    </div>
+                    <div className="rounded-xl border border-border bg-card p-4">
+                      <p className="text-2xl font-bold text-foreground tabular-nums">{stats.total_converted_to_shared_chat ?? 0}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{stats.conversion_rate != null ? `${stats.conversion_rate}%` : ''} {t('campaigns.shared')}</p>
+                    </div>
+                    <div className="rounded-xl border border-border bg-card p-4">
+                      <p className="text-2xl font-bold text-foreground tabular-nums">{stats.total_won ?? 0}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{stats.win_rate != null ? `${stats.win_rate}%` : ''} {t('campaigns.won')}</p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground mb-0.5">{t('campaigns.totalParticipants')}</p>
-                    <p className="text-2xl font-semibold text-foreground">{stats.total}</p>
+                  {(stats.total_won != null || stats.total_lost != null || (stats.total_revenue != null && stats.total_revenue > 0)) && (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <div className="rounded-xl border border-border bg-card p-4">
+                        <p className="text-xl font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">{(stats.total_revenue ?? 0).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })} €</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">{t('campaigns.totalRevenue')}</p>
+                      </div>
+                      <div className="rounded-xl border border-border bg-card p-4">
+                        <p className="text-xl font-bold text-foreground tabular-nums">{stats.total_lost ?? 0}</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">{t('campaigns.lost')}</p>
+                      </div>
+                      {(stats.avg_revenue_per_won != null && stats.avg_revenue_per_won > 0) && (
+                        <div className="rounded-xl border border-border bg-card p-4">
+                          <p className="text-xl font-bold text-foreground tabular-nums">{stats.avg_revenue_per_won.toLocaleString(undefined, { maximumFractionDigits: 2 })} €</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">{t('campaigns.avgDealSize')}</p>
+                        </div>
+                      )}
+                      {(stats.avg_time_to_won_hours != null && stats.avg_time_to_won_hours > 0) && (
+                        <div className="rounded-xl border border-border bg-card p-4">
+                          <p className="text-xl font-bold text-foreground tabular-nums">{stats.avg_time_to_won_hours}h</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">{t('campaigns.avgTimeToWon')}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* PHASE 2.5 + 2.7 — воронка Sent → Read → Replied → Shared → Won; Lost отдельно */}
+              {(stats.total_sent != null && stats.total_sent > 0) && (
+                <div className="rounded-xl border border-border bg-card p-4">
+                  <h3 className="text-sm font-medium text-muted-foreground mb-3">{t('campaigns.funnel')}</h3>
+                  <div className="flex flex-wrap items-end gap-2 sm:gap-3">
+                    <div className="flex flex-col items-center min-w-[3.5rem]">
+                      <div className="w-full h-8 rounded bg-primary/20 flex items-center justify-center">
+                        <span className="text-sm font-semibold tabular-nums">{stats.total_sent ?? 0}</span>
+                      </div>
+                      <span className="text-xs text-muted-foreground mt-1">{t('campaigns.sent')}</span>
+                    </div>
+                    <span className="self-center text-muted-foreground">→</span>
+                    <div className="flex flex-col items-center min-w-[3.5rem]">
+                      <div className="w-full h-8 rounded bg-primary/30 flex items-center justify-center">
+                        <span className="text-sm font-semibold tabular-nums">{stats.total_read ?? 0}</span>
+                      </div>
+                      <span className="text-xs text-muted-foreground mt-1">{t('campaigns.read')}</span>
+                    </div>
+                    <span className="self-center text-muted-foreground">→</span>
+                    <div className="flex flex-col items-center min-w-[3.5rem]">
+                      <div className="w-full h-8 rounded bg-primary/50 flex items-center justify-center">
+                        <span className="text-sm font-semibold tabular-nums">{stats.total_replied ?? 0}</span>
+                      </div>
+                      <span className="text-xs text-muted-foreground mt-1">{t('campaigns.replied')}</span>
+                    </div>
+                    <span className="self-center text-muted-foreground">→</span>
+                    <div className="flex flex-col items-center min-w-[3.5rem]">
+                      <div className="w-full h-8 rounded bg-primary flex items-center justify-center">
+                        <span className="text-sm font-semibold tabular-nums text-primary-foreground">{stats.total_converted_to_shared_chat ?? 0}</span>
+                      </div>
+                      <span className="text-xs text-muted-foreground mt-1">{t('campaigns.shared')}</span>
+                    </div>
+                    <span className="self-center text-muted-foreground">→</span>
+                    <div className="flex flex-col items-center min-w-[3.5rem]">
+                      <div className="w-full h-8 rounded bg-emerald-500 flex items-center justify-center">
+                        <span className="text-sm font-semibold tabular-nums text-white">{stats.total_won ?? 0}</span>
+                      </div>
+                      <span className="text-xs text-muted-foreground mt-1">{t('campaigns.won')}</span>
+                    </div>
+                  </div>
+                  {(stats.total_lost != null && stats.total_lost > 0) && (
+                    <div className="mt-3 pt-3 border-t border-border flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground">{t('campaigns.lost')}:</span>
+                      <span className="text-sm font-semibold tabular-nums">{stats.total_lost}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Даты кампании */}
+              {(stats.firstSendAt || stats.lastSendAt) && (
+                <div className="rounded-xl border border-border bg-card p-4 sm:p-5">
+                  <h3 className="text-sm font-medium text-muted-foreground mb-3 flex items-center gap-2">
+                    <Calendar className="w-4 h-4" />
+                    {t('campaigns.campaignDatesSection')}
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-0.5">{t('campaigns.campaignStartDate')}</p>
+                      <p className="text-sm font-medium text-foreground">
+                        {stats.firstSendAt ? formatDateTime(stats.firstSendAt) : '—'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-0.5">{t('campaigns.campaignEndDate')}</p>
+                      <p className="text-sm font-medium text-foreground">
+                        {stats.lastSendAt ? formatDateTime(stats.lastSendAt) : '—'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-0.5">{t('campaigns.campaignDuration')}</p>
+                      <p className="text-sm font-medium text-foreground">
+                        {stats.firstSendAt && stats.lastSendAt
+                          ? formatDuration(stats.firstSendAt, stats.lastSendAt, t)
+                          : t('campaigns.noDatesYet')}
+                      </p>
+                    </div>
                   </div>
                 </div>
-                <div className="rounded-xl border border-border bg-card p-4 flex items-start gap-3">
-                  <div className="rounded-lg bg-sky-500/10 p-2">
-                    <Clock className="w-5 h-5 text-sky-600 dark:text-sky-400" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground mb-0.5">{t('campaigns.statusPending')}</p>
-                    <p className="text-2xl font-semibold text-foreground">{stats.byStatus?.pending ?? 0}</p>
+              )}
+
+              {/* Конверсия — главный параметр */}
+              <div className="rounded-xl border border-border bg-card overflow-hidden">
+                <div className="p-5 sm:p-6 bg-gradient-to-br from-primary/10 via-primary/5 to-transparent dark:from-primary/20 dark:via-primary/10">
+                  <div className="flex flex-wrap items-end gap-6">
+                    <div>
+                      <p className="text-sm font-medium text-muted-foreground mb-1 flex items-center gap-1.5">
+                        <Percent className="w-4 h-4" />
+                        {t('campaigns.conversion')}
+                      </p>
+                      <p className="text-4xl sm:text-5xl font-bold text-foreground tabular-nums">
+                        {typeof stats.conversionRate === 'number' ? stats.conversionRate : 0}%
+                      </p>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        {t('campaigns.conversionSubtitle', {
+                          replied: stats.byStatus?.replied ?? 0,
+                          total: stats.total,
+                        })}
+                      </p>
+                    </div>
                   </div>
                 </div>
-                <div className="rounded-xl border border-border bg-card p-4 flex items-start gap-3">
-                  <div className="rounded-lg bg-blue-500/10 p-2">
-                    <SendHorizontal className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                <div className="grid grid-cols-3 gap-px bg-border">
+                  <div className="bg-card p-4">
+                    <p className="text-xs text-muted-foreground mb-0.5">{t('campaigns.totalParticipants')}</p>
+                    <p className="text-xl font-semibold text-foreground">{stats.total}</p>
                   </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground mb-0.5">{t('campaigns.sent')}</p>
-                    <p className="text-2xl font-semibold text-foreground">
-                      {stats.byStatus?.sent ?? 0}
-                      {stats.total ? ` (${Math.round(((stats.byStatus?.sent ?? 0) / stats.total) * 100)}%)` : ''}
+                  <div className="bg-card p-4">
+                    <p className="text-xs text-muted-foreground mb-0.5">{t('campaigns.sent')}</p>
+                    <p className="text-xl font-semibold text-foreground">
+                      {typeof stats.contactsSent === 'number' ? stats.contactsSent : (stats.byStatus?.sent ?? 0)}
                     </p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">{t('campaigns.sentContactsHint', 'контактов получили сообщения')}</p>
                   </div>
-                </div>
-                <div className="rounded-xl border border-border bg-card p-4 flex items-start gap-3">
-                  <div className="rounded-lg bg-emerald-500/10 p-2">
-                    <MessageCircle className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground mb-0.5">{t('campaigns.replied')}</p>
-                    <p className="text-2xl font-semibold text-foreground">
-                      {stats.byStatus?.replied ?? 0}
-                      {stats.total ? ` (${Math.round(((stats.byStatus?.replied ?? 0) / stats.total) * 100)}%)` : ''}
-                    </p>
-                  </div>
-                </div>
-                <div className="rounded-xl border border-border bg-card p-4 flex items-start gap-3">
-                  <div className="rounded-lg bg-amber-500/10 p-2">
-                    <UserX className="w-5 h-5 text-amber-600 dark:text-amber-400" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground mb-0.5">{t('campaigns.stopped')}</p>
-                    <p className="text-2xl font-semibold text-foreground">{stats.byStatus?.stopped ?? 0}</p>
-                  </div>
-                </div>
-                <div className="rounded-xl border border-border bg-card p-4 flex items-start gap-3">
-                  <div className="rounded-lg bg-muted p-2">
-                    <BarChart3 className="w-5 h-5 text-muted-foreground" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground mb-0.5">{t('campaigns.statusCompleted', 'Завершено')}</p>
-                    <p className="text-2xl font-semibold text-foreground">{stats.byStatus?.completed ?? 0}</p>
+                  <div className="bg-card p-4">
+                    <p className="text-xs text-muted-foreground mb-0.5">{t('campaigns.replied')}</p>
+                    <p className="text-xl font-semibold text-foreground">{stats.byStatus?.replied ?? 0}</p>
                   </div>
                 </div>
               </div>
+
+              {/* Доп. статусы: ожидает, остановлено — одна строка */}
+              <div className="flex flex-wrap gap-3 text-sm">
+                <span className="text-muted-foreground">
+                  {t('campaigns.statusPending')}: <strong className="text-foreground">{stats.byStatus?.pending ?? 0}</strong>
+                </span>
+                <span className="text-muted-foreground">
+                  {t('campaigns.stopped')}: <strong className="text-foreground">{stats.byStatus?.stopped ?? 0}</strong>
+                </span>
+              </div>
             </>
           )}
+
+          {/* График: отправки, ответы, конверсия по дням */}
           <div className="rounded-xl border border-border bg-card p-6">
             <h3 className="font-heading text-lg font-semibold text-foreground mb-4">
               {t('campaigns.analyticsTitle')}
@@ -496,6 +670,7 @@ export default function CampaignDetailPage() {
       {tab === 'participants' && (
         <CampaignParticipantsTable
           campaignId={id}
+          campaign={campaign}
           isActive={isActive}
           onRefresh={load}
         />

@@ -1687,6 +1687,23 @@ export class TelegramManager {
     return result.rows.length > 0;
   }
 
+  /** ЭТАП 7 — обеспечить наличие conversation перед сохранением сообщения. */
+  private async ensureConversation(params: {
+    organizationId: string;
+    bdAccountId: string;
+    channel: string;
+    channelId: string;
+    contactId: string | null;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO conversations (id, organization_id, bd_account_id, channel, channel_id, contact_id, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW(), NOW())
+       ON CONFLICT (organization_id, bd_account_id, channel, channel_id)
+       DO UPDATE SET contact_id = COALESCE(EXCLUDED.contact_id, conversations.contact_id), updated_at = NOW()`,
+      [params.organizationId, params.bdAccountId, params.channel, params.channelId, params.contactId]
+    );
+  }
+
   /**
    * Сохраняет сообщение в БД с полными данными Telegram (entities, media, reply_to, extra).
    * При совпадении (bd_account_id, channel_id, telegram_message_id) обновляет запись.
@@ -1715,6 +1732,9 @@ export class TelegramManager {
       serialized,
       metadata = {},
     } = params;
+
+    await this.ensureConversation({ organizationId, bdAccountId, channel, channelId, contactId });
+
     const {
       telegram_message_id,
       telegram_date,
@@ -1825,6 +1845,78 @@ export class TelegramManager {
   }
 
   /**
+   * Найти или создать контакт по telegram_id; при возможности запрашивает getEntity в Telegram
+   * и обогащает контакт first_name, last_name, username. Используется при синхронизации сообщений.
+   */
+  private async ensureContactEnrichedFromTelegram(
+    organizationId: string,
+    accountId: string,
+    telegramId: string
+  ): Promise<string | null> {
+    const userIdNum = parseInt(telegramId, 10);
+    const clientInfo = this.clients.get(accountId);
+    if (clientInfo?.client && Number.isInteger(userIdNum) && userIdNum > 0) {
+      try {
+        const peer = clientInfo.client.getInputEntity(userIdNum);
+        const entity = await clientInfo.client.getEntity(peer);
+        if (entity && (entity as any).className === 'User') {
+          const u = entity as Api.User;
+          return this.upsertContactFromTelegramUser(organizationId, telegramId, {
+            firstName: (u.firstName ?? '').trim(),
+            lastName: (u.lastName ?? '').trim() || null,
+            username: (u.username ?? '').trim() || null,
+          });
+        }
+      } catch (e: any) {
+        if (e?.message !== 'TIMEOUT' && !e?.message?.includes('Could not find')) {
+          console.warn('[TelegramManager] getEntity for contact enrichment:', e?.message);
+        }
+      }
+    }
+    return this.ensureContactForTelegramId(organizationId, telegramId);
+  }
+
+  /**
+   * Обогатить контакты данными из Telegram (first_name, last_name, username) по getEntity.
+   * Используется перед запуском кампании по галочке «Обогащать контакты из Telegram».
+   */
+  async enrichContactsFromTelegram(
+    organizationId: string,
+    contactIds: string[],
+    bdAccountId?: string
+  ): Promise<{ enriched: number }> {
+    if (!contactIds?.length) return { enriched: 0 };
+    let accountId = bdAccountId ?? null;
+    if (accountId) {
+      const check = await this.pool.query(
+        'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2 AND is_active = true LIMIT 1',
+        [accountId, organizationId]
+      );
+      if (check.rows.length === 0) accountId = null;
+    }
+    if (!accountId) {
+      const first = await this.pool.query(
+        'SELECT id FROM bd_accounts WHERE organization_id = $1 AND is_active = true LIMIT 1',
+        [organizationId]
+      );
+      accountId = first.rows[0]?.id ?? null;
+    }
+    if (!accountId || !this.clients.has(accountId)) return { enriched: 0 };
+    const rows = await this.pool.query(
+      'SELECT id, telegram_id FROM contacts WHERE id = ANY($1) AND organization_id = $2',
+      [contactIds, organizationId]
+    );
+    let enriched = 0;
+    for (const row of rows.rows as { id: string; telegram_id: string | null }[]) {
+      if (row.telegram_id && parseInt(row.telegram_id, 10) > 0) {
+        await this.ensureContactEnrichedFromTelegram(organizationId, accountId, row.telegram_id);
+        enriched++;
+      }
+    }
+    return { enriched };
+  }
+
+  /**
    * Handle short update (UpdateShortMessage / UpdateShortChatMessage) — входящие и исходящие с другого устройства.
    */
   private async handleShortMessageUpdate(
@@ -1892,32 +1984,27 @@ export class TelegramManager {
         await this.pool.query('UPDATE bd_accounts SET last_activity = NOW() WHERE id = $1', [accountId]);
       }
 
-      // Уведомление на фронт только если чат в папке, отличной от «Все чаты» (folder_id <> 0)
-      const inNonAllFolder = await this.isChatInNonAllChatsFolder(accountId, chatId);
-      if (inNonAllFolder) {
-        const event: MessageReceivedEvent = {
-          id: randomUUID(),
-          type: EventType.MESSAGE_RECEIVED,
-          timestamp: new Date(),
-          organizationId,
-          data: {
-            messageId: savedMessage.id,
-            channel: MessageChannel.TELEGRAM,
-            channelId: chatId,
-            contactId: contactId || undefined,
-            bdAccountId: accountId,
-            content: serialized.content,
-            direction: isOut ? 'outbound' : 'inbound',
-            telegramMessageId: serialized.telegram_message_id || undefined,
-            replyToTelegramId: serialized.reply_to_telegram_id || undefined,
-            createdAt: new Date().toISOString(),
-          },
-        };
-        await this.rabbitmq.publishEvent(event);
-        console.log(`[TelegramManager] Short message saved and event published, messageId=${savedMessage.id}, channelId=${chatId}`);
-      } else {
-        console.log(`[TelegramManager] Short message saved, chat only in All chats (folder 0), no event, accountId=${accountId}, chatId=${chatId}`);
-      }
+      // Всегда публикуем MESSAGE_RECEIVED, чтобы campaign-service и др. могли обработать ответ (в т.ч. для чатов только в «Все чаты»).
+      const event: MessageReceivedEvent = {
+        id: randomUUID(),
+        type: EventType.MESSAGE_RECEIVED,
+        timestamp: new Date(),
+        organizationId,
+        data: {
+          messageId: savedMessage.id,
+          channel: MessageChannel.TELEGRAM,
+          channelId: chatId,
+          contactId: contactId || undefined,
+          bdAccountId: accountId,
+          content: serialized.content,
+          direction: isOut ? 'outbound' : 'inbound',
+          telegramMessageId: serialized.telegram_message_id || undefined,
+          replyToTelegramId: serialized.reply_to_telegram_id || undefined,
+          createdAt: new Date().toISOString(),
+        },
+      };
+      await this.rabbitmq.publishEvent(event);
+      console.log(`[TelegramManager] Short message saved and event published, messageId=${savedMessage.id}, channelId=${chatId}`);
     } catch (error) {
       console.error(`[TelegramManager] Error handling short message:`, error);
     }
@@ -2015,34 +2102,29 @@ export class TelegramManager {
         );
       }
 
-      // Уведомление на фронт только если чат в папке, отличной от «Все чаты» (folder_id <> 0)
-      const inNonAllFolder = await this.isChatInNonAllChatsFolder(accountId, chatId);
-      if (inNonAllFolder) {
-        const event: MessageReceivedEvent = {
-          id: randomUUID(),
-          type: EventType.MESSAGE_RECEIVED,
-          timestamp: new Date(),
-          organizationId,
-          data: {
-            messageId: savedMessage.id,
-            channel: MessageChannel.TELEGRAM,
-            channelId: chatId,
-            contactId: contactId || undefined,
-            bdAccountId: accountId,
-            content: serialized.content,
-            direction: isOut ? 'outbound' : 'inbound',
-            telegramMessageId: serialized.telegram_message_id || undefined,
-            replyToTelegramId: serialized.reply_to_telegram_id || undefined,
-            telegramMedia: serialized.telegram_media || undefined,
-            telegramEntities: serialized.telegram_entities || undefined,
-            createdAt: new Date().toISOString(),
-          },
-        };
-        await this.rabbitmq.publishEvent(event);
-        console.log(`[TelegramManager] MessageReceivedEvent published, messageId=${savedMessage.id}, channelId=${chatId}`);
-      } else {
-        console.log(`[TelegramManager] Message saved, chat only in All chats (folder 0), no event, accountId=${accountId}, chatId=${chatId}`);
-      }
+      // Всегда публикуем MESSAGE_RECEIVED, чтобы campaign-service мог пометить «ответил» и создать лида при ответе (в т.ч. для чатов только в «Все чаты»).
+      const event: MessageReceivedEvent = {
+        id: randomUUID(),
+        type: EventType.MESSAGE_RECEIVED,
+        timestamp: new Date(),
+        organizationId,
+        data: {
+          messageId: savedMessage.id,
+          channel: MessageChannel.TELEGRAM,
+          channelId: chatId,
+          contactId: contactId || undefined,
+          bdAccountId: accountId,
+          content: serialized.content,
+          direction: isOut ? 'outbound' : 'inbound',
+          telegramMessageId: serialized.telegram_message_id || undefined,
+          replyToTelegramId: serialized.reply_to_telegram_id || undefined,
+          telegramMedia: serialized.telegram_media || undefined,
+          telegramEntities: serialized.telegram_entities || undefined,
+          createdAt: new Date().toISOString(),
+        },
+      };
+      await this.rabbitmq.publishEvent(event);
+      console.log(`[TelegramManager] MessageReceivedEvent published, messageId=${savedMessage.id}, channelId=${chatId}`);
     } catch (error) {
       console.error(`[TelegramManager] Error handling new message:`, error);
     }
@@ -2148,7 +2230,7 @@ export class TelegramManager {
               }
               if (msg.fromId instanceof Api.PeerUser) senderId = String(msg.fromId.userId);
 
-              const contactId = await this.ensureContactForTelegramId(organizationId, senderId || chatId);
+              const contactId = await this.ensureContactEnrichedFromTelegram(organizationId, accountId, senderId || chatId);
 
               const direction = (msg as any).out === true ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
               const serialized = serializeMessage(msg);
@@ -2690,6 +2772,79 @@ export class TelegramManager {
   }
 
   /**
+   * Создать супергруппу в Telegram и пригласить участников (лид + доп. по username).
+   * Участники: текущий аккаунт (создатель), лид (по telegram user id), остальные по @username.
+   */
+  async createSharedChat(
+    accountId: string,
+    params: { title: string; leadTelegramUserId?: number; extraUsernames?: string[] }
+  ): Promise<{ channelId: string; title: string }> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo?.isConnected || !clientInfo.client) {
+      throw new Error('BD account not connected');
+    }
+    const client = clientInfo.client;
+    const { title, leadTelegramUserId, extraUsernames = [] } = params;
+
+    const updates = await client.invoke(
+      new Api.channels.CreateChannel({
+        title: title.slice(0, 255),
+        about: '',
+        megagroup: true,
+        broadcast: false,
+      })
+    ) as Api.Updates;
+
+    let channelId: number | undefined;
+    let accessHash: bigint | undefined;
+    const chats = (updates as any).chats ?? [];
+    for (const chat of chats) {
+      if (chat?.className === 'Channel' || (chat as any)._ === 'channel') {
+        channelId = chat.id;
+        accessHash = chat.accessHash ?? (chat as any).accessHash;
+        break;
+      }
+    }
+    if (channelId == null || accessHash == null) {
+      throw new Error('Failed to get created channel from response');
+    }
+
+    const inputUsers: Api.InputUser[] = [];
+    if (leadTelegramUserId != null && leadTelegramUserId > 0) {
+      try {
+        const peer = await client.getInputEntity(leadTelegramUserId);
+        const entity = await client.getEntity(peer);
+        if (entity && ((entity as any).className === 'User' || (entity as any)._ === 'user')) {
+          const u = entity as Api.User;
+          inputUsers.push(new Api.InputUser({ userId: u.id, accessHash: u.accessHash ?? BigInt(0) }));
+        }
+      } catch (e: any) {
+        console.warn('[TelegramManager] createSharedChat: could not resolve lead user', leadTelegramUserId, e?.message);
+      }
+    }
+    for (const username of extraUsernames) {
+      const u = (username ?? '').trim().replace(/^@/, '');
+      if (!u) continue;
+      try {
+        const entity = await client.getEntity(u);
+        if (entity && ((entity as any).className === 'User' || (entity as any)._ === 'user')) {
+          const user = entity as Api.User;
+          inputUsers.push(new Api.InputUser({ userId: user.id, accessHash: user.accessHash ?? BigInt(0) }));
+        }
+      } catch (e: any) {
+        console.warn('[TelegramManager] createSharedChat: could not resolve username', u, e?.message);
+      }
+    }
+
+    if (inputUsers.length > 0) {
+      const inputChannel = new Api.InputChannel({ channelId, accessHash });
+      await client.invoke(new Api.channels.InviteToChannel({ channel: inputChannel, users: inputUsers }));
+    }
+
+    return { channelId: String(channelId), title };
+  }
+
+  /**
    * Синхронизировать историю переписки для одного чата (после авто-добавления контакта из папки).
    */
   async syncHistoryForChat(
@@ -2749,7 +2904,7 @@ export class TelegramManager {
             }
             if (msg.fromId instanceof Api.PeerUser) senderId = String(msg.fromId.userId);
 
-            const contactId = await this.ensureContactForTelegramId(organizationId, senderId || cid);
+            const contactId = await this.ensureContactEnrichedFromTelegram(organizationId, accountId, senderId || cid);
             const direction = (msg as any).out === true ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
             const serialized = serializeMessage(msg);
             await this.saveMessageToDb({
@@ -2890,7 +3045,7 @@ export class TelegramManager {
         let senderId = '';
         if (msg.fromId instanceof Api.PeerUser) senderId = String(msg.fromId.userId);
         // Используем chatId из запроса, чтобы channel_id в БД совпадал с тем, что шлёт фронт (иначе запрос сообщений возвращает 0)
-        const contactId = await this.ensureContactForTelegramId(organizationId, senderId || chatId);
+        const contactId = await this.ensureContactEnrichedFromTelegram(organizationId, accountId, senderId || chatId);
         const direction = (msg as any).out === true ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
         const serialized = serializeMessage(msg);
         await this.saveMessageToDb({

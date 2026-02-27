@@ -1867,6 +1867,20 @@ app.post('/api/bd-accounts/:id/disconnect', async (req, res) => {
   }
 });
 
+// Обогатить контакты данными из Telegram (first_name, last_name, username) через getEntity
+app.post('/api/bd-accounts/enrich-contacts', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { contactIds = [], bdAccountId } = req.body;
+    const ids = Array.isArray(contactIds) ? contactIds.filter((x: unknown) => typeof x === 'string') : [];
+    const result = await telegramManager.enrichContactsFromTelegram(user.organizationId, ids, bdAccountId);
+    res.json(result);
+  } catch (error: any) {
+    console.error('Error enriching contacts:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Enable account (reconnect after disconnect) — владелец или право bd_accounts.settings
 app.post('/api/bd-accounts/:id/enable', async (req, res) => {
   try {
@@ -2051,6 +2065,49 @@ app.post('/api/bd-accounts/:id/send', async (req, res) => {
     res.status(500).json({
       error: 'Internal server error',
       message: error.message || 'Failed to send message',
+    });
+  }
+});
+
+// Create Telegram supergroup (shared chat) and invite lead + extra users by username. Called by messaging-service.
+app.post('/api/bd-accounts/:id/create-shared-chat', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id: accountId } = req.params;
+    const { title, lead_telegram_user_id: leadTelegramUserId, extra_usernames: extraUsernamesRaw } = req.body ?? {};
+
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      return res.status(400).json({ error: 'Missing required field: title' });
+    }
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [accountId, user.organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ error: 'BD account not found' });
+    }
+    if (!telegramManager.isConnected(accountId)) {
+      return res.status(400).json({ error: 'BD account is not connected' });
+    }
+
+    const leadId = leadTelegramUserId != null ? Number(leadTelegramUserId) : undefined;
+    const extraUsernames = Array.isArray(extraUsernamesRaw)
+      ? extraUsernamesRaw.filter((u: unknown) => typeof u === 'string').map((u: string) => u.trim())
+      : [];
+
+    const result = await telegramManager.createSharedChat(accountId, {
+      title: title.trim().slice(0, 255),
+      leadTelegramUserId: leadId && Number.isInteger(leadId) && leadId > 0 ? leadId : undefined,
+      extraUsernames,
+    });
+
+    res.json({ channelId: result.channelId, title: result.title });
+  } catch (error: any) {
+    console.error('Error creating shared chat:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message || 'Failed to create shared chat',
     });
   }
 });

@@ -70,6 +70,9 @@ export function CampaignAudienceSchedule({
   const [sendDelaySeconds, setSendDelaySeconds] = useState<number>(() =>
     campaign.target_audience?.sendDelaySeconds ?? 60
   );
+  const [enrichContactsBeforeStart, setEnrichContactsBeforeStart] = useState<boolean>(() =>
+    !!campaign.target_audience?.enrichContactsBeforeStart
+  );
   type AudienceSource = 'database' | 'file' | 'group';
   const [audienceSource, setAudienceSource] = useState<AudienceSource>(() => {
     const s = (campaign.target_audience?.filters as { audienceSource?: AudienceSource })?.audienceSource;
@@ -79,7 +82,7 @@ export function CampaignAudienceSchedule({
   const [groupSources, setGroupSources] = useState<GroupSource[]>([]);
   const [csvLoading, setCsvLoading] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [leadSectionOpen, setLeadSectionOpen] = useState(false);
+  const [leadSectionOpen, setLeadSectionOpen] = useState(() => !!(campaign.lead_creation_settings?.trigger && (campaign.pipeline_id || campaign.lead_creation_settings)));
   const csvInputRef = useRef<HTMLInputElement>(null);
   const [timezone, setTimezone] = useState<string>(() =>
     campaign.schedule?.timezone ?? 'Europe/Moscow'
@@ -95,22 +98,12 @@ export function CampaignAudienceSchedule({
   );
   const lcs = campaign.lead_creation_settings;
   const [leadTrigger, setLeadTrigger] = useState<string>(() => lcs?.trigger ?? '');
-  const [leadPipelineId, setLeadPipelineId] = useState<string>(() => campaign.pipeline_id ?? lcs ? (campaign.pipeline_id ?? '') : '');
+  const [leadPipelineId, setLeadPipelineId] = useState<string>(() => campaign.pipeline_id ?? (lcs ? (campaign.pipeline_id ?? '') : ''));
   const [leadStageId, setLeadStageId] = useState<string>(() => lcs?.default_stage_id ?? '');
   const [leadResponsibleId, setLeadResponsibleId] = useState<string>(() => (lcs as { default_responsible_id?: string })?.default_responsible_id ?? '');
+  const leadCreationEnabled = leadTrigger === 'on_first_send' || leadTrigger === 'on_reply';
   const [stages, setStages] = useState<{ id: string; name: string }[]>([]);
   const [teamMembers, setTeamMembers] = useState<{ user_id: string; email?: string; first_name?: string; last_name?: string }[]>([]);
-  const [dynamicPipelineId, setDynamicPipelineId] = useState<string>(() =>
-    (campaign.target_audience as { dynamicPipelineId?: string })?.dynamicPipelineId ?? ''
-  );
-  const [dynamicStageIds, setDynamicStageIds] = useState<string[]>(() =>
-    Array.isArray((campaign.target_audience as { dynamicStageIds?: string[] })?.dynamicStageIds)
-      ? (campaign.target_audience as { dynamicStageIds: string[] }).dynamicStageIds
-      : []
-  );
-  const [dynamicStages, setDynamicStages] = useState<{ id: string; name: string }[]>([]);
-  const [dynamicSectionOpen, setDynamicSectionOpen] = useState(false);
-
   const isDraft = campaign.status === 'draft' || campaign.status === 'paused';
 
   useEffect(() => {
@@ -118,10 +111,18 @@ export function CampaignAudienceSchedule({
     else setStages([]);
   }, [leadPipelineId]);
 
+  // Синхронизация настроек создания лида при загрузке/обновлении кампании.
   useEffect(() => {
-    if (dynamicPipelineId) fetchStages(dynamicPipelineId).then((s) => setDynamicStages(s.map((x) => ({ id: x.id, name: x.name })))).catch(() => setDynamicStages([]));
-    else setDynamicStages([]);
-  }, [dynamicPipelineId]);
+    const nextTrigger = campaign.lead_creation_settings?.trigger ?? '';
+    const nextPipelineId = campaign.pipeline_id ?? (campaign.lead_creation_settings ? (campaign.pipeline_id ?? '') : '');
+    const nextStageId = campaign.lead_creation_settings?.default_stage_id ?? '';
+    const nextResponsibleId = (campaign.lead_creation_settings as { default_responsible_id?: string })?.default_responsible_id ?? '';
+    setLeadTrigger(nextTrigger);
+    setLeadPipelineId(nextPipelineId);
+    setLeadStageId(nextStageId);
+    setLeadResponsibleId(nextResponsibleId);
+    if (nextTrigger && nextPipelineId) setLeadSectionOpen(true);
+  }, [campaign.id, campaign.pipeline_id, campaign.lead_creation_settings]);
 
   useEffect(() => {
     Promise.all([
@@ -163,14 +164,10 @@ export function CampaignAudienceSchedule({
           contactIds: contactIds.length > 0 ? contactIds : undefined,
           bdAccountId: bdAccountId || undefined,
           sendDelaySeconds: Math.max(0, Math.min(3600, sendDelaySeconds)),
-          dynamicPipelineId: dynamicPipelineId || undefined,
-          dynamicStageIds: dynamicStageIds.length > 0 ? dynamicStageIds : undefined,
+          enrichContactsBeforeStart: enrichContactsBeforeStart || undefined,
         },
-        schedule: {
-          timezone,
-          workingHours: { start: workStart, end: workEnd },
-          daysOfWeek,
-        },
+        // Расписание убрано из UI — не отправляем, чтобы отправки шли в любое время по задержке шага
+        schedule: null,
         ...(leadTrigger && leadPipelineId
           ? {
               pipelineId: leadPipelineId,
@@ -240,22 +237,6 @@ export function CampaignAudienceSchedule({
                 </>
               )}
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.filterCompany')}</label>
-                <select value={companyId} onChange={(e) => setCompanyId(e.target.value)} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
-                  <option value="">{t('campaigns.filterAllCompanies')}</option>
-                  {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.filterPipeline')}</label>
-                <select value={pipelineId} onChange={(e) => setPipelineId(e.target.value)} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
-                  <option value="">{t('campaigns.filterAllPipelines')}</option>
-                  {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-              </div>
-            </div>
             <div className="flex items-center gap-4">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" id="hasTelegram" checked={hasTelegram} onChange={(e) => setHasTelegram(e.target.checked)} disabled={!isDraft} className="rounded border-border" />
@@ -266,6 +247,10 @@ export function CampaignAudienceSchedule({
                 <input type="number" min={1} max={10000} value={limit} onChange={(e) => setLimit(parseInt(e.target.value, 10) || 1000)} disabled={!isDraft} className="w-24 px-2 py-1.5 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60" />
               </div>
             </div>
+            <label className="flex items-center gap-2 cursor-pointer mt-2">
+              <input type="checkbox" checked={enrichContactsBeforeStart} onChange={(e) => setEnrichContactsBeforeStart(e.target.checked)} disabled={!isDraft} className="rounded border-border" />
+              <span className="text-sm text-foreground">{t('campaigns.enrichContactsBeforeStart', 'Перед запуском обогащать контакты из Telegram (имя, username)')}</span>
+            </label>
           </div>
         )}
 
@@ -327,71 +312,6 @@ export function CampaignAudienceSchedule({
         {audienceSource === 'group' && groupSources.length === 0 && <p className="text-sm text-muted-foreground">{t('campaigns.noGroupsSynced')}</p>}
       </section>
 
-      {/* Динамическая кампания: автодобавление по этапу лида */}
-      <section className="rounded-xl border border-border bg-card overflow-hidden">
-        <button
-          type="button"
-          onClick={() => setDynamicSectionOpen((o) => !o)}
-          className="w-full px-6 py-4 flex items-center justify-between text-left hover:bg-muted/30 transition-colors"
-        >
-          <span className="font-heading text-base font-semibold text-foreground flex items-center gap-2">
-            <Zap className="w-5 h-5 text-muted-foreground" />
-            {t('campaigns.dynamicCampaignTitle', 'Динамическая кампания')}
-          </span>
-          <span className="text-muted-foreground text-sm">{dynamicSectionOpen ? '▼' : '▶'}</span>
-        </button>
-        {dynamicSectionOpen && (
-          <div className="px-6 pb-6 pt-0 space-y-4 border-t border-border">
-            <p className="text-sm text-muted-foreground">
-              {t('campaigns.dynamicCampaignHint', 'Лиды, попадающие в выбранные этапы воронки, автоматически добавляются в кампанию.')}
-            </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.dynamicPipeline', 'Воронка')}</label>
-                <select
-                  value={dynamicPipelineId}
-                  onChange={(e) => { setDynamicPipelineId(e.target.value); setDynamicStageIds([]); }}
-                  disabled={!isDraft}
-                  className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
-                >
-                  <option value="">—</option>
-                  {pipelines.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-              </div>
-              {dynamicPipelineId && dynamicStages.length > 0 && (
-                <div>
-                  <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.dynamicStages', 'Этапы (при попадании лида)')}</label>
-                  <div className="flex flex-wrap gap-2 max-h-32 overflow-auto p-2 rounded-lg border border-border bg-background">
-                    {dynamicStages.map((s) => (
-                      <label key={s.id} className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={dynamicStageIds.includes(s.id)}
-                          onChange={(e) => {
-                            if (e.target.checked) setDynamicStageIds((prev) => [...prev, s.id]);
-                            else setDynamicStageIds((prev) => prev.filter((id) => id !== s.id));
-                          }}
-                          disabled={!isDraft}
-                          className="rounded border-border"
-                        />
-                        <span className="text-sm text-foreground">{s.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-            {dynamicPipelineId && dynamicStageIds.length > 0 && (
-              <p className="text-xs text-muted-foreground">
-                {t('campaigns.dynamicStagesCount', { count: dynamicStageIds.length, defaultValue: 'Выбрано этапов: {{count}}' })}
-              </p>
-            )}
-          </div>
-        )}
-      </section>
-
       {/* 2. Кто рассылает */}
       {agents.length > 0 && (
         <section className="rounded-xl border border-border bg-card p-6">
@@ -419,7 +339,7 @@ export function CampaignAudienceSchedule({
         </section>
       )}
 
-      {/* 4. Дополнительно: создание лида в CRM */}
+      {/* 4. Создание лида в CRM: галочка + когда/воронка/стадия */}
       <section className="rounded-xl border border-border bg-card overflow-hidden">
         <button
           type="button"
@@ -433,96 +353,74 @@ export function CampaignAudienceSchedule({
           <span className="text-muted-foreground text-sm">{leadSectionOpen ? '▼' : '▶'}</span>
         </button>
         {leadSectionOpen && (
-          <div className="px-6 pb-6 pt-0 space-y-3 border-t border-border">
-            <div className="flex flex-wrap gap-4">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input type="radio" name="leadTrigger" checked={leadTrigger === 'on_first_send'} onChange={() => setLeadTrigger('on_first_send')} disabled={!isDraft} className="border-border" />
-                <span className="text-sm text-foreground">{t('campaigns.leadCreationOnFirstSend')}</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input type="radio" name="leadTrigger" checked={leadTrigger === 'on_reply'} onChange={() => setLeadTrigger('on_reply')} disabled={!isDraft} className="border-border" />
-                <span className="text-sm text-foreground">{t('campaigns.leadCreationOnReply')}</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input type="radio" name="leadTrigger" checked={leadTrigger === ''} onChange={() => setLeadTrigger('')} disabled={!isDraft} className="border-border" />
-                <span className="text-sm text-muted-foreground">{t('common.skip')}</span>
-              </label>
-            </div>
-            {leadTrigger && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="px-6 pb-6 pt-0 space-y-4 border-t border-border">
+            <label className="flex items-center gap-3 cursor-pointer py-2">
+              <input
+                type="checkbox"
+                checked={leadCreationEnabled}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    setLeadTrigger('on_first_send');
+                    if (!leadPipelineId && pipelines.length > 0) setLeadPipelineId(pipelines[0].id);
+                  } else {
+                    setLeadTrigger('');
+                  }
+                }}
+                disabled={!isDraft}
+                className="h-4 w-4 rounded border-border text-primary focus:ring-ring"
+              />
+              <span className="font-medium text-foreground">{t('campaigns.leadCreationEnable')}</span>
+            </label>
+            {leadCreationEnabled && (
+              <>
                 <div>
-                  <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationPipeline')}</label>
-                  <select value={leadPipelineId} onChange={(e) => { setLeadPipelineId(e.target.value); setLeadStageId(''); }} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
-                    <option value="">—</option>
-                    {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                  </select>
+                  <p className="text-sm font-medium text-foreground mb-2">{t('campaigns.leadCreationTrigger')}</p>
+                  <div className="flex flex-wrap gap-4">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name="leadTrigger" checked={leadTrigger === 'on_first_send'} onChange={() => setLeadTrigger('on_first_send')} disabled={!isDraft} className="border-border" />
+                      <span className="text-sm text-foreground">{t('campaigns.leadCreationOnFirstSend')}</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name="leadTrigger" checked={leadTrigger === 'on_reply'} onChange={() => setLeadTrigger('on_reply')} disabled={!isDraft} className="border-border" />
+                      <span className="text-sm text-foreground">{t('campaigns.leadCreationOnReply')}</span>
+                    </label>
+                  </div>
                 </div>
-                {leadPipelineId && stages.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationStage')}</label>
-                    <select value={leadStageId} onChange={(e) => setLeadStageId(e.target.value)} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
-                      <option value="">{t('common.optional')}</option>
-                      {stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationPipeline')}</label>
+                    <select value={leadPipelineId} onChange={(e) => { setLeadPipelineId(e.target.value); setLeadStageId(''); }} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
+                      <option value="">{t('campaigns.leadCreationSelectPipeline', 'Выберите воронку')}</option>
+                      {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
                   </div>
-                )}
-                {teamMembers.length > 0 && (
-                  <div className="sm:col-span-2">
-                    <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationResponsible', 'Ответственный за лида')}</label>
-                    <select value={leadResponsibleId} onChange={(e) => setLeadResponsibleId(e.target.value)} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
-                      <option value="">{t('common.optional')}</option>
-                      {teamMembers.map((m) => (
-                        <option key={m.user_id} value={m.user_id}>
-                          {[m.first_name, m.last_name].filter(Boolean).join(' ') || m.email || m.user_id.slice(0, 8)}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-              </div>
+                  {leadPipelineId && stages.length > 0 && (
+                    <div>
+                      <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationStage')}</label>
+                      <select value={leadStageId} onChange={(e) => setLeadStageId(e.target.value)} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
+                        <option value="">{t('common.optional')}</option>
+                        {stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                      </select>
+                    </div>
+                  )}
+                  {teamMembers.length > 0 && (
+                    <div className="sm:col-span-2">
+                      <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationResponsible', 'Ответственный за лида')}</label>
+                      <select value={leadResponsibleId} onChange={(e) => setLeadResponsibleId(e.target.value)} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
+                        <option value="">{t('common.optional')}</option>
+                        {teamMembers.map((m) => (
+                          <option key={m.user_id} value={m.user_id}>
+                            {[m.first_name, m.last_name].filter(Boolean).join(' ') || m.email || m.user_id.slice(0, 8)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
         )}
-      </section>
-
-      {/* 3. Расписание и задержка */}
-      <section className="rounded-xl border border-border bg-card p-6">
-        <h3 className="font-heading text-lg font-semibold text-foreground mb-4 flex items-center gap-2">
-          <Calendar className="w-5 h-5 text-primary" />
-          {t('campaigns.schedule')}
-        </h3>
-        <div className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.timezone')}</label>
-              <input type="text" value={timezone} onChange={(e) => setTimezone(e.target.value)} disabled={!isDraft} placeholder="Europe/Moscow" className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.delayBetweenSends')}</label>
-              <input type="number" min={0} max={3600} value={sendDelaySeconds} onChange={(e) => setSendDelaySeconds(Math.max(0, parseInt(e.target.value, 10) || 0))} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60" />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.workStart')}</label>
-              <input type="time" value={workStart} onChange={(e) => setWorkStart(e.target.value)} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.workEnd')}</label>
-              <input type="time" value={workEnd} onChange={(e) => setWorkEnd(e.target.value)} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60" />
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-foreground mb-2">{t('campaigns.daysOfWeek')}</label>
-            <div className="flex flex-wrap gap-2">
-              {DAYS_OF_WEEK.map((d) => (
-                <button key={d.value} type="button" onClick={() => isDraft && toggleDay(d.value)} disabled={!isDraft} className={clsx('px-3 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-60', daysOfWeek.includes(d.value) ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80')}>
-                  {t(d.labelKey)}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
       </section>
 
       {isDraft && (
@@ -652,9 +550,12 @@ function ContactPickerModal({
               <thead className="sticky top-0 bg-muted/80 border-b border-border">
                 <tr>
                   <th className="text-left w-10 p-2" />
-                  <th className="text-left p-2 font-medium text-foreground">{t('common.name')}</th>
-                  <th className="text-left p-2 font-medium text-foreground">Username</th>
-                  <th className="text-left p-2 font-medium text-foreground">{t('campaigns.contactStatus')}</th>
+                  <th className="text-left p-2 font-medium text-foreground min-w-[120px]">{t('common.name')}</th>
+                  <th className="text-left p-2 font-medium text-foreground min-w-[100px]">Username</th>
+                  <th className="text-left p-2 font-medium text-foreground min-w-[80px]">Telegram ID</th>
+                  <th className="text-left p-2 font-medium text-foreground min-w-[140px]">Email</th>
+                  <th className="text-left p-2 font-medium text-foreground min-w-[100px]">Телефон</th>
+                  <th className="text-left p-2 font-medium text-foreground w-24">{t('campaigns.contactStatus')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -672,12 +573,15 @@ function ContactPickerModal({
                       />
                     </td>
                     <td className="p-2 text-foreground">
-                      {(c.display_name || [c.first_name, c.last_name].filter(Boolean).join(' ') || c.telegram_id || c.id).trim() || '—'}
+                      {(c.display_name || [c.first_name, c.last_name].filter(Boolean).join(' ')).trim() || (c.telegram_id ? `ID ${c.telegram_id}` : c.id.slice(0, 8))}
                     </td>
-                    <td className="p-2 text-muted-foreground">{c.telegram_id ? `@${c.telegram_id}` : '—'}</td>
+                    <td className="p-2 text-muted-foreground">{c.username ? `@${c.username.replace(/^@/, '')}` : (c.telegram_id ? `@${c.telegram_id}` : '—')}</td>
+                    <td className="p-2 text-muted-foreground font-mono text-xs">{c.telegram_id ?? '—'}</td>
+                    <td className="p-2 text-muted-foreground truncate max-w-[180px]" title={c.email ?? ''}>{c.email ?? '—'}</td>
+                    <td className="p-2 text-muted-foreground">{c.phone ?? '—'}</td>
                     <td className="p-2">
                       <span className={clsx(
-                        'text-xs px-2 py-0.5 rounded-full',
+                        'text-xs px-2 py-0.5 rounded-full whitespace-nowrap',
                         c.outreach_status === 'new' ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' : 'bg-muted text-muted-foreground'
                       )}>
                         {c.outreach_status === 'new' ? t('campaigns.statusNew') : t('campaigns.statusInOutreach')}

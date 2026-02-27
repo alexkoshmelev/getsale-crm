@@ -151,6 +151,19 @@ export default function CampaignsPage() {
                     {t(statusLabels[c.status] || c.status)}
                   </p>
                 </div>
+                {/* PHASE 2.5 + 2.7 — мини-KPI в строке */}
+                {(c.total_sent != null && c.total_sent > 0) && (
+                  <div className="hidden sm:flex items-center gap-3 text-xs text-muted-foreground tabular-nums">
+                    <span title={t('campaigns.sent')}>{c.total_sent}</span>
+                    <span title={t('campaigns.read')}>{c.total_read ?? 0}</span>
+                    <span title={t('campaigns.replied')}>{c.total_replied ?? 0}</span>
+                    <span title={t('campaigns.shared')}>{c.total_converted_to_shared_chat ?? 0}</span>
+                    <span title={t('campaigns.won')} className="text-emerald-600 dark:text-emerald-400">{c.total_won ?? 0}</span>
+                    {(c.total_revenue != null && c.total_revenue > 0) && (
+                      <span title={t('campaigns.totalRevenue')} className="font-medium text-foreground">{c.total_revenue.toLocaleString(undefined, { maximumFractionDigits: 0 })} €</span>
+                    )}
+                  </div>
+                )}
               </Link>
               <div className="flex items-center gap-2 relative">
                 {(c.status === 'draft' || c.status === 'paused') && (

@@ -9,6 +9,8 @@ export interface CampaignTargetAudience {
   contactIds?: string[];
   bdAccountId?: string;
   sendDelaySeconds?: number;
+  /** Перед запуском обогащать контакты из Telegram (getEntity → first_name, last_name, username). */
+  enrichContactsBeforeStart?: boolean;
   /** Dynamic campaign: auto-add leads when they enter one of these stages in the given pipeline */
   dynamicPipelineId?: string;
   dynamicStageIds?: string[];
@@ -37,6 +39,13 @@ export interface Campaign {
   } | null;
   created_at: string;
   updated_at: string;
+  /** PHASE 2.5 — мини-KPI в списке (приходят с GET /api/campaigns). */
+  total_sent?: number;
+  total_read?: number;
+  total_replied?: number;
+  total_converted_to_shared_chat?: number;
+  total_won?: number;
+  total_revenue?: number;
 }
 
 export interface CampaignTemplate {
@@ -59,6 +68,7 @@ export interface CampaignSequenceStep {
   order_index: number;
   template_id: string;
   delay_hours: number;
+  delay_minutes?: number;
   trigger_type?: CampaignStepTriggerType;
   conditions?: Record<string, unknown>;
   created_at: string;
@@ -68,9 +78,22 @@ export interface CampaignSequenceStep {
   content?: string;
 }
 
+export interface SelectedContactInfo {
+  id: string;
+  first_name: string | null;
+  last_name: string | null;
+  display_name: string | null;
+  username: string | null;
+  telegram_id: string | null;
+  email: string | null;
+  phone: string | null;
+}
+
 export interface CampaignWithDetails extends Campaign {
   templates: CampaignTemplate[];
   sequences: CampaignSequenceStep[];
+  /** For draft/paused: contacts selected in audience (from target_audience.contactIds). */
+  selected_contacts?: SelectedContactInfo[];
 }
 
 export interface CampaignParticipant {
@@ -89,9 +112,50 @@ export interface CampaignParticipant {
   updated_at: string;
 }
 
+/** PHASE 2.5 — участник с полями для воронки (статус по этапу, даты, conversation_id). */
+export type CampaignParticipantPhase = 'sent' | 'read' | 'replied' | 'shared';
+
+export interface CampaignParticipantRow {
+  participant_id: string;
+  contact_id: string;
+  contact_name: string;
+  conversation_id: string | null;
+  bd_account_id: string | null;
+  channel_id: string | null;
+  status_phase: CampaignParticipantPhase;
+  pipeline_stage_name: string | null;
+  sent_at: string | null;
+  replied_at: string | null;
+  shared_chat_created_at: string | null;
+}
+
 export interface CampaignStats {
   total: number;
   byStatus: Record<string, number>;
+  totalSends?: number;
+  contactsSent?: number;
+  conversionRate?: number;
+  firstSendAt?: string | null;
+  lastSendAt?: string | null;
+  /** PHASE 2.5 — воронка. */
+  total_sent?: number;
+  total_read?: number;
+  total_replied?: number;
+  total_converted_to_shared_chat?: number;
+  read_rate?: number;
+  reply_rate?: number;
+  conversion_rate?: number;
+  /** PHASE 2.6 — среднее время от первой отправки до создания общего чата (часы). */
+  avg_time_to_shared_hours?: number | null;
+  /** PHASE 2.7 — Won + Revenue */
+  total_won?: number;
+  total_lost?: number;
+  total_revenue?: number;
+  win_rate?: number;
+  revenue_per_sent?: number;
+  revenue_per_reply?: number;
+  avg_revenue_per_won?: number;
+  avg_time_to_won_hours?: number | null;
 }
 
 export async function fetchCampaigns(params?: { status?: CampaignStatus }): Promise<Campaign[]> {
@@ -192,6 +256,7 @@ export async function createCampaignSequenceStep(
     orderIndex: number;
     templateId: string;
     delayHours: number;
+    delayMinutes?: number;
     conditions?: Record<string, unknown>;
     triggerType?: CampaignStepTriggerType;
   }
@@ -202,6 +267,7 @@ export async function createCampaignSequenceStep(
       orderIndex: body.orderIndex,
       templateId: body.templateId,
       delayHours: body.delayHours,
+      delayMinutes: body.delayMinutes ?? 0,
       conditions: body.conditions,
       triggerType: body.triggerType,
     }
@@ -212,7 +278,7 @@ export async function createCampaignSequenceStep(
 export async function updateCampaignSequenceStep(
   campaignId: string,
   stepId: string,
-  body: Partial<{ orderIndex: number; templateId: string; delayHours: number; conditions: Record<string, unknown>; triggerType: CampaignStepTriggerType }>
+  body: Partial<{ orderIndex: number; templateId: string; delayHours: number; delayMinutes: number; conditions: Record<string, unknown>; triggerType: CampaignStepTriggerType }>
 ): Promise<CampaignSequenceStep> {
   const { data } = await apiClient.patch<CampaignSequenceStep>(
     `/api/campaigns/${campaignId}/sequences/${stepId}`,
@@ -230,11 +296,22 @@ export async function deleteCampaignSequenceStep(
 
 export async function fetchCampaignParticipants(
   campaignId: string,
-  params?: { page?: number; limit?: number; status?: string }
-): Promise<CampaignParticipant[]> {
-  const { data } = await apiClient.get<CampaignParticipant[]>(
+  params?: { page?: number; limit?: number; status?: string; filter?: 'all' | 'replied' | 'not_replied' | 'shared' }
+): Promise<CampaignParticipant[] | CampaignParticipantRow[]> {
+  const { data } = await apiClient.get<CampaignParticipant[] | CampaignParticipantRow[]>(
     `/api/campaigns/${campaignId}/participants`,
     { params: params ?? {} }
+  );
+  return data;
+}
+
+export async function fetchCampaignParticipantRows(
+  campaignId: string,
+  params?: { page?: number; limit?: number; filter?: 'all' | 'replied' | 'not_replied' | 'shared' }
+): Promise<CampaignParticipantRow[]> {
+  const { data } = await apiClient.get<CampaignParticipantRow[]>(
+    `/api/campaigns/${campaignId}/participants`,
+    { params: { ...params, limit: params?.limit ?? 50 } }
   );
   return data;
 }
@@ -296,8 +373,11 @@ export interface ContactForPicker {
   id: string;
   first_name: string | null;
   last_name: string | null;
-  telegram_id: string | null;
   display_name: string | null;
+  username: string | null;
+  telegram_id: string | null;
+  email: string | null;
+  phone: string | null;
   outreach_status: 'new' | 'in_outreach';
 }
 
@@ -308,6 +388,18 @@ export async function fetchContactsForPicker(params?: {
 }): Promise<ContactForPicker[]> {
   const { data } = await apiClient.get<ContactForPicker[]>('/api/campaigns/contacts-for-picker', {
     params: params ?? {},
+  });
+  return data;
+}
+
+/** Обогатить контакты данными из Telegram (first_name, last_name, username) через getEntity. */
+export async function enrichContactsFromTelegram(
+  contactIds: string[],
+  bdAccountId?: string
+): Promise<{ enriched: number }> {
+  const { data } = await apiClient.post<{ enriched: number }>('/api/bd-accounts/enrich-contacts', {
+    contactIds,
+    ...(bdAccountId ? { bdAccountId } : {}),
   });
   return data;
 }

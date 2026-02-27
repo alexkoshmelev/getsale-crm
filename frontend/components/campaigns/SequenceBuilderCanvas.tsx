@@ -40,6 +40,17 @@ const VARIABLES = [
   '{{company.name}}',
 ];
 
+function formatStepDelay(hours: number, minutes: number): string {
+  const totalHours = hours + minutes / 60;
+  if (totalHours >= 24) {
+    const days = Math.round(totalHours / 24);
+    return days === 1 ? '1 дн.' : `${days} дн.`;
+  }
+  if (hours > 0 && minutes > 0) return `${hours} ч ${minutes} мин`;
+  if (minutes > 0) return `${minutes} мин`;
+  return hours === 1 ? '1 ч' : `${hours} ч`;
+}
+
 /** Step conditions (matches backend StepConditions). */
 type ContactRule = {
   field: 'first_name' | 'last_name' | 'email' | 'phone' | 'telegram_id' | 'company_name';
@@ -73,10 +84,15 @@ function substituteVariables(
   content: string,
   contact: { first_name?: string | null; last_name?: string | null; company_name?: string | null; companyName?: string | null }
 ): string {
-  return content
-    .replace(/\{\{contact\.first_name\}\}/g, (contact.first_name ?? '').trim() || '…')
-    .replace(/\{\{contact\.last_name\}\}/g, (contact.last_name ?? '').trim() || '…')
-    .replace(/\{\{company\.name\}\}/g, (contact.company_name ?? contact.companyName ?? '').trim() || '…');
+  const first = (contact.first_name ?? '').trim();
+  const last = (contact.last_name ?? '').trim();
+  const companyName = (contact.company_name ?? contact.companyName ?? '').trim();
+  let out = content
+    .replace(/\{\{contact\.first_name\}\}/g, first)
+    .replace(/\{\{contact\.last_name\}\}/g, last)
+    .replace(/\{\{company\.name\}\}/g, companyName);
+  out = out.replace(/[ \t]+/g, ' ').replace(/\n +/g, '\n').replace(/ +\n/g, '\n').trim();
+  return out;
 }
 
 export function SequenceBuilderCanvas({
@@ -94,6 +110,7 @@ export function SequenceBuilderCanvas({
   const [formChannel, setFormChannel] = useState('telegram');
   const [formContent, setFormContent] = useState('');
   const [formDelayHours, setFormDelayHours] = useState(24);
+  const [formDelayMinutes, setFormDelayMinutes] = useState(0);
   const [formTriggerType, setFormTriggerType] = useState<'delay' | 'after_reply'>('delay');
   const [formStopIfReplied, setFormStopIfReplied] = useState(false);
   const [formContactConditions, setFormContactConditions] = useState<ContactRule[]>([]);
@@ -112,6 +129,7 @@ export function SequenceBuilderCanvas({
     setFormChannel('telegram');
     setFormContent('');
     setFormDelayHours(24);
+    setFormDelayMinutes(0);
     setFormTriggerType('delay');
     setFormStopIfReplied(false);
     setFormContactConditions([]);
@@ -126,6 +144,7 @@ export function SequenceBuilderCanvas({
     setFormChannel(step.channel || 'telegram');
     setFormContent(step.content || '');
     setFormDelayHours(step.delay_hours ?? 24);
+    setFormDelayMinutes(step.delay_minutes ?? 0);
     setFormTriggerType(step.trigger_type === 'after_reply' ? 'after_reply' : 'delay');
     const c = (step.conditions || {}) as StepConditionsForm;
     setFormStopIfReplied(!!c.stopIfReplied);
@@ -147,10 +166,6 @@ export function SequenceBuilderCanvas({
   const conditions: StepConditionsForm = {};
   if (formStopIfReplied) conditions.stopIfReplied = true;
   if (formContactConditions.length) conditions.contact = formContactConditions;
-  if (formInPipelineStage?.pipelineId && formInPipelineStage.stageIds.length)
-    conditions.inPipelineStage = { pipelineId: formInPipelineStage.pipelineId, stageIds: formInPipelineStage.stageIds };
-  if (formNotInPipelineStage?.pipelineId && formNotInPipelineStage.stageIds.length)
-    conditions.notInPipelineStage = { pipelineId: formNotInPipelineStage.pipelineId, stageIds: formNotInPipelineStage.stageIds };
 
   const handleSave = async () => {
     const name = formName.trim();
@@ -166,6 +181,7 @@ export function SequenceBuilderCanvas({
         });
         await updateCampaignSequenceStep(campaignId, editingStep.id, {
           delayHours: formDelayHours,
+          delayMinutes: formDelayMinutes,
           conditions,
           triggerType: formTriggerType,
         });
@@ -179,6 +195,7 @@ export function SequenceBuilderCanvas({
           orderIndex: sortedSteps.length,
           templateId: template.id,
           delayHours: formDelayHours,
+          delayMinutes: formDelayMinutes,
           conditions,
           triggerType: formTriggerType,
         });
@@ -366,9 +383,7 @@ export function SequenceBuilderCanvas({
                           ) : (
                             <>
                               <Clock className="w-3.5 h-3.5" />
-                              {step.delay_hours >= 24
-                                ? t('campaigns.stepDelayDays', { count: Math.round(step.delay_hours / 24) })
-                                : t('campaigns.stepDelayHours', { count: step.delay_hours })}
+                              {formatStepDelay(step.delay_hours ?? 24, step.delay_minutes ?? 0)}
                             </>
                           )}
                         </span>
@@ -405,6 +420,8 @@ export function SequenceBuilderCanvas({
           setContent={setFormContent}
           delayHours={formDelayHours}
           setDelayHours={setFormDelayHours}
+          delayMinutes={formDelayMinutes}
+          setDelayMinutes={setFormDelayMinutes}
           triggerType={formTriggerType}
           setTriggerType={setFormTriggerType}
           stopIfReplied={formStopIfReplied}
@@ -436,6 +453,8 @@ function StepEditModal({
   setContent,
   delayHours,
   setDelayHours,
+  delayMinutes,
+  setDelayMinutes,
   triggerType,
   setTriggerType,
   stopIfReplied,
@@ -461,6 +480,8 @@ function StepEditModal({
   setContent: (v: string) => void;
   delayHours: number;
   setDelayHours: (v: number) => void;
+  delayMinutes: number;
+  setDelayMinutes: (v: number) => void;
   triggerType: 'delay' | 'after_reply';
   setTriggerType: (v: 'delay' | 'after_reply') => void;
   stopIfReplied: boolean;
@@ -478,7 +499,6 @@ function StepEditModal({
   t: (key: string, opts?: Record<string, unknown>) => string;
 }) {
   const [contacts, setContacts] = useState<Contact[]>([]);
-  const [previewContactId, setPreviewContactId] = useState<string>('');
   const [contactsLoaded, setContactsLoaded] = useState(false);
   const [presets, setPresets] = useState<MessagePreset[]>([]);
   const [savingPreset, setSavingPreset] = useState(false);
@@ -515,20 +535,14 @@ function StepEditModal({
     }
   }, [notInPipelineStage?.pipelineId]);
 
-  const SAMPLE_PREVIEW_ID = '__sample__';
   const sampleContact = {
     first_name: 'Иван',
-    last_name: 'Тестов',
+    last_name: 'Иванов',
     company_name: 'ООО Пример',
     companyName: 'ООО Пример',
   };
-  const previewContact = previewContactId === SAMPLE_PREVIEW_ID
-    ? sampleContact
-    : previewContactId
-      ? contacts.find((c) => c.id === previewContactId) ?? null
-      : null;
-  const previewText = previewContact && content
-    ? substituteVariables(content, previewContact)
+  const previewText = content
+    ? substituteVariables(content, sampleContact)
     : '';
 
   return (
@@ -742,78 +756,6 @@ function StepEditModal({
                 {t('campaigns.conditionAddContact', { defaultValue: 'Добавить правило по полю' })}
               </button>
             </div>
-            <div>
-              <div className="text-xs font-medium text-muted-foreground mb-1">
-                {t('campaigns.conditionsSendOnlyInStage', { defaultValue: 'Отправлять только если в воронке на этапе' })}
-              </div>
-              <div className="flex flex-wrap gap-2 items-center">
-                <select
-                  value={inPipelineStage?.pipelineId ?? ''}
-                  onChange={(e) => {
-                    const id = e.target.value;
-                    if (!id) setInPipelineStage(null);
-                    else setInPipelineStage({ pipelineId: id, stageIds: inPipelineStage?.pipelineId === id ? (inPipelineStage?.stageIds ?? []) : [] });
-                  }}
-                  className="px-2 py-1.5 rounded border border-border bg-background text-foreground text-sm"
-                >
-                  <option value="">—</option>
-                  {pipelines.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-                {inPipelineStage?.pipelineId && (
-                  <select
-                    multiple
-                    value={inPipelineStage.stageIds}
-                    onChange={(e) => {
-                      const opts = Array.from(e.target.selectedOptions, (o) => o.value);
-                      setInPipelineStage({ ...inPipelineStage, stageIds: opts });
-                    }}
-                    className="min-w-[120px] px-2 py-1.5 rounded border border-border bg-background text-foreground text-sm"
-                  >
-                    {stagesForIn.map((s) => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs font-medium text-muted-foreground mb-1">
-                {t('campaigns.conditionsNotSendInStage', { defaultValue: 'Не отправлять, если в воронке на этапе' })}
-              </div>
-              <div className="flex flex-wrap gap-2 items-center">
-                <select
-                  value={notInPipelineStage?.pipelineId ?? ''}
-                  onChange={(e) => {
-                    const id = e.target.value;
-                    if (!id) setNotInPipelineStage(null);
-                    else setNotInPipelineStage({ pipelineId: id, stageIds: notInPipelineStage?.pipelineId === id ? (notInPipelineStage?.stageIds ?? []) : [] });
-                  }}
-                  className="px-2 py-1.5 rounded border border-border bg-background text-foreground text-sm"
-                >
-                  <option value="">—</option>
-                  {pipelines.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-                {notInPipelineStage?.pipelineId && (
-                  <select
-                    multiple
-                    value={notInPipelineStage.stageIds}
-                    onChange={(e) => {
-                      const opts = Array.from(e.target.selectedOptions, (o) => o.value);
-                      setNotInPipelineStage({ ...notInPipelineStage, stageIds: opts });
-                    }}
-                    className="min-w-[120px] px-2 py-1.5 rounded border border-border bg-background text-foreground text-sm"
-                  >
-                    {stagesForNotIn.map((s) => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            </div>
           </div>
           <div>
             <label className="block text-sm font-medium text-foreground mb-1.5">
@@ -844,43 +786,40 @@ function StepEditModal({
             {triggerType === 'delay' && (
               <>
                 <label className="block text-sm font-medium text-foreground mt-2 mb-1.5">
-                  {t('campaigns.stepDelay')} (часов)
+                  {t('campaigns.stepDelay')}
                 </label>
-                <input
-                  type="number"
-                  min={0}
-                  max={8760}
-                  value={delayHours}
-                  onChange={(e) => setDelayHours(Math.max(0, parseInt(e.target.value, 10) || 0))}
-                  className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  {delayHours >= 24
-                    ? t('campaigns.stepDelayDays', { count: Math.round(delayHours / 24) })
-                    : t('campaigns.stepDelayHours', { count: delayHours })}
-                </p>
+                <div className="flex gap-2">
+                  <div className="flex-1">
+                    <span className="text-xs text-muted-foreground block mb-1">Часы</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={8760}
+                      value={delayHours}
+                      onChange={(e) => setDelayHours(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                      className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <span className="text-xs text-muted-foreground block mb-1">Минуты</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={59}
+                      value={delayMinutes}
+                      onChange={(e) => setDelayMinutes(Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)))}
+                      className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </div>
+                </div>
               </>
             )}
           </div>
           <div className="border-t border-border pt-4">
             <label className="flex items-center gap-2 text-sm font-medium text-foreground mb-1.5">
               <Eye className="w-4 h-4" />
-              {t('campaigns.preview')}
+              {t('campaigns.preview')} (Иванов Иван)
             </label>
-            <p className="text-xs text-muted-foreground mb-2">{t('campaigns.previewSelectContact')}</p>
-            <select
-              value={previewContactId}
-              onChange={(e) => setPreviewContactId(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring mb-2"
-            >
-              <option value="">{t('campaigns.previewPlaceholder')}</option>
-              <option value={SAMPLE_PREVIEW_ID}>{t('campaigns.previewSampleData', { defaultValue: 'Тестовые данные (Иван Тестов)' })}</option>
-              {contacts.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {(c.first_name ?? '').trim() || (c.display_name ?? c.companyName ?? c.id)}
-                </option>
-              ))}
-            </select>
             {previewText !== '' && (
               <div className="rounded-lg border border-border bg-muted/30 p-3 text-sm text-foreground whitespace-pre-wrap">
                 {previewText}

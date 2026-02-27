@@ -15,7 +15,7 @@ import {
   Sparkles, Zap, History, FileCode, Bot, Workflow,
   ChevronDown, ChevronRight, ChevronLeft, X, Clock, UserCircle, Tag, BarChart3,
   Music, Film, Users, Check, CheckCheck, RefreshCw, Pin, PinOff, Smile, Pencil,
-  Reply, Forward, Copy, Heart, Filter
+  Reply, Forward, Copy, Heart, Filter, Inbox
 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -138,6 +138,37 @@ interface Chat {
   unread_count: number;
   last_message_at: string;
   last_message: string | null;
+  /** PHASE 2.1: контракт §11а — только отображение, без derived state */
+  conversation_id?: string | null;
+  lead_id?: string | null;
+  lead_stage_name?: string | null;
+  lead_pipeline_name?: string | null;
+  /** PHASE 2.3: для элементов из new-leads (могут быть с разных аккаунтов) */
+  bd_account_id?: string | null;
+}
+
+/** PHASE 2.2 — контракт GET /api/messaging/conversations/:id/lead-context. PHASE 2.5–2.7: shared, won, lost. */
+interface LeadContext {
+  conversation_id: string;
+  lead_id: string;
+  contact_name: string;
+  contact_telegram_id?: string | null;
+  contact_username?: string | null;
+  bd_account_id?: string | null;
+  channel_id?: string | null;
+  pipeline: { id: string; name: string };
+  stage: { id: string; name: string };
+  stages: Array<{ id: string; name: string }>;
+  campaign: { id: string; name: string } | null;
+  became_lead_at: string;
+  shared_chat_created_at?: string | null;
+  shared_chat_channel_id?: string | null;
+  shared_chat_settings?: { titleTemplate: string; extraUsernames: string[] };
+  won_at?: string | null;
+  revenue_amount?: number | null;
+  lost_at?: string | null;
+  loss_reason?: string | null;
+  timeline: Array<{ type: string; created_at: string; stage_name?: string }>;
 }
 
 interface Message {
@@ -553,6 +584,17 @@ export default function MessagingPage() {
   const [chatContextMenu, setChatContextMenu] = useState<{ x: number; y: number; chat: Chat } | null>(null);
   const [accountContextMenu, setAccountContextMenu] = useState<{ x: number; y: number; account: BDAccount } | null>(null);
   const [showEditNameModal, setShowEditNameModal] = useState(false);
+  const [createSharedChatModalOpen, setCreateSharedChatModalOpen] = useState(false);
+  const [createSharedChatTitle, setCreateSharedChatTitle] = useState('');
+  const [createSharedChatExtraUsernames, setCreateSharedChatExtraUsernames] = useState<string[]>([]);
+  const [createSharedChatSubmitting, setCreateSharedChatSubmitting] = useState(false);
+  /** PHASE 2.7 — Won / Lost */
+  const [markWonModalOpen, setMarkWonModalOpen] = useState(false);
+  const [markWonRevenue, setMarkWonRevenue] = useState('');
+  const [markWonSubmitting, setMarkWonSubmitting] = useState(false);
+  const [markLostModalOpen, setMarkLostModalOpen] = useState(false);
+  const [markLostReason, setMarkLostReason] = useState('');
+  const [markLostSubmitting, setMarkLostSubmitting] = useState(false);
   /** Telegram presence: «печатает» в текущем чате (сбрасывается через 6 сек по спецификации Telegram). */
   const [typingChannelId, setTypingChannelId] = useState<string | null>(null);
   const typingClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -582,11 +624,110 @@ export default function MessagingPage() {
   const [aiSummaryText, setAiSummaryText] = useState<string | null>(null);
   const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
   const [aiSummaryError, setAiSummaryError] = useState<string | null>(null);
+  /** PHASE 2.2 — Lead Panel: состояние открыта/закрыта по conversation_id */
+  const [leadPanelOpenByConvId, setLeadPanelOpenByConvId] = useState<Record<string, boolean>>({});
+  const [leadContext, setLeadContext] = useState<LeadContext | null>(null);
+  const [leadContextLoading, setLeadContextLoading] = useState(false);
+  const [leadContextError, setLeadContextError] = useState<string | null>(null);
+  const [leadStagePatching, setLeadStagePatching] = useState(false);
+  /** PHASE 2.3 §11в — папка «Новые лиды»: системная секция сайдбара */
+  const [activeSidebarSection, setActiveSidebarSection] = useState<'new-leads' | 'telegram'>('telegram');
+  const [newLeads, setNewLeads] = useState<Chat[]>([]);
+  const [newLeadsLoading, setNewLeadsLoading] = useState(false);
 
   useEffect(() => {
     setAiSummaryText(null);
     setAiSummaryError(null);
   }, [selectedChat?.channel_id]);
+
+  const convId = selectedChat?.conversation_id ?? null;
+  const isLead = !!(selectedChat?.lead_id && convId);
+  const isLeadPanelOpen = isLead && (leadPanelOpenByConvId[convId ?? ''] !== false);
+
+  useEffect(() => {
+    if (!convId || !selectedChat?.lead_id || !isLeadPanelOpen) {
+      setLeadContext(null);
+      setLeadContextError(null);
+      return;
+    }
+    let cancelled = false;
+    setLeadContextLoading(true);
+    setLeadContextError(null);
+    apiClient
+      .get<LeadContext>(`/api/messaging/conversations/${convId}/lead-context`)
+      .then((res) => {
+        if (!cancelled && res.data) setLeadContext(res.data);
+      })
+      .catch((err) => {
+        if (!cancelled) setLeadContextError(err?.response?.data?.error ?? 'Failed to load lead context');
+      })
+      .finally(() => {
+        if (!cancelled) setLeadContextLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [convId, selectedChat?.lead_id, isLeadPanelOpen]);
+
+  const setLeadPanelOpen = (open: boolean) => {
+    if (!convId) return;
+    setLeadPanelOpenByConvId((prev) => ({ ...prev, [convId]: open }));
+    if (!open) setLeadContext(null);
+  };
+
+  const handleLeadStageChange = async (stageId: string) => {
+    if (!leadContext?.lead_id || leadStagePatching) return;
+    setLeadStagePatching(true);
+    try {
+      const res = await apiClient.patch<{ stage: { id: string; name: string } }>(
+        `/api/pipeline/leads/${leadContext.lead_id}/stage`,
+        { stage_id: stageId }
+      );
+      if (res.data?.stage) setLeadContext((prev) => (prev ? { ...prev, stage: res.data!.stage } : null));
+    } finally {
+      setLeadStagePatching(false);
+    }
+  };
+
+  const fetchNewLeads = useCallback(async () => {
+    setNewLeadsLoading(true);
+    try {
+      const res = await apiClient.get<Record<string, unknown>[]>('/api/messaging/new-leads');
+      const rows = Array.isArray(res.data) ? res.data : [];
+      const mapped: Chat[] = rows.map((r: Record<string, unknown>) => {
+        const nameStr = (r.display_name as string)?.trim() || [(`${r.first_name || ''}`).trim(), (`${r.last_name || ''}`).trim()].filter(Boolean).join(' ') || (r.username as string) || (r.telegram_id != null ? String(r.telegram_id) : '') || null;
+        return {
+          channel: (r.channel as string) || 'telegram',
+          channel_id: String(r.channel_id),
+          contact_id: (r.contact_id as string) ?? null,
+          first_name: (r.first_name as string) ?? null,
+          last_name: (r.last_name as string) ?? null,
+          email: null,
+          telegram_id: r.telegram_id != null ? String(r.telegram_id) : null,
+          display_name: (r.display_name as string) ?? null,
+          username: (r.username as string) ?? null,
+          name: nameStr || null,
+          unread_count: Number(r.unread_count) || 0,
+          last_message_at: (r.last_message_at && String(r.last_message_at)) || '',
+          last_message: (r.last_message as string) ?? null,
+          conversation_id: (r.conversation_id as string) ?? null,
+          lead_id: (r.lead_id as string) ?? null,
+          lead_stage_name: (r.lead_stage_name as string) ?? null,
+          lead_pipeline_name: (r.lead_pipeline_name as string) ?? null,
+          bd_account_id: (r.bd_account_id as string) ?? null,
+        };
+      });
+      setNewLeads(mapped);
+    } catch {
+      setNewLeads([]);
+    } finally {
+      setNewLeadsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeSidebarSection === 'new-leads') fetchNewLeads();
+  }, [activeSidebarSection, fetchNewLeads]);
 
   const STORAGE_KEYS = {
     accountsPanel: 'messaging.accountsPanelCollapsed',
@@ -684,6 +825,9 @@ export default function MessagingPage() {
     if (chat) {
       urlOpenAppliedRef.current = true;
       setSelectedChat(chat);
+      if (chat.lead_id && chat.conversation_id) {
+        setLeadPanelOpenByConvId((prev) => ({ ...prev, [chat.conversation_id!]: true }));
+      }
     }
   }, [urlOpenChannelId, selectedAccountId, chats]);
 
@@ -734,6 +878,10 @@ export default function MessagingPage() {
             unread_count: parseInt(chat.unread_count, 10) || 0,
             last_message_at: chat.last_message_at && String(chat.last_message_at).trim() ? chat.last_message_at : '',
             last_message: chat.last_message,
+            conversation_id: chat.conversation_id ?? null,
+            lead_id: chat.lead_id ?? null,
+            lead_stage_name: chat.lead_stage_name ?? null,
+            lead_pipeline_name: chat.lead_pipeline_name ?? null,
           };
         });
         const byChannelId = new Map<string, Chat>();
@@ -1078,7 +1226,7 @@ export default function MessagingPage() {
           const updated = prev.map((c, i) => {
             if (i !== idx) return c;
             const unread = isCurrentChatForChat ? 0 : (c.unread_count || 0) + (isOutbound ? 0 : 1);
-            return { ...c, last_message_at: ts, last_message: contentPreview ?? c.last_message, unread_count: Math.max(0, unread) };
+            return { ...c, last_message_at: ts, last_message: (contentPreview && contentPreview.trim()) ? contentPreview.trim().slice(0, 200) : '[Media]', unread_count: Math.max(0, unread) };
           });
           return [...updated].sort((a, b) => {
             const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
@@ -1429,6 +1577,10 @@ export default function MessagingPage() {
         unread_count: parseInt(chat.unread_count) || 0,
         last_message_at: chat.last_message_at && String(chat.last_message_at).trim() ? chat.last_message_at : '',
         last_message: chat.last_message,
+        conversation_id: chat.conversation_id ?? null,
+        lead_id: chat.lead_id ?? null,
+        lead_stage_name: chat.lead_stage_name ?? null,
+        lead_pipeline_name: chat.lead_pipeline_name ?? null,
       };
       });
       // Deduplicate by channel_id (API can return same chat multiple times when GROUP BY contact_id)
@@ -1808,6 +1960,9 @@ export default function MessagingPage() {
       // Очистить черновик в Telegram после успешной отправки
       if (selectedAccountId && selectedChat) {
         apiClient.post(`/api/bd-accounts/${selectedAccountId}/draft`, { channelId: selectedChat.channel_id, text: '' }).catch(() => {});
+      }
+      if (selectedChat.conversation_id) {
+        setNewLeads((prev) => prev.filter((c) => c.conversation_id !== selectedChat.conversation_id));
       }
       await fetchChats();
     } catch (error: any) {
@@ -2294,6 +2449,16 @@ export default function MessagingPage() {
     }
   };
 
+  const formatLeadPanelDate = (iso: string) => {
+    if (!iso || isNaN(new Date(iso).getTime())) return '—';
+    const d = new Date(iso);
+    const day = d.getDate();
+    const month = d.toLocaleString('en-GB', { month: 'short' });
+    const year = d.getFullYear();
+    const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+    return `${day} ${month} ${year}, ${time}`;
+  };
+
   const filteredAccounts = accounts.filter((account) => {
     const q = accountSearch.toLowerCase().trim();
     if (!q) return true;
@@ -2356,24 +2521,13 @@ export default function MessagingPage() {
     return list;
   }, [folders, t, hideEmptyFolders, nonEmptyFolderIds]);
 
-  const filteredChats = chats
-    .filter((chat) => {
-      if (selectedFolderId !== null && selectedFolderId !== 0) {
-        if (!chatFolderIds(chat).includes(selectedFolderId)) return false;
-      }
-      return true;
-    })
-    .filter((chat) => {
-      const name = getChatNameWithOverrides(chat).toLowerCase();
-      return name.includes(chatSearch.toLowerCase());
-    })
-    .filter((chat) => {
-      if (chatTypeFilter === 'all') return true;
-      const pt = (chat.peer_type ?? '').toLowerCase();
-      if (chatTypeFilter === 'personal') return pt === 'user';
-      if (chatTypeFilter === 'groups') return pt === 'chat';
-      return true;
-    });
+  // PHASE 2.1 §11а: без поиска и фильтров по типу чата — только папка и порядок по last_message_at
+  const filteredChats = chats.filter((chat) => {
+    if (selectedFolderId !== null && selectedFolderId !== 0) {
+      if (!chatFolderIds(chat).includes(selectedFolderId)) return false;
+    }
+    return true;
+  });
 
   // Показ: закреплённые сверху (в порядке pin), затем остальные
   const pinnedSet = new Set(pinnedChannelIds);
@@ -2686,19 +2840,9 @@ export default function MessagingPage() {
           </div>
         ) : (
           <>
-          {/* Первая строка: общий заголовок «Чаты» + поиск — прижаты вверх, не растягиваются */}
+          {/* Первая строка: заголовок «Чаты» (PHASE 2.1 §11а: поиск убран) */}
           <div className="flex items-center gap-2 p-3 border-b border-border shrink-0 min-w-0 flex-none">
-            <h3 className="font-semibold text-foreground truncate shrink-0">{t('messaging.chatsPanelTitle')}</h3>
-            <div className="relative flex-1 min-w-0">
-              <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-              <Input
-                type="text"
-                placeholder={t('messaging.searchChats')}
-                value={chatSearch}
-                onChange={(e) => setChatSearch(e.target.value)}
-                className="pl-8 h-9 text-sm w-full"
-              />
-            </div>
+            <h3 className="font-semibold text-foreground truncate flex-1 min-w-0">{t('messaging.chatsPanelTitle')}</h3>
             <button
               type="button"
               onClick={() => setChatsCollapsed(true)}
@@ -2715,6 +2859,24 @@ export default function MessagingPage() {
             {/* Левая колонка: кнопка Sync (на уровне переключателя типа) + папки + Edit */}
             {selectedAccountId && (
               <div className="w-16 flex-shrink-0 flex flex-col border-r border-border bg-muted/30 min-h-0">
+                {/* PHASE 2.3 §11в — системная папка «Новые лиды» сверху, визуально отделена */}
+                <button
+                  type="button"
+                  onClick={() => setActiveSidebarSection('new-leads')}
+                  className={`shrink-0 flex flex-col items-center justify-center py-2 px-1 gap-0.5 min-h-[48px] w-full rounded-none border-b border-border transition-colors ${
+                    activeSidebarSection === 'new-leads' ? 'bg-primary/10 dark:bg-primary/20 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                  }`}
+                  title={t('messaging.newLeadsFolder')}
+                >
+                  <Inbox className="w-5 h-5 shrink-0" aria-hidden />
+                  <span className="text-[10px] font-medium truncate w-full text-center leading-tight">{t('messaging.newLeadsFolder')}</span>
+                  {newLeads.length > 0 && (
+                    <span className={`min-w-[1rem] rounded-full px-1 text-[9px] tabular-nums ${activeSidebarSection === 'new-leads' ? 'bg-primary/30 text-primary-foreground' : 'bg-primary/20'}`}>
+                      {newLeads.length > 99 ? '99+' : newLeads.length}
+                    </span>
+                  )}
+                </button>
+                <div className="shrink-0 h-px bg-border" aria-hidden />
                 {/* Sync/Re-sync — на одном уровне с переключателем Все/Личные/Группы справа. Ширина w-16 = как свернутая навигация, не меняется при сворачивании панели чатов */}
 <div className="shrink-0 border-b border-border/50 flex items-center justify-center gap-0.5 py-2">
                     <button
@@ -2741,7 +2903,7 @@ export default function MessagingPage() {
                     <button
                       key={f.id}
                       type="button"
-                      onClick={() => setSelectedFolderId(f.folder_id)}
+                      onClick={() => { setActiveSidebarSection('telegram'); setSelectedFolderId(f.folder_id); }}
                       title={f.folder_title}
                       onDragOver={(e) => { e.preventDefault(); setDragOverFolderId(f.folder_id); }}
                       onDragLeave={() => setDragOverFolderId(null)}
@@ -2804,29 +2966,76 @@ export default function MessagingPage() {
               </div>
             )}
 
-            {/* Правая колонка: переключатель Все/Личные/Группы + список чатов */}
+            {/* Правая колонка: список чатов или new-leads (PHASE 2.3 §11в) */}
           <div className="flex-1 min-w-0 flex flex-col min-h-0">
-        {/* Вторая строка: переключатель типа (на одном уровне с кнопкой Sync слева) */}
-        <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border">
-          <span className="text-xs text-muted-foreground shrink-0">{t('messaging.chatTypeLabel')}</span>
-          <div className="flex rounded-md border border-border p-0.5 bg-muted/50">
-            {(['all', 'personal', 'groups'] as const).map((key) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setChatTypeFilter(key)}
-                className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
-                  chatTypeFilter === key
-                    ? 'bg-card text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                {key === 'all' ? t('messaging.filterAll') : key === 'personal' ? t('messaging.filterPersonal') : t('messaging.filterGroups')}
-              </button>
-            ))}
-          </div>
-        </div>
-
+          {activeSidebarSection === 'new-leads' ? (
+            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col relative scroll-thin-overlay">
+              {newLeadsLoading ? (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : newLeads.length === 0 ? (
+                <div className="flex-1 min-h-0 flex flex-col items-center justify-center p-4 text-center">
+                  <p className="text-sm font-medium text-foreground">{t('messaging.newLeadsEmptyTitle')}</p>
+                  <p className="text-xs text-muted-foreground mt-1">{t('messaging.newLeadsEmptyDesc')}</p>
+                </div>
+              ) : (
+                newLeads.map((chat) => (
+                  <div
+                    key={chat.conversation_id ?? `${chat.channel}-${chat.channel_id}`}
+                    onClick={() => {
+                      if (chat.bd_account_id) setSelectedAccountId(chat.bd_account_id);
+                      setSelectedChat(chat);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      if (chat.bd_account_id) setAccountContextMenu(null);
+                      setMessageContextMenu(null);
+                      setChatContextMenu({ x: e.clientX, y: e.clientY, chat });
+                    }}
+                    className={`p-4 cursor-pointer border-b border-border transition-colors flex gap-3 ${
+                      selectedChat?.channel_id === chat.channel_id ? 'bg-primary/10 dark:bg-primary/20' : 'hover:bg-accent'
+                    }`}
+                  >
+                    <ChatAvatar
+                      bdAccountId={chat.bd_account_id ?? selectedAccountId ?? ''}
+                      chatId={chat.channel_id}
+                      chat={chat}
+                      className="w-10 h-10 shrink-0"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-start justify-between gap-2 mb-0.5">
+                        <div className="font-medium text-sm truncate min-w-0 flex items-center gap-1.5 flex-wrap">
+                          <span className="truncate">{getChatDisplayName(chat)}</span>
+                          <span className="shrink-0 text-[10px] font-normal px-1.5 py-0.5 rounded bg-primary/15 text-primary">
+                            {t('messaging.badgeLead')}
+                          </span>
+                        </div>
+                        <span className="text-xs text-muted-foreground flex-shrink-0">
+                          {formatTime(chat.last_message_at)}
+                        </span>
+                      </div>
+                      {chat.lead_id && (chat.lead_pipeline_name != null || chat.lead_stage_name != null) && (
+                        <div className="flex flex-col gap-0 text-[11px] text-muted-foreground mb-0.5">
+                          {chat.lead_pipeline_name != null && <span className="truncate">{chat.lead_pipeline_name}</span>}
+                          {chat.lead_stage_name != null && <span className="truncate">{chat.lead_stage_name}</span>}
+                        </div>
+                      )}
+                      <div className="text-sm text-muted-foreground truncate min-w-0">
+                        {chat.last_message === '[Media]' ? t('messaging.mediaPreview') : (chat.last_message || t('messaging.noMessages'))}
+                      </div>
+                      {chat.unread_count > 0 && (
+                        <span className="mt-1 inline-flex items-center justify-center bg-primary text-primary-foreground text-xs rounded-full min-w-[1.25rem] h-5 px-1.5 w-fit">
+                          {chat.unread_count}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          ) : (
+          <>
           {!accountSyncReady && (
             <div className="text-xs text-muted-foreground bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/30 rounded-md mx-3 mt-2 px-2.5 py-1.5 flex items-center gap-2 overflow-hidden shrink-0">
               {accountSyncProgress ? (
@@ -2936,20 +3145,26 @@ export default function MessagingPage() {
                   className="w-10 h-10 shrink-0"
                 />
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-start justify-between mb-1 gap-2">
-                    <div className="font-medium text-sm truncate min-w-0 flex items-center gap-1.5">
-                      {getChatNameWithOverrides(chat)}
-                      {chat.peer_type === 'user' && userStatusByUserId[chat.channel_id]?.status === 'UserStatusOnline' && (
-                        <span className="inline-block w-2 h-2 rounded-full bg-green-500 shrink-0" title={t('messaging.online')} aria-label={t('messaging.online')} />
-                      )}
+                  <div className="flex items-start justify-between gap-2 mb-0.5">
+                    <div className="font-medium text-sm truncate min-w-0 flex items-center gap-1.5 flex-wrap">
+                      <span className="truncate">{getChatNameWithOverrides(chat)}</span>
+                      <span className={`shrink-0 text-[10px] font-normal px-1.5 py-0.5 rounded ${chat.lead_id ? 'bg-primary/15 text-primary' : 'text-muted-foreground'}`}>
+                        {chat.lead_id ? t('messaging.badgeLead') : t('messaging.badgeContact')}
+                      </span>
                     </div>
                     <span className="text-xs text-muted-foreground flex-shrink-0">
                       {formatTime(chat.last_message_at)}
                     </span>
                   </div>
+                  {chat.lead_id && (chat.lead_pipeline_name != null || chat.lead_stage_name != null) && (
+                    <div className="flex flex-col gap-0 text-[11px] text-muted-foreground mb-0.5">
+                      {chat.lead_pipeline_name != null && <span className="truncate">{chat.lead_pipeline_name}</span>}
+                      {chat.lead_stage_name != null && <span className="truncate">{chat.lead_stage_name}</span>}
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-2">
                     <div className="text-sm text-muted-foreground truncate min-w-0">
-                      {chat.last_message || t('messaging.noMessages')}
+                      {chat.last_message === '[Media]' ? t('messaging.mediaPreview') : (chat.last_message || t('messaging.noMessages'))}
                     </div>
                     {chat.unread_count > 0 && (
                       <span className="bg-primary text-primary-foreground text-xs rounded-full min-w-[1.25rem] h-5 px-1.5 flex items-center justify-center flex-shrink-0">
@@ -2964,14 +3179,17 @@ export default function MessagingPage() {
             })
           ) : null}
         </div>
+          </>
+          )}
           </div>
           </div>
         </>
         )}
       </div>
 
-      {/* Chat Messages — центр на всю высоту; скролл только внутри панели сообщений */}
-      <div className="flex-1 min-h-0 min-w-0 self-stretch h-full flex flex-col bg-background overflow-hidden">
+      {/* Chat + Lead Panel: центр — чат, справа — Lead Panel при lead_id (§11б) */}
+      <div className="flex flex-1 min-h-0 min-w-0 self-stretch h-full overflow-hidden">
+        <div className="flex-1 min-h-0 min-w-0 flex flex-col bg-background overflow-hidden">
         {selectedChat ? (
           <>
             <div className="relative z-10 px-4 py-3 border-b border-border bg-card/95 backdrop-blur-sm shrink-0 min-h-[3.5rem] flex flex-col justify-center">
@@ -2979,6 +3197,16 @@ export default function MessagingPage() {
                 <div className="min-w-0 flex-1">
                   <div className="font-semibold truncate flex items-center gap-2">
                     {getChatNameWithOverrides(selectedChat)}
+                    {isLead && !isLeadPanelOpen && (
+                      <button
+                        type="button"
+                        onClick={() => setLeadPanelOpen(true)}
+                        className="shrink-0 text-[10px] font-normal px-1.5 py-0.5 rounded bg-primary/15 text-primary hover:bg-primary/25"
+                        title={t('messaging.leadPanelOpen')}
+                      >
+                        {t('messaging.badgeLead')}
+                      </button>
+                    )}
                     {selectedChat.peer_type === 'user' && (() => {
                       const st = userStatusByUserId[selectedChat.channel_id];
                       if (st?.status === 'UserStatusOnline') return <span className="inline-block w-2 h-2 rounded-full bg-green-500 shrink-0" title={t('messaging.online')} aria-label={t('messaging.online')} />;
@@ -3422,7 +3650,375 @@ export default function MessagingPage() {
             </div>
           </div>
         )}
+        </div>
+
+        {/* PHASE 2.2 — Lead Panel: только при lead_id, 4 блока по §11б */}
+        {isLead && isLeadPanelOpen && (
+          <div className="w-[280px] shrink-0 border-l border-border bg-card flex flex-col min-h-0 overflow-hidden">
+            {/* Block 1 — Header */}
+            <div className="shrink-0 px-3 py-3 border-b border-border flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold text-base truncate text-foreground">
+                  {leadContext?.contact_name || getChatNameWithOverrides(selectedChat!)}
+                </div>
+                <span className="inline-block mt-1 text-[10px] font-normal px-1.5 py-0.5 rounded bg-primary/15 text-primary">
+                  {t('messaging.badgeLead')}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLeadPanelOpen(false)}
+                className="p-1.5 rounded text-muted-foreground hover:bg-accent hover:text-foreground shrink-0"
+                title={t('messaging.leadPanelClose')}
+                aria-label={t('messaging.leadPanelClose')}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {leadContextLoading ? (
+              <div className="flex-1 flex items-center justify-center p-4">
+                <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : leadContextError ? (
+              <div className="p-3 text-sm text-destructive">{leadContextError}</div>
+            ) : leadContext ? (
+              <>
+                {/* Block 2 — Pipeline + Stage */}
+                <div className="shrink-0 px-3 py-3 border-b border-border space-y-2">
+                  <div className="text-sm font-medium text-foreground truncate">{leadContext.pipeline.name}</div>
+                  <select
+                    value={leadContext.stage.id}
+                    onChange={(e) => handleLeadStageChange(e.target.value)}
+                    disabled={leadStagePatching}
+                    className="w-full text-sm rounded-md border border-input bg-background px-2 py-1.5 text-foreground"
+                  >
+                    {leadContext.stages.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                  {leadStagePatching && (
+                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span>…</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Block 3 — Source + PHASE 2.5 «Создать общий чат» */}
+                {(leadContext.campaign != null || leadContext.became_lead_at) && (
+                  <div className="shrink-0 px-3 py-3 border-b border-border space-y-2 text-sm text-muted-foreground">
+                    {leadContext.campaign != null && (
+                      <div className="truncate">
+                        {t('messaging.leadPanelCampaign')}: {leadContext.campaign.name}
+                      </div>
+                    )}
+                    {leadContext.became_lead_at && (
+                      <div>
+                        {formatLeadPanelDate(leadContext.became_lead_at)}
+                      </div>
+                    )}
+                    {leadContext.campaign != null && !leadContext.shared_chat_created_at && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const template = leadContext.shared_chat_settings?.titleTemplate ?? 'Чат: {{contact_name}}';
+                          const title = template.replace(/\{\{\s*contact_name\s*\}\}/gi, (leadContext.contact_name || 'Контакт').trim()).trim() || `Чат: ${leadContext.contact_name || 'Контакт'}`;
+                          setCreateSharedChatTitle(title);
+                          setCreateSharedChatExtraUsernames(leadContext.shared_chat_settings?.extraUsernames ?? []);
+                          setCreateSharedChatModalOpen(true);
+                        }}
+                        className="text-left w-full px-2 py-1.5 rounded-md bg-primary/10 text-primary hover:bg-primary/20 text-xs font-medium"
+                      >
+                        {t('messaging.createSharedChat')}
+                      </button>
+                    )}
+                    {leadContext.campaign != null && leadContext.shared_chat_created_at && (
+                      <div className="space-y-1.5 pt-0.5">
+                        <div className="text-emerald-600 dark:text-emerald-400 text-xs font-medium">
+                          ✓ {t('messaging.sharedChatCreated', 'Общий чат создан')}
+                        </div>
+                        {leadContext.shared_chat_channel_id && (
+                          <a
+                            href={(() => {
+                              const s = String(leadContext.shared_chat_channel_id!);
+                              const id = s.startsWith('-100') ? s.slice(4) : s.replace(/^-/, '');
+                              return `https://t.me/c/${id}`;
+                            })()}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                          >
+                            🔗 {t('messaging.openInTelegram', 'Открыть в Telegram')}
+                          </a>
+                        )}
+                      </div>
+                    )}
+                    {/* PHASE 2.7 — Won / Lost: кнопки только если shared и ещё не закрыто */}
+                    {leadContext.shared_chat_created_at && !leadContext.won_at && !leadContext.lost_at && (
+                      <div className="flex flex-col gap-1.5 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => { setMarkWonRevenue(''); setMarkWonModalOpen(true); }}
+                          className="text-left w-full px-2 py-1.5 rounded-md bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/25 text-xs font-medium"
+                        >
+                          ✓ {t('messaging.markWon', 'Закрыть сделку (Won)')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setMarkLostReason(''); setMarkLostModalOpen(true); }}
+                          className="text-left w-full px-2 py-1.5 rounded-md bg-muted text-muted-foreground hover:bg-destructive/10 hover:text-destructive text-xs font-medium"
+                        >
+                          ✕ {t('messaging.markLost', 'Отметить как потеряно (Lost)')}
+                        </button>
+                      </div>
+                    )}
+                    {leadContext.won_at && (
+                      <div className="pt-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                        ✓ {t('messaging.dealWon', 'Сделка закрыта')}
+                        {leadContext.revenue_amount != null && leadContext.revenue_amount > 0 && (
+                          <span className="ml-1"> — {leadContext.revenue_amount} €</span>
+                        )}
+                      </div>
+                    )}
+                    {leadContext.lost_at && (
+                      <div className="pt-1 text-xs text-muted-foreground">
+                        ✕ {t('messaging.dealLost', 'Сделка потеряна')}
+                        {leadContext.loss_reason && (
+                          <div className="mt-0.5 text-[11px] opacity-90">{leadContext.loss_reason}</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Block 4 — Timeline */}
+                <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-2">
+                  {leadContext.timeline.length === 0 ? (
+                    <div className="text-xs text-muted-foreground">—</div>
+                  ) : (
+                    leadContext.timeline.map((ev, i) => (
+                      <div key={i} className="text-xs text-muted-foreground">
+                        <span className="text-[10px] tabular-nums">{formatLeadPanelDate(ev.created_at)}</span>
+                        {' — '}
+                        {ev.type === 'lead_created' && t('messaging.timelineLeadCreated')}
+                        {ev.type === 'stage_changed' && t('messaging.timelineStageChanged', { name: ev.stage_name ?? '' })}
+                        {ev.type === 'deal_created' && t('messaging.timelineDealCreated')}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </>
+            ) : null}
+          </div>
+        )}
       </div>
+
+      {/* Модалка создания общего чата в Telegram */}
+      <Modal
+        isOpen={createSharedChatModalOpen}
+        onClose={() => setCreateSharedChatModalOpen(false)}
+        title={t('messaging.createSharedChatModalTitle', 'Создать общий чат в Telegram')}
+        size="md"
+      >
+        <div className="px-6 py-4 space-y-4">
+          <p className="text-sm text-muted-foreground">
+            {t('messaging.createSharedChatModalDesc', 'Будет создана группа в Telegram с текущим BD-аккаунтом, лидом и указанными участниками.')}
+          </p>
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-1.5">{t('messaging.sharedChatTitle', 'Название чата')}</label>
+            <Input
+              value={createSharedChatTitle}
+              onChange={(e) => setCreateSharedChatTitle(e.target.value)}
+              placeholder={t('messaging.sharedChatTitlePlaceholder', 'Чат: Имя контакта')}
+              className="w-full"
+              maxLength={255}
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-1.5">{t('messaging.sharedChatParticipants', 'Участники')}</label>
+            <div className="text-xs text-muted-foreground mb-1.5">
+              {t('messaging.sharedChatLeadParticipant', 'Лид')}: {leadContext?.contact_username ? `@${leadContext.contact_username}` : leadContext?.contact_name || '—'}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(createSharedChatExtraUsernames).map((u, i) => (
+                <span key={i} className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-sm">
+                  @{u}
+                  <button
+                    type="button"
+                    onClick={() => setCreateSharedChatExtraUsernames((prev) => prev.filter((_, j) => j !== i))}
+                    className="text-muted-foreground hover:text-destructive"
+                    aria-label={t('messaging.remove')}
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </span>
+              ))}
+              <input
+                type="text"
+                placeholder={t('messaging.sharedChatAddUsername', 'Добавить @username')}
+                className="rounded-md border border-border bg-background px-2 py-1 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-primary"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const v = (e.target as HTMLInputElement).value.trim().replace(/^@/, '');
+                    if (v) {
+                      setCreateSharedChatExtraUsernames((prev) => (prev.includes(v) ? prev : [...prev, v]));
+                      (e.target as HTMLInputElement).value = '';
+                    }
+                  }
+                }}
+              />
+            </div>
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={() => setCreateSharedChatModalOpen(false)} disabled={createSharedChatSubmitting}>
+              {t('global.cancel', 'Отмена')}
+            </Button>
+            <Button
+              onClick={async () => {
+                if (!leadContext) return;
+                setCreateSharedChatSubmitting(true);
+                try {
+                  await apiClient.post('/api/messaging/create-shared-chat', {
+                    conversation_id: leadContext.conversation_id,
+                    title: createSharedChatTitle.trim() || undefined,
+                    participant_usernames: createSharedChatExtraUsernames,
+                  });
+                  const res = await apiClient.get<LeadContext>(`/api/messaging/conversations/${leadContext.conversation_id}/lead-context`);
+                  setLeadContext(res.data);
+                  setCreateSharedChatModalOpen(false);
+                } catch (e: unknown) {
+                  const status = (e as { response?: { status?: number } })?.response?.status;
+                  if (status === 409) {
+                    const res = await apiClient.get<LeadContext>(`/api/messaging/conversations/${leadContext.conversation_id}/lead-context`);
+                    setLeadContext(res.data);
+                    setCreateSharedChatModalOpen(false);
+                  } else {
+                    console.error('create-shared-chat failed', e);
+                  }
+                } finally {
+                  setCreateSharedChatSubmitting(false);
+                }
+              }}
+              disabled={createSharedChatSubmitting}
+            >
+              {createSharedChatSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              {createSharedChatSubmitting ? t('messaging.creating', 'Создание…') : t('messaging.createSharedChat', 'Создать общий чат')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* PHASE 2.7 — Закрыть сделку (Won) */}
+      <Modal
+        isOpen={markWonModalOpen}
+        onClose={() => !markWonSubmitting && setMarkWonModalOpen(false)}
+        title={t('messaging.markWonModalTitle', 'Закрыть сделку')}
+        size="sm"
+      >
+        <div className="px-6 py-4 space-y-4">
+          <p className="text-sm text-muted-foreground">
+            {t('messaging.markWonConfirm', 'Действие необратимо. В диалог будет добавлено системное сообщение.')}
+          </p>
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-1.5">{t('messaging.revenueAmount', 'Сумма сделки')}</label>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={markWonRevenue}
+              onChange={(e) => setMarkWonRevenue(e.target.value)}
+              placeholder="0"
+              className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground"
+            />
+            <p className="text-xs text-muted-foreground mt-1">€</p>
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={() => setMarkWonModalOpen(false)} disabled={markWonSubmitting}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              onClick={async () => {
+                if (!leadContext) return;
+                const amount = markWonRevenue.trim() ? parseFloat(markWonRevenue.replace(',', '.')) : null;
+                if (amount != null && (Number.isNaN(amount) || amount < 0)) return;
+                setMarkWonSubmitting(true);
+                try {
+                  await apiClient.post('/api/messaging/mark-won', {
+                    conversation_id: leadContext.conversation_id,
+                    ...(amount != null && !Number.isNaN(amount) ? { revenue_amount: amount } : {}),
+                  });
+                  const res = await apiClient.get<LeadContext>(`/api/messaging/conversations/${leadContext.conversation_id}/lead-context`);
+                  setLeadContext(res.data);
+                  setMarkWonModalOpen(false);
+                } catch (e) {
+                  console.error('mark-won failed', e);
+                } finally {
+                  setMarkWonSubmitting(false);
+                }
+              }}
+              disabled={markWonSubmitting}
+            >
+              {markWonSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              {markWonSubmitting ? t('common.saving') : t('messaging.closeDeal', 'Закрыть сделку')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* PHASE 2.7 — Отметить как потеряно (Lost) */}
+      <Modal
+        isOpen={markLostModalOpen}
+        onClose={() => !markLostSubmitting && setMarkLostModalOpen(false)}
+        title={t('messaging.markLostModalTitle', 'Отметить как потеряно')}
+        size="sm"
+      >
+        <div className="px-6 py-4 space-y-4">
+          <p className="text-sm text-muted-foreground">
+            {t('messaging.markLostConfirm', 'Действие необратимо. В диалог будет добавлено системное сообщение.')}
+          </p>
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-1.5">{t('messaging.lossReason', 'Причина (необязательно)')}</label>
+            <textarea
+              value={markLostReason}
+              onChange={(e) => setMarkLostReason(e.target.value)}
+              placeholder={t('messaging.lossReasonPlaceholder', 'Например: отказ, не вышли на связь')}
+              rows={3}
+              className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground resize-none"
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={() => setMarkLostModalOpen(false)} disabled={markLostSubmitting}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={async () => {
+                if (!leadContext) return;
+                setMarkLostSubmitting(true);
+                try {
+                  await apiClient.post('/api/messaging/mark-lost', {
+                    conversation_id: leadContext.conversation_id,
+                    reason: markLostReason.trim() || undefined,
+                  });
+                  const res = await apiClient.get<LeadContext>(`/api/messaging/conversations/${leadContext.conversation_id}/lead-context`);
+                  setLeadContext(res.data);
+                  setMarkLostModalOpen(false);
+                } catch (e) {
+                  console.error('mark-lost failed', e);
+                } finally {
+                  setMarkLostSubmitting(false);
+                }
+              }}
+              disabled={markLostSubmitting}
+            >
+              {markLostSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              {markLostSubmitting ? t('common.saving') : t('messaging.markAsLost', 'Отметить как потеряно')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Контекстные меню и модалки — всегда в DOM, чтобы ПКМ работал и без выбранного чата */}
       <ContextMenu

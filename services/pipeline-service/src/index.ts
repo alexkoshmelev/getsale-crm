@@ -635,6 +635,15 @@ app.patch('/api/pipeline/leads/:id', async (req, res) => {
     const fromStageId = existing.rows[0].stage_id;
     if (stageId != null && fromStageId !== stageId) {
       const eventId = crypto.randomUUID();
+      try {
+        await pool.query(
+          `INSERT INTO lead_activity_log (id, lead_id, type, metadata, created_at, correlation_id)
+           VALUES (gen_random_uuid(), $1, 'stage_changed', $2, NOW(), $3)`,
+          [id, JSON.stringify({ from_stage_id: fromStageId, to_stage_id: stageId }), eventId]
+        );
+      } catch (logErr) {
+        log.warn({ message: 'lead_activity_log insert failed', leadId: id, error: logErr });
+      }
       const event = {
         id: eventId,
         type: EventType.LEAD_STAGE_CHANGED,
@@ -673,6 +682,112 @@ app.patch('/api/pipeline/leads/:id', async (req, res) => {
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Error updating lead:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PHASE 2.2 — узкий контракт для Lead Panel: только смена стадии, ответ — { stage: { id, name } }.
+app.patch('/api/pipeline/leads/:id/stage', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id } = req.params;
+    const stageId = req.body?.stage_id;
+
+    if (stageId == null || typeof stageId !== 'string') {
+      return res.status(400).json({ error: 'stage_id required' });
+    }
+
+    const existing = await pool.query(
+      'SELECT l.*, s.name AS stage_name FROM leads l JOIN stages s ON s.id = l.stage_id WHERE l.id = $1 AND l.organization_id = $2',
+      [id, user.organizationId]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    if (String((existing.rows[0] as any).stage_name) === 'Converted') {
+      return res.status(400).json({ error: 'Cannot move lead from Converted stage' });
+    }
+
+    const stageCheck = await pool.query(
+      'SELECT id, name FROM stages WHERE id = $1 AND pipeline_id = $2 AND organization_id = $3',
+      [stageId, existing.rows[0].pipeline_id, user.organizationId]
+    );
+    if (stageCheck.rows.length === 0) {
+      return res.status(400).json({ error: 'Stage not found' });
+    }
+
+    const fromStageId = existing.rows[0].stage_id;
+    await pool.query(
+      'UPDATE leads SET stage_id = $1, updated_at = NOW() WHERE id = $2 AND organization_id = $3',
+      [stageId, id, user.organizationId]
+    );
+
+    const eventId = crypto.randomUUID();
+    try {
+      await pool.query(
+        `INSERT INTO lead_activity_log (id, lead_id, type, metadata, created_at, correlation_id)
+         VALUES (gen_random_uuid(), $1, 'stage_changed', $2, NOW(), $3)`,
+        [id, JSON.stringify({ from_stage_id: fromStageId, to_stage_id: stageId }), eventId]
+      );
+    } catch (logErr) {
+      log.warn({ message: 'lead_activity_log insert failed', leadId: id, error: logErr });
+    }
+    const event = {
+      id: eventId,
+      type: EventType.LEAD_STAGE_CHANGED,
+      timestamp: new Date(),
+      organizationId: user.organizationId,
+      userId: user.id,
+      data: {
+        contactId: existing.rows[0].contact_id,
+        pipelineId: existing.rows[0].pipeline_id,
+        fromStageId,
+        toStageId: stageId,
+        leadId: id,
+        correlationId: eventId,
+      },
+    } as Event;
+    try {
+      log.info({ message: 'publish lead.stage.changed', event_id: eventId, correlation_id: eventId, entity_type: 'lead', entity_id: id });
+      await rabbitmq.publishEvent(event);
+      eventPublishTotal.inc({ event_type: EventType.LEAD_STAGE_CHANGED });
+    } catch (e) {
+      eventPublishFailedTotal.inc({ event_type: EventType.LEAD_STAGE_CHANGED });
+      log.error({ message: 'Failed to publish LEAD_STAGE_CHANGED', event_id: eventId, correlation_id: eventId, error: e instanceof Error ? e.message : String(e) });
+    }
+
+    const stageRow = stageCheck.rows[0] as { id: string; name: string };
+    res.json({ stage: { id: stageRow.id, name: stageRow.name } });
+  } catch (error) {
+    console.error('Error updating lead stage:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ЭТАП 7 — таймлайн карточки лида (lead_activity_log)
+app.get('/api/pipeline/leads/:id/activity', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id: leadId } = req.params;
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '50'), 10) || 50, 1), 100);
+    const leadCheck = await pool.query(
+      'SELECT 1 FROM leads WHERE id = $1 AND organization_id = $2',
+      [leadId, user.organizationId]
+    );
+    if (leadCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    const rows = await pool.query(
+      `SELECT id, lead_id, type, metadata, created_at, correlation_id
+       FROM lead_activity_log
+       WHERE lead_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [leadId, limit]
+    );
+    res.json(rows.rows);
+  } catch (error) {
+    console.error('Error fetching lead activity:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
