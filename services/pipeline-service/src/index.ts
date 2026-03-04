@@ -48,6 +48,14 @@ function getUser(req: express.Request) {
 
 app.use(express.json());
 
+// PHASE 2.9 — Correlation ID
+const CORRELATION_HEADER = 'x-correlation-id';
+app.use((req: express.Request, _res, next) => {
+  const incoming = req.headers[CORRELATION_HEADER] as string | undefined;
+  (req as any).correlationId = typeof incoming === 'string' && incoming.trim() ? incoming.trim() : crypto.randomUUID();
+  next();
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'pipeline-service' });
 });

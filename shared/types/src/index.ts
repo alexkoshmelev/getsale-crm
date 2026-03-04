@@ -283,3 +283,31 @@ export interface TriggerAction {
   params: Record<string, any>;
 }
 
+// --- PHASE 2.8 — Domain constants (Stability & Integrity) ---
+
+/** Системные события Conversation: записываются в messages.metadata.event при lifecycle-действиях. */
+export const ConversationSystemEvent = {
+  SHARED_CHAT_CREATED: 'shared_chat_created',
+  DEAL_WON: 'deal_won',
+  DEAL_LOST: 'deal_lost',
+} as const;
+export type ConversationSystemEventType = (typeof ConversationSystemEvent)[keyof typeof ConversationSystemEvent];
+
+/** Типы записей в lead_activity_log (таймлайн лида). */
+export const LeadActivityLogType = {
+  LEAD_CREATED: 'lead_created',
+  STAGE_CHANGED: 'stage_changed',
+  DEAL_CREATED: 'deal_created',
+  CAMPAIGN_REPLY_RECEIVED: 'campaign_reply_received',
+} as const;
+export type LeadActivityLogTypeValue = (typeof LeadActivityLogType)[keyof typeof LeadActivityLogType];
+
+/** Фильтры участников кампании (GET /api/campaigns/:id/participants). */
+export const CampaignParticipantFilter = {
+  ALL: 'all',
+  REPLIED: 'replied',
+  NOT_REPLIED: 'not_replied',
+  SHARED: 'shared',
+} as const;
+export type CampaignParticipantFilterValue = (typeof CampaignParticipantFilter)[keyof typeof CampaignParticipantFilter];
+

@@ -13,9 +13,11 @@
     "pg": "^8.11.3",
     "telegraf": "^4.15.0",
     "nodemailer": "^6.9.7",
+    "prom-client": "^15.1.0",
     "@getsale/utils": "*",
     "@getsale/types": "*",
-    "@getsale/events": "*"
+    "@getsale/events": "*",
+    "@getsale/logger": "*"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

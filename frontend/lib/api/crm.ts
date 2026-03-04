@@ -238,6 +238,11 @@ export async function deleteReminder(reminderId: string): Promise<void> {
   await apiClient.delete(`/api/crm/reminders/${reminderId}`);
 }
 
+export async function fetchDueReminders(params?: { limit?: number }): Promise<Reminder[]> {
+  const { data } = await apiClient.get<Reminder[]>('/api/crm/reminders/due', { params: params ?? {} });
+  return data;
+}
+
 export async function fetchUpcomingReminders(params?: { hours?: number; limit?: number }): Promise<Reminder[]> {
   const { data } = await apiClient.get<Reminder[]>('/api/crm/reminders/upcoming', { params: params ?? {} });
   return data;

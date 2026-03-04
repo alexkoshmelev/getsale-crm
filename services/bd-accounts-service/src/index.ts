@@ -138,8 +138,25 @@ async function requireAccountOwner(accountId: string, user: { id: string; organi
 
 app.use(express.json());
 
-app.get('/health', (req, res) => {
+// PHASE 2.9 — Correlation ID (from gateway or from calling service e.g. messaging)
+const CORRELATION_HEADER = 'x-correlation-id';
+app.use((req: express.Request, _res, next) => {
+  const incoming = req.headers[CORRELATION_HEADER] as string | undefined;
+  (req as any).correlationId = typeof incoming === 'string' && incoming.trim() ? incoming.trim() : randomUUID();
+  next();
+});
+
+app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'bd-accounts-service' });
+});
+
+app.get('/ready', async (_req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.status(200).json({ status: 'ready' });
+  } catch {
+    res.status(503).json({ status: 'not ready', check: 'postgres' });
+  }
 });
 
 // Get BD accounts (с суммарным непрочитанным по каждому аккаунту — только по чатам из sync)
@@ -985,10 +1002,12 @@ app.post('/api/bd-accounts/:id/sync-folders', async (req, res) => {
     // Пользователь может явно нажать «Обновить с Telegram» (sync-folders-refresh).
 
     if (Array.isArray(extraChats) && extraChats.length > 0) {
+      const accountRow = (await pool.query('SELECT display_name, username, first_name FROM bd_accounts WHERE id = $1 LIMIT 1', [id])).rows[0] as { display_name?: string | null; username?: string | null; first_name?: string | null } | undefined;
       for (const c of extraChats) {
         const chatId = String(c.id ?? c.telegram_chat_id ?? '').trim();
         if (!chatId) continue;
-        const title = (c.name ?? c.title ?? '').trim() || chatId;
+        let title = (c.name ?? c.title ?? '').trim() || chatId;
+        if (accountRow && isAccountOwnerName(accountRow, title)) title = chatId;
         const folderId = c.folderId !== undefined && c.folderId !== null ? Number(c.folderId) : null;
         let peerType = 'user';
         if (c.isChannel) peerType = 'channel';
@@ -1002,7 +1021,7 @@ app.post('/api/bd-accounts/:id/sync-folders', async (req, res) => {
                  AND (NULLIF(TRIM(COALESCE(a.display_name, '')), '') = TRIM(EXCLUDED.title)
                    OR a.username = TRIM(EXCLUDED.title)
                    OR NULLIF(TRIM(COALESCE(a.first_name, '')), '') = TRIM(EXCLUDED.title))
-             ) THEN bd_account_sync_chats.title ELSE EXCLUDED.title END,
+             ) THEN bd_account_sync_chats.telegram_chat_id::text ELSE EXCLUDED.title END,
              peer_type = EXCLUDED.peer_type,
              folder_id = EXCLUDED.folder_id`,
           [id, chatId, title, peerType, folderId]
@@ -1337,11 +1356,27 @@ async function ensureFoldersFromSyncChats(
   }
 }
 
+/** Проверяет, совпадает ли строка с именем владельца аккаунта (чтобы не подставлять его как название чата). */
+function isAccountOwnerName(account: { display_name?: string | null; username?: string | null; first_name?: string | null }, title: string): boolean {
+  const t = (title || '').trim();
+  if (!t) return false;
+  const d = (account.display_name || '').trim();
+  const u = (account.username || '').trim();
+  const f = (account.first_name || '').trim();
+  return (d && d === t) || (u && u === t) || (f && f === t);
+}
+
 async function refreshChatsFromFolders(
   pool: Pool,
   telegramManager: TelegramManager,
   accountId: string
 ): Promise<void> {
+  const accRow = await pool.query(
+    'SELECT organization_id, display_name, username, first_name FROM bd_accounts WHERE id = $1 LIMIT 1',
+    [accountId]
+  );
+  const account = accRow.rows[0] as { organization_id?: string; display_name?: string | null; username?: string | null; first_name?: string | null } | undefined;
+  const organizationId = account?.organization_id;
   const foldersRows = await pool.query(
     'SELECT folder_id, folder_title FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index',
     [accountId]
@@ -1389,7 +1424,8 @@ async function refreshChatsFromFolders(
         let peerType = 'user';
         if (d.isChannel) peerType = 'channel';
         else if (d.isGroup) peerType = 'chat';
-        const title = (d.name ?? '').trim() || chatId;
+        let title = (d.name ?? '').trim() || chatId;
+        if (account && isAccountOwnerName(account, title)) title = chatId;
         await pool.query(
           `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
            VALUES ($1, $2, $3, $4, false, $5)
@@ -1399,7 +1435,7 @@ async function refreshChatsFromFolders(
                  AND (NULLIF(TRIM(COALESCE(a.display_name, '')), '') = TRIM(EXCLUDED.title)
                    OR a.username = TRIM(EXCLUDED.title)
                    OR NULLIF(TRIM(COALESCE(a.first_name, '')), '') = TRIM(EXCLUDED.title))
-             ) THEN bd_account_sync_chats.title ELSE EXCLUDED.title END,
+             ) THEN bd_account_sync_chats.telegram_chat_id::text ELSE EXCLUDED.title END,
              peer_type = EXCLUDED.peer_type,
              folder_id = COALESCE(bd_account_sync_chats.folder_id, EXCLUDED.folder_id)`,
           [accountId, chatId, title, peerType, folderId]
@@ -1409,6 +1445,17 @@ async function refreshChatsFromFolders(
            VALUES ($1, $2, $3) ON CONFLICT (bd_account_id, telegram_chat_id, folder_id) DO NOTHING`,
           [accountId, chatId, folderId]
         );
+        if (peerType === 'user' && organizationId) {
+          try {
+            await telegramManager.enrichContactFromDialog(organizationId, chatId, {
+              firstName: (d as any).first_name,
+              lastName: (d as any).last_name,
+              username: (d as any).username,
+            });
+          } catch (err: any) {
+            console.warn(`[BD Accounts] enrichContactFromDialog for ${chatId} failed:`, err?.message);
+          }
+        }
       }
     } catch (err: any) {
       console.warn(`[BD Accounts] refreshChatsFromFolders folder ${folderId} failed:`, err?.message);
@@ -2102,7 +2149,7 @@ app.post('/api/bd-accounts/:id/create-shared-chat', async (req, res) => {
       extraUsernames,
     });
 
-    res.json({ channelId: result.channelId, title: result.title });
+    res.json({ channelId: result.channelId, title: result.title, inviteLink: result.inviteLink ?? null });
   } catch (error: any) {
     console.error('Error creating shared chat:', error);
     res.status(500).json({

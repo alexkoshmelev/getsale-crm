@@ -9,38 +9,9 @@ type WebSocketContextValue = ReturnType<typeof useWebSocket>;
 
 const WebSocketContext = createContext<WebSocketContextValue | null>(null);
 
-const NOTIFICATION_SOUND_PATH = '/notification.mp3';
+import { playNotificationSound } from '@/lib/notification-sound';
+
 const PLAY_SOUND_DEBOUNCE_MS = 2000;
-
-/** Короткий звук уведомления как в Telegram (Web Audio API — работает без файла) */
-function playBeepNotification(): void {
-  if (typeof window === 'undefined') return;
-  try {
-    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.frequency.value = 800;
-    osc.type = 'sine';
-    gain.gain.setValueAtTime(0.15, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + 0.15);
-  } catch (_) {}
-}
-
-/** Воспроизвести звук нового сообщения: сначала MP3 (если есть), иначе короткий «динг» */
-function playNotificationSound(): void {
-  if (typeof window === 'undefined') return;
-  const audio = new Audio(NOTIFICATION_SOUND_PATH);
-  audio.volume = 0.6;
-  audio.play().then(() => {}).catch(() => {
-    playBeepNotification();
-  });
-  // Если файл не загрузится (404), fallback по событию error
-  audio.addEventListener('error', () => playBeepNotification(), { once: true });
-}
 
 export function WebSocketProvider({ children }: { children: React.ReactNode }) {
   const value = useWebSocket();

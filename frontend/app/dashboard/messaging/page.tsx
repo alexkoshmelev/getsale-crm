@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
@@ -15,7 +15,7 @@ import {
   Sparkles, Zap, History, FileCode, Bot, Workflow,
   ChevronDown, ChevronRight, ChevronLeft, X, Clock, UserCircle, Tag, BarChart3,
   Music, Film, Users, Check, CheckCheck, RefreshCw, Pin, PinOff, Smile, Pencil,
-  Reply, Forward, Copy, Heart, Filter, Inbox
+  Reply, Forward, Copy, Heart, Filter, Inbox, User, StickyNote, Bell, ExternalLink
 } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -28,7 +28,27 @@ import { FolderManageModal } from '@/components/messaging/FolderManageModal';
 import { AddToFunnelModal } from '@/components/crm/AddToFunnelModal';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Modal } from '@/components/ui/Modal';
+import { RightWorkspacePanel, getPersistedRightPanelTab, type RightPanelTab } from '@/components/messaging/RightWorkspacePanel';
+import dynamic from 'next/dynamic';
 import { fetchGroupSources, type GroupSource } from '@/lib/api/campaigns';
+import {
+  fetchContactNotes,
+  createContactNote,
+  deleteNote,
+  fetchContactReminders,
+  createContactReminder,
+  updateReminder,
+  deleteReminder,
+  type Note,
+  type Reminder,
+} from '@/lib/api/crm';
+import { formatDealAmount } from '@/lib/format/currency';
+import { clsx } from 'clsx';
+
+const AIAssistantTabContent = dynamic(
+  () => import('@/components/messaging/AIAssistantTabContent').then((m) => m.AIAssistantTabContent),
+  { ssr: false, loading: () => <div className="p-3 text-sm text-muted-foreground">Loading…</div> }
+);
 import { blobUrlCache, avatarAccountKey, avatarChatKey, mediaKey } from '@/lib/cache/blob-url-cache';
 
 interface BDAccount {
@@ -145,15 +165,20 @@ interface Chat {
   lead_pipeline_name?: string | null;
   /** PHASE 2.3: для элементов из new-leads (могут быть с разных аккаунтов) */
   bd_account_id?: string | null;
+  /** AI Workspace: обогащение при sync — имя аккаунта, заголовок чата (group) */
+  account_name?: string | null;
+  chat_title?: string | null;
 }
 
 /** PHASE 2.2 — контракт GET /api/messaging/conversations/:id/lead-context. PHASE 2.5–2.7: shared, won, lost. */
 interface LeadContext {
   conversation_id: string;
   lead_id: string;
+  contact_id?: string | null;
   contact_name: string;
   contact_telegram_id?: string | null;
   contact_username?: string | null;
+  company_name?: string | null;
   bd_account_id?: string | null;
   channel_id?: string | null;
   pipeline: { id: string; name: string };
@@ -163,6 +188,8 @@ interface LeadContext {
   became_lead_at: string;
   shared_chat_created_at?: string | null;
   shared_chat_channel_id?: string | null;
+  /** Инвайт-ссылка (t.me/+XXX), сохраняется при создании группы; по ней открывается чат */
+  shared_chat_invite_link?: string | null;
   shared_chat_settings?: { titleTemplate: string; extraUsernames: string[] };
   won_at?: string | null;
   revenue_amount?: number | null;
@@ -187,6 +214,8 @@ interface Message {
   telegram_date?: string | null;  // оригинальное время отправки в Telegram
   telegram_extra?: Record<string, unknown> | null;  // fwd_from, reactions, views и т.д.
   reactions?: Record<string, number> | null;  // { "👍": 2, "❤️": 1 }
+  /** Имя отправителя в групповых чатах (приходит с API для входящих) */
+  sender_name?: string | null;
 }
 
 /** Тип медиа из telegram_media (GramJS: messageMediaPhoto, messageMediaDocument и т.д.) */
@@ -512,7 +541,10 @@ export default function MessagingPage() {
   const { t } = useTranslation();
   const { user: currentUser } = useAuthStore();
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
   const urlOpenAppliedRef = useRef(false);
+  const contactIdResolvedRef = useRef(false);
   const { on, off, subscribe, unsubscribe, isConnected } = useWebSocketContext();
   const [accounts, setAccounts] = useState<BDAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
@@ -587,6 +619,7 @@ export default function MessagingPage() {
   const [createSharedChatModalOpen, setCreateSharedChatModalOpen] = useState(false);
   const [createSharedChatTitle, setCreateSharedChatTitle] = useState('');
   const [createSharedChatExtraUsernames, setCreateSharedChatExtraUsernames] = useState<string[]>([]);
+  const [createSharedChatNewUsername, setCreateSharedChatNewUsername] = useState('');
   const [createSharedChatSubmitting, setCreateSharedChatSubmitting] = useState(false);
   /** PHASE 2.7 — Won / Lost */
   const [markWonModalOpen, setMarkWonModalOpen] = useState(false);
@@ -595,6 +628,8 @@ export default function MessagingPage() {
   const [markLostModalOpen, setMarkLostModalOpen] = useState(false);
   const [markLostReason, setMarkLostReason] = useState('');
   const [markLostSubmitting, setMarkLostSubmitting] = useState(false);
+  /** Карточка лида как диалог (как карточка сделки). */
+  const [leadCardModalOpen, setLeadCardModalOpen] = useState(false);
   /** Telegram presence: «печатает» в текущем чате (сбрасывается через 6 сек по спецификации Telegram). */
   const [typingChannelId, setTypingChannelId] = useState<string | null>(null);
   const typingClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -621,28 +656,35 @@ export default function MessagingPage() {
   } | null>(null);
   const chatHeaderMenuRef = useRef<HTMLDivElement>(null);
   const [mediaViewer, setMediaViewer] = useState<{ url: string; type: 'image' | 'video' } | null>(null);
-  const [aiSummaryText, setAiSummaryText] = useState<string | null>(null);
-  const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
-  const [aiSummaryError, setAiSummaryError] = useState<string | null>(null);
-  /** PHASE 2.2 — Lead Panel: состояние открыта/закрыта по conversation_id */
+  /** PHASE 2.2 — Lead Panel: состояние открыта/закрыта по conversation_id (для deep-link автооткрытия) */
   const [leadPanelOpenByConvId, setLeadPanelOpenByConvId] = useState<Record<string, boolean>>({});
+  /** Right Workspace Panel: универсальная правая панель с табами AI / Lead */
+  const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab | null>(null);
+  useEffect(() => {
+    const t = getPersistedRightPanelTab();
+    if (t) setRightPanelTab(t);
+  }, []);
   const [leadContext, setLeadContext] = useState<LeadContext | null>(null);
   const [leadContextLoading, setLeadContextLoading] = useState(false);
   const [leadContextError, setLeadContextError] = useState<string | null>(null);
   const [leadStagePatching, setLeadStagePatching] = useState(false);
+  /** Заметки и напоминания контакта для карточки лида (как в карточке сделки) */
+  const [leadNotes, setLeadNotes] = useState<Note[]>([]);
+  const [leadReminders, setLeadReminders] = useState<Reminder[]>([]);
+  const [leadNoteText, setLeadNoteText] = useState('');
+  const [leadRemindAt, setLeadRemindAt] = useState('');
+  const [leadRemindTitle, setLeadRemindTitle] = useState('');
+  const [addingLeadNote, setAddingLeadNote] = useState(false);
+  const [addingLeadReminder, setAddingLeadReminder] = useState(false);
   /** PHASE 2.3 §11в — папка «Новые лиды»: системная секция сайдбара */
   const [activeSidebarSection, setActiveSidebarSection] = useState<'new-leads' | 'telegram'>('telegram');
   const [newLeads, setNewLeads] = useState<Chat[]>([]);
   const [newLeadsLoading, setNewLeadsLoading] = useState(false);
 
-  useEffect(() => {
-    setAiSummaryText(null);
-    setAiSummaryError(null);
-  }, [selectedChat?.channel_id]);
-
   const convId = selectedChat?.conversation_id ?? null;
   const isLead = !!(selectedChat?.lead_id && convId);
-  const isLeadPanelOpen = isLead && (leadPanelOpenByConvId[convId ?? ''] !== false);
+  const isLeadPanelOpen = isLead && rightPanelOpen && rightPanelTab === 'lead_card';
 
   useEffect(() => {
     if (!convId || !selectedChat?.lead_id || !isLeadPanelOpen) {
@@ -669,10 +711,27 @@ export default function MessagingPage() {
     };
   }, [convId, selectedChat?.lead_id, isLeadPanelOpen]);
 
+  useEffect(() => {
+    if (!leadContext?.contact_id) {
+      setLeadNotes([]);
+      setLeadReminders([]);
+      return;
+    }
+    const cid = leadContext.contact_id;
+    fetchContactNotes(cid).then(setLeadNotes).catch(() => setLeadNotes([]));
+    fetchContactReminders(cid).then(setLeadReminders).catch(() => setLeadReminders([]));
+  }, [leadContext?.contact_id]);
+
   const setLeadPanelOpen = (open: boolean) => {
     if (!convId) return;
-    setLeadPanelOpenByConvId((prev) => ({ ...prev, [convId]: open }));
-    if (!open) setLeadContext(null);
+    if (open) {
+      setRightPanelTab('lead_card');
+      setRightPanelOpen(true);
+      setLeadPanelOpenByConvId((prev) => ({ ...prev, [convId]: true }));
+    } else {
+      setRightPanelOpen(false);
+      setLeadContext(null);
+    }
   };
 
   const handleLeadStageChange = async (stageId: string) => {
@@ -732,7 +791,6 @@ export default function MessagingPage() {
   const STORAGE_KEYS = {
     accountsPanel: 'messaging.accountsPanelCollapsed',
     chatsPanel: 'messaging.chatsPanelCollapsed',
-    aiPanel: 'messaging.aiPanelExpanded',
     hideEmptyFolders: 'messaging.hideEmptyFolders',
   };
   const getDraftKey = (accountId: string, chatId: string) =>
@@ -763,13 +821,6 @@ export default function MessagingPage() {
     } catch { return false; }
   });
 
-  const [aiPanelExpanded, setAiPanelExpanded] = useState(() => {
-    if (typeof window === 'undefined') return true;
-    try {
-      return localStorage.getItem(STORAGE_KEYS.aiPanel) !== 'false';
-    } catch { return true; }
-  });
-
   const [hideEmptyFolders, setHideEmptyFoldersState] = useState(() => {
     if (typeof window === 'undefined') return true;
     try {
@@ -790,11 +841,6 @@ export default function MessagingPage() {
     try { localStorage.setItem(STORAGE_KEYS.chatsPanel, String(v)); } catch {}
   }, []);
 
-  const setAiPanelExpandedStored = useCallback((v: boolean) => {
-    setAiPanelExpanded(v);
-    try { localStorage.setItem(STORAGE_KEYS.aiPanel, String(v)); } catch {}
-  }, []);
-
   const [chatTypeFilter, setChatTypeFilter] = useState<'all' | 'personal' | 'groups'>('all');
 
   useEffect(() => {
@@ -810,9 +856,29 @@ export default function MessagingPage() {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
-  // Open account and chat from URL (e.g. from command palette: ?bdAccountId=...&open=channelId)
+  // Resolve contactId → bdAccountId + open (переход с pipeline/CRM по контакту)
+  const urlContactId = searchParams.get('contactId');
   const urlBdAccountId = searchParams.get('bdAccountId');
   const urlOpenChannelId = searchParams.get('open');
+  useEffect(() => {
+    if (!urlContactId || urlBdAccountId || contactIdResolvedRef.current) return;
+    contactIdResolvedRef.current = true;
+    apiClient
+      .get<{ bd_account_id: string; channel_id: string }>('/api/messaging/resolve-contact', {
+        params: { contactId: urlContactId },
+      })
+      .then(({ data }) => {
+        const q = new URLSearchParams();
+        q.set('bdAccountId', data.bd_account_id);
+        q.set('open', data.channel_id);
+        router.replace(`${pathname}?${q.toString()}`);
+      })
+      .catch(() => {
+        contactIdResolvedRef.current = false;
+      });
+  }, [urlContactId, urlBdAccountId, pathname, router]);
+
+  // Open account and chat from URL (e.g. from command palette: ?bdAccountId=...&open=channelId)
   useEffect(() => {
     if (!urlBdAccountId || accounts.length === 0) return;
     const exists = accounts.some((a) => a.id === urlBdAccountId);
@@ -826,6 +892,8 @@ export default function MessagingPage() {
       urlOpenAppliedRef.current = true;
       setSelectedChat(chat);
       if (chat.lead_id && chat.conversation_id) {
+        setRightPanelTab('lead_card');
+        setRightPanelOpen(true);
         setLeadPanelOpenByConvId((prev) => ({ ...prev, [chat.conversation_id!]: true }));
       }
     }
@@ -2217,6 +2285,66 @@ export default function MessagingPage() {
           ? t('messaging.replyPreviewMedia')
           : '';
 
+      const isSystemMessage = (msg.content ?? '').trim().startsWith('[System]');
+      const isSharedChatCreated = isSystemMessage && (msg.content ?? '').includes('Общий чат создан');
+      const sharedChatLinkUrl = isSharedChatCreated && (leadContext?.shared_chat_invite_link?.trim()
+        ? leadContext.shared_chat_invite_link.trim()
+        : leadContext?.shared_chat_channel_id != null
+          ? (() => {
+              const raw = Number(leadContext.shared_chat_channel_id);
+              const id = Number.isNaN(raw) ? String(leadContext.shared_chat_channel_id).replace(/^-100/, '') : String(Math.abs(raw));
+              return id ? `https://t.me/c/${id}` : null;
+            })()
+          : null);
+
+      if (isSystemMessage) {
+        return (
+          <div data-telegram-message-id={msg.telegram_message_id ?? ''}>
+            {showDateSeparator && (
+              <div className="flex justify-center my-4">
+                <span className="text-xs text-muted-foreground bg-muted px-3 py-1 rounded-full">
+                  {new Date(msgTime).toLocaleDateString('ru-RU', {
+                    day: 'numeric',
+                    month: 'long',
+                    year: 'numeric',
+                  })}
+                </span>
+              </div>
+            )}
+            <div
+              className="flex justify-center my-2"
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setChatContextMenu(null);
+                setAccountContextMenu(null);
+                setMessageContextMenu({ x: e.clientX, y: e.clientY, message: msg });
+              }}
+            >
+              <div className="max-w-[85%] rounded-lg border border-border/60 bg-muted/40 px-4 py-2.5 text-center">
+                <p className="text-xs text-muted-foreground whitespace-pre-wrap break-words text-left">
+                  {(msg.content ?? '').trim().replace(/^\[System\]\s*/, '')}
+                </p>
+                {sharedChatLinkUrl && (
+                  <a
+                    href={sharedChatLinkUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 mt-2 text-sm text-primary hover:underline"
+                  >
+                    {t('messaging.openInTelegram', 'Открыть в Telegram')}
+                    <span aria-hidden>↗</span>
+                  </a>
+                )}
+                <div className="text-[10px] text-muted-foreground mt-1">{formatTime(msgTime)}</div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      const isGroupChat = selectedChat?.peer_type === 'chat' || selectedChat?.peer_type === 'channel';
+      const showSenderName = !isOutbound && isGroupChat && (msg.sender_name ?? '').trim();
+
       return (
         <div data-telegram-message-id={msg.telegram_message_id ?? ''}>
           {showDateSeparator && (
@@ -2240,6 +2368,11 @@ export default function MessagingPage() {
             }}
           >
             <div className={`max-w-[70%] ${isOutbound ? 'msg-bubble-out' : 'msg-bubble-in'}`}>
+              {showSenderName && (
+                <div className="text-[11px] font-medium text-muted-foreground mb-0.5 truncate" title={msg.sender_name ?? undefined}>
+                  {msg.sender_name}
+                </div>
+              )}
               {replyToTgId && (
                 <button
                   type="button"
@@ -2313,7 +2446,7 @@ export default function MessagingPage() {
         </div>
       );
     },
-    [messages, selectedAccountId, selectedChat, readOutboxMaxIdByChannel, setMediaViewer, t, scrollToMessageByTelegramId]
+    [messages, selectedAccountId, selectedChat, readOutboxMaxIdByChannel, setMediaViewer, t, scrollToMessageByTelegramId, leadContext]
   );
 
   // Сразу после монтирования Virtuoso для этого чата — мгновенно (behavior: 'auto') скролл в самый низ. Двойной rAF чтобы сработало после раскладки.
@@ -3652,181 +3785,280 @@ export default function MessagingPage() {
         )}
         </div>
 
-        {/* PHASE 2.2 — Lead Panel: только при lead_id, 4 блока по §11б */}
-        {isLead && isLeadPanelOpen && (
-          <div className="w-[280px] shrink-0 border-l border-border bg-card flex flex-col min-h-0 overflow-hidden">
-            {/* Block 1 — Header */}
-            <div className="shrink-0 px-3 py-3 border-b border-border flex items-start justify-between gap-2">
-              <div className="min-w-0 flex-1">
-                <div className="font-semibold text-base truncate text-foreground">
-                  {leadContext?.contact_name || getChatNameWithOverrides(selectedChat!)}
+        {/* Right Workspace Panel: табы AI Assistant + Lead Card (Telegram-like), lazy, persisted */}
+        <RightWorkspacePanel
+          hasChat={!!selectedChat}
+          isLead={isLead}
+          isOpen={rightPanelOpen}
+          onClose={() => setRightPanelOpen(false)}
+          activeTab={rightPanelTab}
+          onTabChange={(tab) => {
+            setRightPanelTab(tab);
+            setRightPanelOpen(true);
+            if (tab === 'lead_card' && convId) setLeadPanelOpenByConvId((prev) => ({ ...prev, [convId]: true }));
+          }}
+          tabLabels={{ ai: t('messaging.aiAssistantTitle', 'ИИ-помощник'), lead: t('messaging.leadCard') }}
+          leadCardContent={
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              {leadContextLoading ? (
+                <div className="flex items-center justify-center p-6">
+                  <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
                 </div>
-                <span className="inline-block mt-1 text-[10px] font-normal px-1.5 py-0.5 rounded bg-primary/15 text-primary">
-                  {t('messaging.badgeLead')}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setLeadPanelOpen(false)}
-                className="p-1.5 rounded text-muted-foreground hover:bg-accent hover:text-foreground shrink-0"
-                title={t('messaging.leadPanelClose')}
-                aria-label={t('messaging.leadPanelClose')}
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {leadContextLoading ? (
-              <div className="flex-1 flex items-center justify-center p-4">
-                <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
-              </div>
-            ) : leadContextError ? (
-              <div className="p-3 text-sm text-destructive">{leadContextError}</div>
-            ) : leadContext ? (
-              <>
-                {/* Block 2 — Pipeline + Stage */}
-                <div className="shrink-0 px-3 py-3 border-b border-border space-y-2">
-                  <div className="text-sm font-medium text-foreground truncate">{leadContext.pipeline.name}</div>
-                  <select
-                    value={leadContext.stage.id}
-                    onChange={(e) => handleLeadStageChange(e.target.value)}
-                    disabled={leadStagePatching}
-                    className="w-full text-sm rounded-md border border-input bg-background px-2 py-1.5 text-foreground"
-                  >
-                    {leadContext.stages.map((s) => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                  </select>
-                  {leadStagePatching && (
-                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                      <span>…</span>
+              ) : leadContextError ? (
+                <div className="p-4 text-sm text-destructive">{leadContextError}</div>
+              ) : leadContext ? (
+                <div className="space-y-4 px-4 py-4">
+                  <div className="flex items-start gap-3">
+                    <div className="p-2.5 rounded-xl bg-primary/10 text-primary shrink-0">
+                      <User className="w-6 h-6" />
                     </div>
-                  )}
-                </div>
-
-                {/* Block 3 — Source + PHASE 2.5 «Создать общий чат» */}
-                {(leadContext.campaign != null || leadContext.became_lead_at) && (
-                  <div className="shrink-0 px-3 py-3 border-b border-border space-y-2 text-sm text-muted-foreground">
-                    {leadContext.campaign != null && (
-                      <div className="truncate">
-                        {t('messaging.leadPanelCampaign')}: {leadContext.campaign.name}
-                      </div>
-                    )}
-                    {leadContext.became_lead_at && (
-                      <div>
-                        {formatLeadPanelDate(leadContext.became_lead_at)}
-                      </div>
-                    )}
+                    <div className="min-w-0 flex-1">
+                      <h3 className="font-heading text-base font-semibold text-foreground truncate">
+                        {leadContext.contact_name || (selectedChat && getChatNameWithOverrides(selectedChat)) || '—'}
+                      </h3>
+                      <p className="text-sm text-muted-foreground mt-0.5 truncate">
+                        {leadContext.company_name || (leadContext.contact_username ? `@${String(leadContext.contact_username).replace(/^@/, '')}` : null) || '—'}
+                      </p>
+                      <span className="inline-block mt-1.5 text-[10px] font-medium px-2 py-0.5 rounded-md bg-primary/15 text-primary">
+                        {t('messaging.badgeLead')}
+                      </span>
+                    </div>
+                  </div>
+                  <dl className="grid grid-cols-1 gap-2 text-sm">
+                    <div>
+                      <dt className="text-muted-foreground text-xs">{t('crm.pipelineStage', 'Воронка / Стадия')}</dt>
+                      <dd className="font-medium text-foreground truncate mt-0.5">{leadContext.pipeline.name} → {leadContext.stage.name}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground text-xs">{t('crm.amount', 'Сумма')}</dt>
+                      <dd className="font-medium text-foreground mt-0.5">
+                        {leadContext.won_at && leadContext.revenue_amount != null && leadContext.revenue_amount > 0
+                          ? formatDealAmount(leadContext.revenue_amount, 'EUR')
+                          : '—'}
+                      </dd>
+                    </div>
+                  </dl>
+                  {/* Действия на панели: общий чат, Won / Lost */}
+                  <div className="border-t border-border pt-3 space-y-2">
                     {leadContext.campaign != null && !leadContext.shared_chat_created_at && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const template = leadContext.shared_chat_settings?.titleTemplate ?? 'Чат: {{contact_name}}';
-                          const title = template.replace(/\{\{\s*contact_name\s*\}\}/gi, (leadContext.contact_name || 'Контакт').trim()).trim() || `Чат: ${leadContext.contact_name || 'Контакт'}`;
-                          setCreateSharedChatTitle(title);
-                          setCreateSharedChatExtraUsernames(leadContext.shared_chat_settings?.extraUsernames ?? []);
-                          setCreateSharedChatModalOpen(true);
-                        }}
-                        className="text-left w-full px-2 py-1.5 rounded-md bg-primary/10 text-primary hover:bg-primary/20 text-xs font-medium"
-                      >
+                      <Button variant="primary" size="sm" className="w-full justify-center" onClick={() => { const template = leadContext.shared_chat_settings?.titleTemplate ?? 'Чат: {{contact_name}}'; const title = template.replace(/\{\{\s*contact_name\s*\}\}/gi, (leadContext.contact_name || 'Контакт').trim()).trim() || `Чат: ${leadContext.contact_name || 'Контакт'}`; setCreateSharedChatTitle(title); setCreateSharedChatExtraUsernames(leadContext.shared_chat_settings?.extraUsernames ?? []); setCreateSharedChatNewUsername(''); setCreateSharedChatModalOpen(true); }}>
                         {t('messaging.createSharedChat')}
-                      </button>
+                      </Button>
                     )}
                     {leadContext.campaign != null && leadContext.shared_chat_created_at && (
-                      <div className="space-y-1.5 pt-0.5">
-                        <div className="text-emerald-600 dark:text-emerald-400 text-xs font-medium">
-                          ✓ {t('messaging.sharedChatCreated', 'Общий чат создан')}
-                        </div>
-                        {leadContext.shared_chat_channel_id && (
-                          <a
-                            href={(() => {
-                              const s = String(leadContext.shared_chat_channel_id!);
-                              const id = s.startsWith('-100') ? s.slice(4) : s.replace(/^-/, '');
-                              return `https://t.me/c/${id}`;
-                            })()}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                          >
-                            🔗 {t('messaging.openInTelegram', 'Открыть в Telegram')}
+                      <div className="flex flex-col gap-1.5">
+                        <div className="text-xs font-medium text-emerald-600 dark:text-emerald-400">✓ {t('messaging.sharedChatCreated', 'Общий чат создан')}</div>
+                        {(leadContext.shared_chat_invite_link?.trim() || leadContext.shared_chat_channel_id != null) && (
+                          <a href={leadContext.shared_chat_invite_link?.trim() || (() => { const raw = Number(leadContext.shared_chat_channel_id); const id = Number.isNaN(raw) ? String(leadContext.shared_chat_channel_id).replace(/^-100/, '') : String(Math.abs(raw)); return `https://t.me/c/${id}`; })()} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline">
+                            {t('messaging.openInTelegram', 'Открыть в Telegram')}
+                            <ExternalLink className="w-3.5 h-3.5" />
                           </a>
                         )}
                       </div>
                     )}
-                    {/* PHASE 2.7 — Won / Lost: кнопки только если shared и ещё не закрыто */}
                     {leadContext.shared_chat_created_at && !leadContext.won_at && !leadContext.lost_at && (
-                      <div className="flex flex-col gap-1.5 pt-1">
-                        <button
-                          type="button"
-                          onClick={() => { setMarkWonRevenue(''); setMarkWonModalOpen(true); }}
-                          className="text-left w-full px-2 py-1.5 rounded-md bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/25 text-xs font-medium"
-                        >
-                          ✓ {t('messaging.markWon', 'Закрыть сделку (Won)')}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => { setMarkLostReason(''); setMarkLostModalOpen(true); }}
-                          className="text-left w-full px-2 py-1.5 rounded-md bg-muted text-muted-foreground hover:bg-destructive/10 hover:text-destructive text-xs font-medium"
-                        >
-                          ✕ {t('messaging.markLost', 'Отметить как потеряно (Lost)')}
-                        </button>
+                      <div className="flex gap-2">
+                        <Button variant="primary" size="sm" className="flex-1 bg-emerald-600 hover:bg-emerald-700" onClick={() => { setMarkWonRevenue(''); setMarkWonModalOpen(true); }}>✓ {t('messaging.markWon', 'Закрыть сделку')}</Button>
+                        <Button variant="outline" size="sm" className="flex-1 text-muted-foreground hover:text-destructive hover:border-destructive/50" onClick={() => { setMarkLostReason(''); setMarkLostModalOpen(true); }}>✕ {t('messaging.markLost', 'Потеряно')}</Button>
                       </div>
                     )}
-                    {leadContext.won_at && (
-                      <div className="pt-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-                        ✓ {t('messaging.dealWon', 'Сделка закрыта')}
-                        {leadContext.revenue_amount != null && leadContext.revenue_amount > 0 && (
-                          <span className="ml-1"> — {leadContext.revenue_amount} €</span>
-                        )}
-                      </div>
-                    )}
-                    {leadContext.lost_at && (
-                      <div className="pt-1 text-xs text-muted-foreground">
-                        ✕ {t('messaging.dealLost', 'Сделка потеряна')}
-                        {leadContext.loss_reason && (
-                          <div className="mt-0.5 text-[11px] opacity-90">{leadContext.loss_reason}</div>
-                        )}
-                      </div>
-                    )}
+                    {leadContext.won_at && <div className="text-xs font-medium text-emerald-600 dark:text-emerald-400">✓ {t('messaging.dealWon', 'Сделка закрыта')}{leadContext.revenue_amount != null && leadContext.revenue_amount > 0 ? ` — ${formatDealAmount(leadContext.revenue_amount, 'EUR')}` : ''}</div>}
+                    {leadContext.lost_at && <div className="text-xs text-muted-foreground">✕ {t('messaging.dealLost', 'Сделка потеряна')}</div>}
+                  </div>
+                  <Button variant="outline" size="sm" className="w-full justify-center gap-2" onClick={() => setLeadCardModalOpen(true)}>
+                    <User className="w-4 h-4" />
+                    {t('messaging.openLeadCard', 'Открыть карточку лида')}
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          }
+          aiAssistantContent={
+            <AIAssistantTabContent
+              conversationId={convId}
+              bdAccountId={selectedAccountId}
+              onInsertDraft={(text) => setNewMessage(text)}
+              isLead={isLead}
+            />
+          }
+        />
+
+        {/* Карточка лида как диалог (как карточка сделки) */}
+        {leadContext && (
+          <Modal
+            isOpen={leadCardModalOpen}
+            onClose={() => setLeadCardModalOpen(false)}
+            title={t('messaging.leadCardTitle', 'Карточка лида')}
+            size="lg"
+          >
+            <div className="space-y-5">
+              {/* Шапка: название + подпись как у карточки сделки */}
+              <div className="flex flex-col items-center text-center pb-4 border-b border-border">
+                <div className="p-3 rounded-xl bg-primary/10 text-primary">
+                  <User className="w-10 h-10" />
+                </div>
+                <h2 className="mt-3 font-heading text-xl font-semibold text-foreground truncate w-full px-2">
+                  {leadContext.contact_name || (selectedChat && getChatNameWithOverrides(selectedChat)) || '—'}
+                </h2>
+                <p className="text-sm text-muted-foreground mt-1">
+                  {leadContext.company_name || (leadContext.contact_username ? `@${String(leadContext.contact_username).replace(/^@/, '')}` : null) || '—'}
+                </p>
+                <span className="inline-block mt-2 text-[10px] font-medium px-2 py-0.5 rounded-md bg-primary/15 text-primary">
+                  {t('messaging.badgeLead')}
+                </span>
+              </div>
+
+              {/* Поля: воронка/стадия, сумма, кампания */}
+              <div className="grid grid-cols-1 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-foreground mb-1.5">{t('crm.pipelineStage', 'Воронка / Стадия')}</label>
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-sm text-muted-foreground">{leadContext.pipeline.name}</span>
+                    <select
+                      value={leadContext.stage.id}
+                      onChange={(e) => handleLeadStageChange(e.target.value)}
+                      disabled={leadStagePatching}
+                      className="w-full px-4 py-2.5 rounded-xl border border-border bg-background text-foreground text-sm focus:ring-2 focus:ring-ring outline-none"
+                    >
+                      {leadContext.stages.map((s) => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </select>
+                    {leadStagePatching && <span className="flex items-center gap-1 text-xs text-muted-foreground"><Loader2 className="w-3 h-3 animate-spin" /> …</span>}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-foreground mb-1.5">{t('crm.amount', 'Сумма')}</label>
+                  <p className="text-sm font-medium text-foreground">
+                    {leadContext.won_at && leadContext.revenue_amount != null && leadContext.revenue_amount > 0 ? formatDealAmount(leadContext.revenue_amount, 'EUR') : '—'}
+                  </p>
+                </div>
+                {(leadContext.campaign != null || leadContext.became_lead_at) && (
+                  <div>
+                    <label className="block text-sm font-medium text-foreground mb-1.5">{t('messaging.leadPanelCampaign', 'Кампания')}</label>
+                    <p className="text-sm text-foreground">{leadContext.campaign != null ? leadContext.campaign.name : '—'}</p>
+                    {leadContext.became_lead_at && <p className="text-xs text-muted-foreground mt-0.5">{formatLeadPanelDate(leadContext.became_lead_at)}</p>}
                   </div>
                 )}
+              </div>
 
-                {/* Block 4 — Timeline */}
-                <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-2">
-                  {leadContext.timeline.length === 0 ? (
-                    <div className="text-xs text-muted-foreground">—</div>
-                  ) : (
-                    leadContext.timeline.map((ev, i) => (
-                      <div key={i} className="text-xs text-muted-foreground">
-                        <span className="text-[10px] tabular-nums">{formatLeadPanelDate(ev.created_at)}</span>
-                        {' — '}
-                        {ev.type === 'lead_created' && t('messaging.timelineLeadCreated')}
-                        {ev.type === 'stage_changed' && t('messaging.timelineStageChanged', { name: ev.stage_name ?? '' })}
-                        {ev.type === 'deal_created' && t('messaging.timelineDealCreated')}
-                      </div>
-                    ))
-                  )}
+              {/* Три кнопки как у карточки сделки: заметка, напоминание, общий чат (секции заметок/напоминаний ниже) */}
+              <div className="grid grid-cols-3 gap-3">
+                <button type="button" className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-border bg-muted/30 hover:bg-muted/50 text-foreground transition-colors">
+                  <StickyNote className="w-5 h-5 text-primary" />
+                  <span className="text-xs font-medium">{t('pipeline.dealFormAddNote', 'Добавить заметку')}</span>
+                </button>
+                <button type="button" className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-border bg-muted/30 hover:bg-muted/50 text-foreground transition-colors">
+                  <Bell className="w-5 h-5 text-primary" />
+                  <span className="text-xs font-medium">{t('pipeline.dealFormAddReminder', 'Добавить напоминание')}</span>
+                </button>
+                {leadContext.shared_chat_created_at && (leadContext.shared_chat_invite_link?.trim() || leadContext.shared_chat_channel_id != null) ? (
+                  <a href={leadContext.shared_chat_invite_link?.trim() || (() => { const raw = Number(leadContext.shared_chat_channel_id); const id = Number.isNaN(raw) ? String(leadContext.shared_chat_channel_id).replace(/^-100/, '') : String(Math.abs(raw)); return `https://t.me/c/${id}`; })()} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-border bg-muted/30 hover:bg-muted/50 text-foreground transition-colors no-underline">
+                    <ExternalLink className="w-5 h-5 text-primary" />
+                    <span className="text-xs font-medium">{t('messaging.openInTelegram', 'Открыть в Telegram')}</span>
+                  </a>
+                ) : leadContext.campaign != null && !leadContext.shared_chat_created_at ? (
+                  <button type="button" className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-border bg-muted/30 hover:bg-muted/50 text-foreground transition-colors" onClick={() => { const template = leadContext.shared_chat_settings?.titleTemplate ?? 'Чат: {{contact_name}}'; const title = template.replace(/\{\{\s*contact_name\s*\}\}/gi, (leadContext.contact_name || 'Контакт').trim()).trim() || `Чат: ${leadContext.contact_name || 'Контакт'}`; setCreateSharedChatTitle(title); setCreateSharedChatExtraUsernames(leadContext.shared_chat_settings?.extraUsernames ?? []); setCreateSharedChatNewUsername(''); setCreateSharedChatModalOpen(true); setLeadCardModalOpen(false); }}>
+                    <MessageSquare className="w-5 h-5 text-primary" />
+                    <span className="text-xs font-medium">{t('messaging.createSharedChat')}</span>
+                  </button>
+                ) : (
+                  <div className="flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-dashed border-border bg-muted/10 text-muted-foreground">
+                    <MessageSquare className="w-5 h-5 opacity-50" />
+                    <span className="text-xs">{t('pipeline.dealFormNoChat', 'Нет чата')}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Won / Lost в карточке */}
+              {leadContext.shared_chat_created_at && !leadContext.won_at && !leadContext.lost_at && (
+                <div className="flex gap-2">
+                  <Button variant="primary" size="sm" className="flex-1 bg-emerald-600 hover:bg-emerald-700" onClick={() => { setMarkWonRevenue(''); setMarkWonModalOpen(true); setLeadCardModalOpen(false); }}>✓ {t('messaging.markWon', 'Закрыть сделку')}</Button>
+                  <Button variant="outline" size="sm" className="flex-1 text-muted-foreground hover:text-destructive hover:border-destructive/50" onClick={() => { setMarkLostReason(''); setMarkLostModalOpen(true); setLeadCardModalOpen(false); }}>✕ {t('messaging.markLost', 'Потеряно')}</Button>
                 </div>
-              </>
-            ) : null}
-          </div>
+              )}
+              {leadContext.won_at && <div className="text-sm font-medium text-emerald-600 dark:text-emerald-400">✓ {t('messaging.dealWon', 'Сделка закрыта')}{leadContext.revenue_amount != null && leadContext.revenue_amount > 0 ? ` — ${formatDealAmount(leadContext.revenue_amount, 'EUR')}` : ''}</div>}
+              {leadContext.lost_at && <div className="text-sm text-muted-foreground">✕ {t('messaging.dealLost', 'Сделка потеряна')}{leadContext.loss_reason && <div className="mt-1 text-xs opacity-90">{leadContext.loss_reason}</div>}</div>}
+
+              {/* Заметки */}
+              {leadContext.contact_id && (
+                <div className="border-t border-border pt-4 space-y-3">
+                  <h4 className="text-sm font-medium text-foreground flex items-center gap-2"><StickyNote className="w-4 h-4" />{t('crm.notes', 'Заметки')}</h4>
+                  <ul className="space-y-2 max-h-28 overflow-y-auto">
+                    {leadNotes.map((n) => (
+                      <li key={n.id} className="flex items-start justify-between gap-2 text-sm bg-muted/40 rounded-lg p-2">
+                        <span className="text-foreground flex-1 break-words">{n.content}</span>
+                        <button type="button" onClick={() => deleteNote(n.id).then(() => fetchContactNotes(leadContext.contact_id!).then(setLeadNotes))} className="text-muted-foreground hover:text-destructive shrink-0" aria-label={t('common.delete')}>×</button>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="flex gap-2">
+                    <input type="text" value={leadNoteText} onChange={(e) => setLeadNoteText(e.target.value)} placeholder={t('crm.addNote', 'Добавить заметку')} className="flex-1 min-w-0 px-2.5 py-1.5 rounded-xl border border-border bg-background text-sm text-foreground" />
+                    <Button size="sm" disabled={!leadNoteText.trim() || addingLeadNote} onClick={async () => { if (!leadContext.contact_id || !leadNoteText.trim()) return; setAddingLeadNote(true); try { await createContactNote(leadContext.contact_id, leadNoteText.trim()); setLeadNoteText(''); fetchContactNotes(leadContext.contact_id).then(setLeadNotes); } finally { setAddingLeadNote(false); } }}>{addingLeadNote ? '…' : t('common.add', 'Добавить')}</Button>
+                  </div>
+                </div>
+              )}
+
+              {/* Напоминания */}
+              {leadContext.contact_id && (
+                <div className="border-t border-border pt-4 space-y-3">
+                  <h4 className="text-sm font-medium text-foreground flex items-center gap-2"><Bell className="w-4 h-4" />{t('crm.reminders', 'Напоминания')}</h4>
+                  <ul className="space-y-2 max-h-24 overflow-y-auto">
+                    {leadReminders.map((r) => (
+                      <li key={r.id} className={clsx('flex items-center justify-between gap-2 text-sm rounded-lg p-2', r.done ? 'bg-muted/30 text-muted-foreground' : 'bg-muted/40')}>
+                        <span className="flex-1 truncate">{r.title || new Date(r.remind_at).toLocaleString()}</span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {!r.done && <button type="button" onClick={() => updateReminder(r.id, { done: true }).then(() => leadContext.contact_id && fetchContactReminders(leadContext.contact_id).then(setLeadReminders))} className="p-1 rounded text-green-600 hover:bg-green-500/20" title={t('crm.markDone', 'Выполнено')}><Check className="w-4 h-4" /></button>}
+                          <button type="button" onClick={() => deleteReminder(r.id).then(() => leadContext.contact_id && fetchContactReminders(leadContext.contact_id).then(setLeadReminders))} className="p-1 rounded text-muted-foreground hover:text-destructive">×</button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="flex flex-wrap gap-2 items-end">
+                    <input type="datetime-local" value={leadRemindAt} onChange={(e) => setLeadRemindAt(e.target.value)} className="px-2.5 py-1.5 rounded-xl border border-border bg-background text-sm text-foreground" />
+                    <input type="text" value={leadRemindTitle} onChange={(e) => setLeadRemindTitle(e.target.value)} placeholder={t('crm.reminderTitle', 'Текст')} className="w-28 px-2.5 py-1.5 rounded-xl border border-border bg-background text-sm text-foreground" />
+                    <Button size="sm" disabled={!leadRemindAt || addingLeadReminder} onClick={async () => { if (!leadContext.contact_id || !leadRemindAt) return; setAddingLeadReminder(true); try { await createContactReminder(leadContext.contact_id, { remind_at: new Date(leadRemindAt).toISOString(), title: leadRemindTitle.trim() || undefined }); setLeadRemindAt(''); setLeadRemindTitle(''); fetchContactReminders(leadContext.contact_id).then(setLeadReminders); } finally { setAddingLeadReminder(false); } }}>{addingLeadReminder ? '…' : t('common.add', 'Добавить')}</Button>
+                  </div>
+                </div>
+              )}
+
+              {/* История */}
+              <div className="border-t border-border pt-4 space-y-2">
+                <h4 className="text-sm font-medium text-foreground">{t('messaging.timelineTitle', 'История')}</h4>
+                {leadContext.timeline.length === 0 ? <div className="text-xs text-muted-foreground">—</div> : leadContext.timeline.map((ev, i) => (
+                  <div key={i} className="text-xs text-muted-foreground">
+                    <span className="tabular-nums">{formatLeadPanelDate(ev.created_at)}</span>
+                    {' — '}
+                    {ev.type === 'lead_created' && t('messaging.timelineLeadCreated')}
+                    {ev.type === 'stage_changed' && t('messaging.timelineStageChanged', { name: ev.stage_name ?? '' })}
+                    {ev.type === 'deal_created' && t('messaging.timelineDealCreated')}
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex gap-3 pt-2 border-t border-border">
+                <Button type="button" variant="outline" className="flex-1" onClick={() => setLeadCardModalOpen(false)}>
+                  {t('pipeline.dealFormCancel', 'Закрыть')}
+                </Button>
+              </div>
+            </div>
+          </Modal>
         )}
       </div>
 
       {/* Модалка создания общего чата в Telegram */}
       <Modal
         isOpen={createSharedChatModalOpen}
-        onClose={() => setCreateSharedChatModalOpen(false)}
+        onClose={() => !createSharedChatSubmitting && setCreateSharedChatModalOpen(false)}
         title={t('messaging.createSharedChatModalTitle', 'Создать общий чат в Telegram')}
         size="md"
       >
-        <div className="px-6 py-4 space-y-4">
+        <div className="px-6 py-4 space-y-5">
           <p className="text-sm text-muted-foreground">
             {t('messaging.createSharedChatModalDesc', 'Будет создана группа в Telegram с текущим BD-аккаунтом, лидом и указанными участниками.')}
           </p>
-          <div>
-            <label className="block text-sm font-medium text-foreground mb-1.5">{t('messaging.sharedChatTitle', 'Название чата')}</label>
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-foreground">{t('messaging.sharedChatTitle', 'Название чата')}</label>
             <Input
               value={createSharedChatTitle}
               onChange={(e) => setCreateSharedChatTitle(e.target.value)}
@@ -3835,43 +4067,66 @@ export default function MessagingPage() {
               maxLength={255}
             />
           </div>
-          <div>
-            <label className="block text-sm font-medium text-foreground mb-1.5">{t('messaging.sharedChatParticipants', 'Участники')}</label>
-            <div className="text-xs text-muted-foreground mb-1.5">
-              {t('messaging.sharedChatLeadParticipant', 'Лид')}: {leadContext?.contact_username ? `@${leadContext.contact_username}` : leadContext?.contact_name || '—'}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {(createSharedChatExtraUsernames).map((u, i) => (
-                <span key={i} className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-sm">
-                  @{u}
-                  <button
-                    type="button"
-                    onClick={() => setCreateSharedChatExtraUsernames((prev) => prev.filter((_, j) => j !== i))}
-                    className="text-muted-foreground hover:text-destructive"
-                    aria-label={t('messaging.remove')}
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </span>
-              ))}
-              <input
-                type="text"
-                placeholder={t('messaging.sharedChatAddUsername', 'Добавить @username')}
-                className="rounded-md border border-border bg-background px-2 py-1 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-primary"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    const v = (e.target as HTMLInputElement).value.trim().replace(/^@/, '');
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-foreground">{t('messaging.sharedChatParticipants', 'Участники')}</label>
+            <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-2">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground shrink-0">{t('messaging.sharedChatLeadParticipant', 'Лид')}:</span>
+                <span className="font-medium text-foreground truncate">{leadContext?.contact_username ? `@${leadContext.contact_username}` : leadContext?.contact_name || '—'}</span>
+              </div>
+              {createSharedChatExtraUsernames.length > 0 && (
+                <div className="flex flex-wrap gap-2 pt-1 border-t border-border">
+                  {createSharedChatExtraUsernames.map((u, i) => (
+                    <span key={i} className="inline-flex items-center gap-1.5 rounded-md bg-background border border-border px-2.5 py-1 text-sm">
+                      @{u}
+                      <button
+                        type="button"
+                        onClick={() => setCreateSharedChatExtraUsernames((prev) => prev.filter((_, j) => j !== i))}
+                        className="text-muted-foreground hover:text-destructive rounded p-0.5"
+                        aria-label={t('messaging.remove')}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="flex gap-2 pt-1">
+                <input
+                  type="text"
+                  value={createSharedChatNewUsername}
+                  onChange={(e) => setCreateSharedChatNewUsername(e.target.value)}
+                  placeholder={t('messaging.sharedChatAddUsername', 'Добавить @username')}
+                  className="flex-1 min-w-0 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      const v = createSharedChatNewUsername.trim().replace(/^@/, '');
+                      if (v) {
+                        setCreateSharedChatExtraUsernames((prev) => (prev.includes(v) ? prev : [...prev, v]));
+                        setCreateSharedChatNewUsername('');
+                      }
+                    }
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    const v = createSharedChatNewUsername.trim().replace(/^@/, '');
                     if (v) {
                       setCreateSharedChatExtraUsernames((prev) => (prev.includes(v) ? prev : [...prev, v]));
-                      (e.target as HTMLInputElement).value = '';
+                      setCreateSharedChatNewUsername('');
                     }
-                  }
-                }}
-              />
+                  }}
+                >
+                  {t('common.add', 'Добавить')}
+                </Button>
+              </div>
             </div>
           </div>
-          <div className="flex justify-end gap-2 pt-2">
+          <div className="flex justify-end gap-3 pt-2">
             <Button variant="outline" onClick={() => setCreateSharedChatModalOpen(false)} disabled={createSharedChatSubmitting}>
               {t('global.cancel', 'Отмена')}
             </Button>
@@ -3901,9 +4156,9 @@ export default function MessagingPage() {
                   setCreateSharedChatSubmitting(false);
                 }
               }}
-              disabled={createSharedChatSubmitting}
+              disabled={createSharedChatSubmitting || !createSharedChatTitle.trim()}
             >
-              {createSharedChatSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              {createSharedChatSubmitting ? <Loader2 className="w-4 h-4 animate-spin shrink-0" /> : null}
               {createSharedChatSubmitting ? t('messaging.creating', 'Создание…') : t('messaging.createSharedChat', 'Создать общий чат')}
             </Button>
           </div>
@@ -4221,113 +4476,6 @@ export default function MessagingPage() {
         )}
       </ContextMenu>
 
-      {/* Панель ИИ-помощника справа — ширина и стили как у левых панелей (w-16 свернута, w-[320px] развернута) */}
-      <div
-        className={`h-full min-h-0 self-stretch bg-card border-l border-border flex flex-col transition-[width] duration-200 shrink-0 ${aiPanelExpanded ? 'w-[320px]' : 'w-16'}`}
-        aria-expanded={aiPanelExpanded}
-      >
-        {aiPanelExpanded ? (
-          <>
-            <div className="flex items-center justify-between gap-2 p-3 border-b border-border shrink-0 min-h-[3.5rem]">
-              <h3 className="font-semibold text-foreground truncate flex-1 min-w-0">{t('messaging.aiAssistant')}</h3>
-              <button
-                type="button"
-                onClick={() => setAiPanelExpandedStored(false)}
-                className="p-1.5 rounded-md text-muted-foreground hover:bg-accent shrink-0"
-                title={t('messaging.collapsePanel')}
-                aria-label={t('messaging.collapseAiPanelAria')}
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col p-3">
-              {aiSummaryText !== null && (
-                <div className="mb-3 p-3 rounded-lg border border-border bg-muted/20">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <FileText className="w-4 h-4 text-primary shrink-0" />
-                    <span className="font-medium text-sm">{t('messaging.aiSummary')}</span>
-                  </div>
-                  <p className="text-sm text-foreground whitespace-pre-wrap">{aiSummaryText}</p>
-                </div>
-              )}
-              <p className="text-xs text-muted-foreground mb-3">
-                {t('messaging.aiCommandsPlaceholder')}
-              </p>
-              <div className="space-y-2">
-                {[
-                  { icon: FileText, labelKey: 'aiSummary', descKey: 'aiSummaryDesc', action: 'summary' as const },
-                  { icon: Send, labelKey: 'aiCompose', descKey: 'aiComposeDesc', action: null },
-                  { icon: Bot, labelKey: 'aiReplyForMe', descKey: 'aiReplyForMeDesc', action: null },
-                  { icon: MessageSquare, labelKey: 'aiReplyIdeas', descKey: 'aiReplyIdeasDesc', action: null },
-                  { icon: Zap, labelKey: 'aiTone', descKey: 'aiToneDesc', action: null },
-                ].map(({ icon: Icon, labelKey, descKey, action }) => (
-                  <button
-                    key={labelKey}
-                    type="button"
-                    disabled={action === 'summary' && (!selectedChat || !messages.length || aiSummaryLoading)}
-                    onClick={action === 'summary' ? async () => {
-                      if (!selectedChat || messages.length === 0) return;
-                      setAiSummaryError(null);
-                      setAiSummaryLoading(true);
-                      try {
-                        const res = await apiClient.post<{ summary?: string; empty?: boolean }>('/api/ai/chat/summarize', {
-                          messages: messages.map((m) => ({ content: m.content ?? '', role: m.direction === 'outbound' ? 'user' : 'assistant' })),
-                        });
-                        setAiSummaryText(res.data?.empty ? '' : (res.data?.summary ?? ''));
-                      } catch (e: any) {
-                        const code = e?.response?.data?.code;
-                        const msg = e?.response?.data?.message || e?.message;
-                        setAiSummaryError(code === 'OPENAI_NOT_CONFIGURED' ? t('messaging.aiNotConfigured') : msg);
-                        setAiSummaryText(null);
-                      } finally {
-                        setAiSummaryLoading(false);
-                      }
-                    } : undefined}
-                    className="w-full text-left p-3 rounded-lg border border-border bg-muted/30 hover:bg-muted/50 transition-colors flex gap-3 items-start disabled:opacity-60 disabled:cursor-not-allowed"
-                  >
-                    {aiSummaryLoading && action === 'summary' ? (
-                      <Loader2 className="w-4 h-4 text-primary shrink-0 mt-0.5 animate-spin" />
-                    ) : (
-                      <Icon className="w-4 h-4 text-primary shrink-0 mt-0.5" />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="font-medium text-sm">{t(`messaging.${labelKey}`)}</div>
-                      <div className="text-xs text-muted-foreground mt-0.5">
-                        {action === 'summary' && aiSummaryError ? aiSummaryError : t(`messaging.${descKey}`)}
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-              <div className="mt-4 pt-4 border-t border-border">
-                <p className="text-xs text-muted-foreground mb-2">{t('messaging.aiChatPlaceholder')}</p>
-                <div className="rounded-lg border border-border bg-muted/20 p-3 min-h-[8rem] text-sm text-muted-foreground">
-                  {t('messaging.aiChatStubText')}
-                </div>
-                <Input
-                  placeholder={t('messaging.askAssistantPlaceholder')}
-                  className="mt-2 text-sm"
-                  disabled
-                  readOnly
-                />
-              </div>
-            </div>
-          </>
-        ) : (
-          <div className="flex flex-col flex-1 min-h-0 w-full">
-            <button
-              type="button"
-              onClick={() => setAiPanelExpandedStored(true)}
-              className="p-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground flex flex-col items-center gap-0.5 w-full shrink-0 border-b border-border"
-              title={t('messaging.expandAiPanel')}
-              aria-label={t('messaging.expandAiPanelAria')}
-            >
-              <Sparkles className="w-5 h-5 shrink-0" aria-hidden />
-              <ChevronLeft className="w-4 h-4 shrink-0" aria-hidden />
-            </button>
-          </div>
-        )}
-      </div>
       {mediaViewer && (
         <MediaViewer
           url={mediaViewer.url}

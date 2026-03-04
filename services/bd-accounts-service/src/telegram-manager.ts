@@ -1877,6 +1877,23 @@ export class TelegramManager {
   }
 
   /**
+   * Обновить контакт по telegram_id данными из диалога (first_name, last_name, username).
+   * Вызывается при синхронизации чатов — обогащение контактов при sync.
+   */
+  async enrichContactFromDialog(
+    organizationId: string,
+    telegramId: string,
+    userInfo?: { firstName?: string; lastName?: string | null; username?: string | null }
+  ): Promise<void> {
+    if (!telegramId?.trim()) return;
+    const firstName = userInfo?.firstName?.trim() ?? '';
+    const lastName = userInfo?.lastName != null ? (userInfo.lastName?.trim() || null) : null;
+    const username = userInfo?.username != null ? (userInfo.username?.trim() || null) : null;
+    const hasInfo = firstName || lastName || username;
+    await this.upsertContactFromTelegramUser(organizationId, telegramId, hasInfo ? { firstName: firstName || '', lastName, username } : undefined);
+  }
+
+  /**
    * Обогатить контакты данными из Telegram (first_name, last_name, username) по getEntity.
    * Используется перед запуском кампании по галочке «Обогащать контакты из Telegram».
    */
@@ -2319,16 +2336,27 @@ export class TelegramManager {
 
   private static mapDialogToItem(dialog: any): any {
     const pinned = !!(dialog.pinned ?? dialog.dialog?.pinned);
+    const entity = dialog.entity;
+    const isUser = dialog.isUser ?? (entity && (entity.className === 'User' || entity.constructor?.className === 'User'));
+    let first_name: string | undefined;
+    let last_name: string | null | undefined;
+    let username: string | null | undefined;
+    if (entity && isUser) {
+      first_name = (entity.firstName ?? entity.first_name ?? '').trim() || undefined;
+      last_name = (entity.lastName ?? entity.last_name ?? '').trim() || null;
+      username = (entity.username ?? '').trim() || null;
+    }
     return {
       id: String(dialog.id),
       name: dialog.name || dialog.title || 'Unknown',
       unreadCount: dialog.unreadCount || 0,
       lastMessage: dialog.message?.text || '',
       lastMessageDate: dialog.message?.date,
-      isUser: dialog.isUser,
+      isUser: dialog.isUser ?? !!isUser,
       isGroup: dialog.isGroup,
       isChannel: dialog.isChannel,
       pinned,
+      ...(isUser && { first_name, last_name, username }),
     };
   }
 
@@ -2709,11 +2737,24 @@ export class TelegramManager {
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo?.isConnected) return false;
 
-    const accRow = await this.pool.query('SELECT organization_id FROM bd_accounts WHERE id = $1 LIMIT 1', [accountId]);
-    const organizationId = accRow.rows[0]?.organization_id;
+    const accRow = await this.pool.query(
+      'SELECT organization_id, display_name, username, first_name FROM bd_accounts WHERE id = $1 LIMIT 1',
+      [accountId]
+    );
+    const row = accRow.rows[0] as { organization_id?: string; display_name?: string | null; username?: string | null; first_name?: string | null } | undefined;
+    const organizationId = row?.organization_id;
+    const account = row;
 
     let title = chatId;
     let peerType = 'user';
+    const isAccountName = (t: string) => {
+      const s = (t || '').trim();
+      if (!s) return false;
+      const d = (account?.display_name || '').trim();
+      const u = (account?.username || '').trim();
+      const f = (account?.first_name || '').trim();
+      return (d && d === s) || (u && u === s) || (f && f === s);
+    };
     try {
       const peerIdNum = Number(chatId);
       const peerInput = Number.isNaN(peerIdNum) ? chatId : peerIdNum;
@@ -2724,6 +2765,7 @@ export class TelegramManager {
         if (c === 'User') {
           const u = entity as any;
           title = [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || title;
+          if (account && isAccountName(title)) title = chatId;
           peerType = 'user';
           if (organizationId) {
             await this.upsertContactFromTelegramUser(organizationId, chatId, {
@@ -2734,9 +2776,11 @@ export class TelegramManager {
           }
         } else if (c === 'Chat') {
           title = (entity as any).title?.trim() || title;
+          if (account && isAccountName(title)) title = chatId;
           peerType = 'chat';
         } else if (c === 'Channel') {
           title = (entity as any).title?.trim() || title;
+          if (account && isAccountName(title)) title = chatId;
           peerType = 'channel';
         }
       }
@@ -2757,7 +2801,7 @@ export class TelegramManager {
              AND (NULLIF(TRIM(COALESCE(a.display_name, '')), '') = TRIM(EXCLUDED.title)
                OR a.username = TRIM(EXCLUDED.title)
                OR NULLIF(TRIM(COALESCE(a.first_name, '')), '') = TRIM(EXCLUDED.title))
-         ) THEN bd_account_sync_chats.title ELSE EXCLUDED.title END,
+         ) THEN bd_account_sync_chats.telegram_chat_id::text ELSE EXCLUDED.title END,
          peer_type = EXCLUDED.peer_type,
          folder_id = COALESCE(bd_account_sync_chats.folder_id, EXCLUDED.folder_id)`,
       [accountId, chatId, title, peerType, folderId]
@@ -2778,7 +2822,7 @@ export class TelegramManager {
   async createSharedChat(
     accountId: string,
     params: { title: string; leadTelegramUserId?: number; extraUsernames?: string[] }
-  ): Promise<{ channelId: string; title: string }> {
+  ): Promise<{ channelId: string; title: string; inviteLink?: string }> {
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo?.isConnected || !clientInfo.client) {
       throw new Error('BD account not connected');
@@ -2841,7 +2885,25 @@ export class TelegramManager {
       await client.invoke(new Api.channels.InviteToChannel({ channel: inputChannel, users: inputUsers }));
     }
 
-    return { channelId: String(channelId), title };
+    // Получить инвайт-ссылку (формат t.me/+XXX), она работает; t.me/c/ID для супергрупп часто не открывается
+    let inviteLink: string | undefined;
+    try {
+      const fullChannelId = -1000000000 - Number(channelId);
+      const peer = await client.getInputEntity(fullChannelId);
+      const exported = await client.invoke(
+        new Api.messages.ExportChatInvite({
+          peer,
+          legacyRevokePermanent: false,
+        })
+      ) as { link?: string };
+      if (exported?.link && typeof exported.link === 'string') {
+        inviteLink = exported.link.trim();
+      }
+    } catch (e: any) {
+      console.warn('[TelegramManager] createSharedChat: could not export invite link', e?.message);
+    }
+
+    return { channelId: String(channelId), title, inviteLink };
   }
 
   /**

@@ -279,7 +279,12 @@ export async function seed(knex: Knex): Promise<void> {
         .returning('id', 'telegram_id', 'first_name', 'last_name');
       contactsRows = [...contactsRows, c];
     }
-    contacts = contactsRows.map((c) => ({ id: c.id, telegram_id: c.telegram_id, first_name: c.first_name, last_name: c.last_name }));
+    contacts = contactsRows.map((c: any) => ({
+      id: c.id,
+      telegram_id: c.telegram_id ?? null,
+      first_name: c.first_name ?? '',
+      last_name: c.last_name ?? '',
+    }));
     const pipelineRow = await knex('pipelines').where({ organization_id: org.id, is_default: true }).first();
     if (!pipelineRow) {
       console.log('⏭️ Repair: no default pipeline. Skip.');
@@ -325,12 +330,14 @@ export async function seed(knex: Knex): Promise<void> {
     const startContactIdx = accIdx * CHATS_PER_ACCOUNT;
     for (let j = 0; j < CHATS_PER_ACCOUNT; j++) {
       const contact = contacts[startContactIdx + j];
+      if (!contact?.telegram_id?.trim()) continue;
+      const title = [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim() || contact.telegram_id || contact.id || 'Chat';
       const folderId = customFolderIds.length > 0 ? customFolderIds[j % customFolderIds.length]! : 0;
       syncChats.push({
         bd_account_id: acc.id,
         telegram_chat_id: contact.telegram_id,
         contact_id: contact.id,
-        title: `${contact.first_name} ${contact.last_name}`,
+        title,
         folder_id: folderId,
       });
     }
@@ -412,30 +419,63 @@ export async function seed(knex: Knex): Promise<void> {
   }
   console.log(`✅ Messages: ${messageCount}`);
 
-  // Сделки от минус недели до плюс недели от сегодня, чтобы в таймлайне были разные колонки
-  const dealDaysFromToday = [-7, -5, -3, -1, 0, 2, 4, 7];
+  // Демо-кампания для лидов (чтобы в карточке лида отображалась кампания)
+  let campaignId: string | null = null;
+  const existingCampaign = await knex('campaigns').where({ organization_id: org.id, name: 'Демо-кампания' }).first() as { id: string } | undefined;
+  if (existingCampaign) {
+    campaignId = existingCampaign.id;
+  } else {
+    const [inserted] = await knex('campaigns')
+      .insert({
+        organization_id: org.id,
+        pipeline_id: pipeline.id,
+        name: 'Демо-кампания',
+        status: 'completed',
+      })
+      .returning('id');
+    campaignId = inserted?.id ?? null;
+  }
+
+  // Лиды вместо сделок: 8 лидов от минус недели до плюс недели, с привязкой к диалогам (conversations)
+  const leadDaysFromToday = [-7, -5, -3, -1, 0, 2, 4, 7];
   for (let i = 0; i < 8; i++) {
     const stage = stages[i % stages.length];
     const contact = contacts[i * 5];
-    const company = companies[i % companies.length];
-    const owner = users[i % users.length];
-    const createdAt = daysFromTodayAt10(dealDaysFromToday[i] ?? 0);
-    await knex('deals').insert({
-      organization_id: org.id,
-      company_id: company.id,
-      contact_id: contact.id,
-      pipeline_id: pipeline.id,
-      stage_id: stage.id,
-      owner_id: owner.id,
-      created_by_id: owner.id,
-      title: `Демо-сделка ${i + 1}: ${contact.first_name} ${contact.last_name}`,
-      value: [5000, 12000, 8000, 25000, 15000, 7000, 18000, 9000][i],
-      currency: 'RUB',
-      created_at: createdAt,
-      updated_at: createdAt,
-    });
+    if (!stage || !contact) continue;
+    const createdAt = daysFromTodayAt10(leadDaysFromToday[i] ?? 0);
+    const [lead] = await knex('leads')
+      .insert({
+        organization_id: org.id,
+        contact_id: contact.id,
+        pipeline_id: pipeline.id,
+        stage_id: stage.id,
+        order_index: i,
+        created_at: createdAt,
+        updated_at: createdAt,
+      })
+      .returning('id');
+    if (!lead) continue;
+    const sc = syncChats[i * 5];
+    if (sc) {
+      await knex('conversations')
+        .insert({
+          id: randomUUID(),
+          organization_id: org.id,
+          bd_account_id: sc.bd_account_id,
+          channel: 'telegram',
+          channel_id: sc.telegram_chat_id,
+          contact_id: contact.id,
+          lead_id: lead.id,
+          campaign_id: campaignId ?? null,
+          became_lead_at: createdAt,
+          created_at: createdAt,
+          updated_at: createdAt,
+        })
+        .onConflict(['organization_id', 'bd_account_id', 'channel', 'channel_id'])
+        .merge(['lead_id', 'campaign_id', 'became_lead_at', 'updated_at']);
+    }
   }
-  console.log('✅ Deals: 8 (spread across different days for timeline)');
+  console.log('✅ Leads: 8 (with conversations for messaging)');
 
   console.log('\n🎉 Demo seed completed.');
   console.log('\n📝 Demo access:');

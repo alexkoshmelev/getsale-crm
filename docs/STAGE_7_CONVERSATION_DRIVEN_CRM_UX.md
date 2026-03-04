@@ -510,9 +510,165 @@
 - [x] **PHASE 2.1 — Chat List:** бейдж Lead / Contact, Stage + Pipeline в списке. Чистый список, без поиска и фильтров по типу. **Контракт поведения:** §11а. *Реализовано: интерфейс Chat расширен (conversation_id, lead_id, lead_stage_name, lead_pipeline_name); маппинг из API в обоих путях загрузки чатов; строка списка — имя + бейдж справа, при lead_id — две строки серым (pipeline, stage), превью последнего сообщения; убраны поиск и переключатель Все/Личные/Группы в области списка чатов.*
 - [x] **PHASE 2.2 — Lead Panel:** имя, pipeline, stage dropdown, campaign source, became_lead_at, timeline (3 типа событий, макс. 10). Правая колонка, минимально. **Контракт поведения:** §11б. *Реализовано:* GET lead-context при открытии панели; PATCH lead stage без optimistic; 4 блока (Header, Pipeline+Stage, Source, Timeline); состояние open/close по conversation_id; при переходе с `?open=channelId` для лида панель открывается автоматически; кнопка «Лид» в шапке чата открывает панель, если она закрыта.
 - [x] **PHASE 2.3 — Папка «Новые лиды»:** закреплённая сверху «Новые лиды (N)», без вложенности. **Контракт поведения:** §11в + 4 UX-детали. *Реализовано:* backend — first_manager_reply_at, GET new-leads, проставление при send; фронт — системная папка с иконкой Inbox и счётчиком N сверху сайдбара (визуально отделена линией), activeSidebarSection new-leads | telegram, при клике список заменяется на new-leads (became_lead_at DESC), после send лид удаляется из локального state без reload, empty state «Нет новых лидов» / «Все лиды обработаны 🎉». Клик по папке Telegram возвращает обычный список.
-- [ ] PHASE 2.4 — Campaign deep-link: «Открыть диалог», передача conversation/open, авто-раскрытие панели только при этом переходе.
-- [ ] **PHASE 2.5 — Campaign UX Upgrade (§11г):** метрики total_sent / total_read / total_replied / total_converted_to_shared_chat и конверсии; shared_chat_created_at + POST mark-shared-chat; Campaign Details — KPI, воронка, таблица лидов с фильтрами; Campaign List — мини-KPI в строке; Lead Panel — кнопка «Создать общий чат».
-- [ ] **PHASE 2.6 — Shared Chat Intelligence (§11д):** shared_chat_channel_id в conversations; create-shared-chat сохраняет channel_id, 409 при повторном создании; mark-shared-chat возвращает 409 если уже создан; Lead Panel после создания — «Общий чат создан» + ссылка «Открыть в Telegram»; системное сообщение в диалоге «[System] Общий чат создан: <title>»; avg_time_to_shared_hours в campaign stats.
-- [ ] **PHASE 2.7 — Won + Revenue (§11е):** won_at, revenue_amount, lost_at, loss_reason в conversations; POST mark-won / mark-lost; Lead Panel — кнопки «Закрыть сделку» и «Отметить как потеряно», модалки с суммой/причиной; системные сообщения в диалоге; campaign stats: total_won, total_lost, total_revenue, win_rate, avg_time_to_won; воронка до Won, Lost отдельно.
-- [ ] Campaign UI: Lead badge, Stage, «Открыть диалог»; перед запуском — редактирование таблицы контактов.
-- [ ] Удалить из старого UI: дублирующиеся фильтры, избыточные поля, лишние вкладки.
+- [x] **PHASE 2.4 — Campaign deep-link:** «Открыть диалог» в таблице участников кампании ведёт на `/dashboard/messaging?bdAccountId=...&open=channelId`; при открытии чата с лидом Lead Panel авто-раскрывается. Реализовано в CampaignParticipantsTable и messaging page (urlOpenChannelId + leadPanelOpenByConvId).
+- [x] **PHASE 2.5 — Campaign UX Upgrade (§11г):** метрики total_sent / total_read / total_replied / total_converted_to_shared_chat и конверсии; shared_chat_created_at + POST mark-shared-chat; Campaign Details — KPI, воронка, таблица лидов с фильтрами; Campaign List — мини-KPI в строке; Lead Panel — кнопка «Создать общий чат». Реализовано.
+- [x] **PHASE 2.6 — Shared Chat Intelligence (§11д):** shared_chat_channel_id в conversations; create-shared-chat сохраняет channel_id, 409 при повторном создании; mark-shared-chat возвращает 409 если уже создан; Lead Panel после создания — «Общий чат создан» + ссылка «Открыть в Telegram»; системное сообщение в диалоге «[System] Общий чат создан: <title>»; avg_time_to_shared_hours в campaign stats. Реализовано.
+- [x] **PHASE 2.7 — Won + Revenue (§11е):** won_at, revenue_amount, lost_at, loss_reason в conversations; POST mark-won / mark-lost; Lead Panel — кнопки «Закрыть сделку» и «Отметить как потеряно», модалки с суммой/причиной; системные сообщения в диалоге; campaign stats: total_won, total_lost, total_revenue, win_rate, avg_time_to_won; воронка до Won, Lost отдельно. Реализовано.
+- [x] Campaign UI: Lead badge, Stage, «Открыть диалог» в таблице участников; ссылка на messaging с авто-раскрытием Lead Panel. Редактирование таблицы контактов перед запуском — в flow кампании (аудитория).
+- [ ] Удалить из старого UI: дублирующиеся фильтры, избыточные поля, лишние вкладки (по мере рефакторинга; не блокер).
+- [x] **PHASE 2.8 — Stability & Integrity:** CHECK-ограничения в БД (won/lost взаимоисключающие, revenue только при won); официальные события Conversation (§18); доменные константы в @getsale/types; execution logging (stats >2s, create-shared-chat external >5s, 409); документирование профилирования (§19).
+- [x] **PHASE 2.9 — Observability & Reliability (§20):** Correlation ID в api-gateway (генерация, прокидывание, ответ); чтение и fallback в messaging, campaign, bd-accounts, pipeline; структурированный логгер @getsale/logger и замена console.warn в ключевых местах; Prometheus /metrics (duration, total, 409, shared_chat_created, deals_won, external_call); GET /ready в messaging, campaign, bd-accounts.
+- [x] **PHASE 2.10 — Data Consistency + Governance (§21):** Транзакции в create-shared-chat, mark-won, mark-lost (BEGIN → UPDATE conversations + INSERT system message → COMMIT; ROLLBACK при ошибке). RBAC-политика зафиксирована (§16, flat trust). Conversation v1 объявлен замороженным (§17). Рекомендуется далее: unit/integration-тест на атомарность mark-won / create-shared-chat при появлении тестовой инфраструктуры.
+- [x] **AI Workspace — Right Workspace Panel + Conversation Intelligence (§22):** Универсальная правая панель с табами AI Assistant и Lead Card (rail, persisted tab, lazy AI content); миграция conversation_ai_insights; обогащение чатов (account_name, chat_title в GET /chats); POST /api/messaging/conversations/:id/ai/analysis и /ai/summary; ai-service POST /api/ai/conversations/analyze (structured JSON); кнопки Generate Analysis (только для лида) и Summarize Chat (scope: last_7_days / full / since_sync); вставка draft_message в поле ввода.
+
+---
+
+## 16. Решение по RBAC — зафиксированная политика
+
+**Архитектурное решение:** CRM работает в модели **flat trust** в рамках организации: любой аутентифицированный пользователь организации может выполнять lifecycle-действия без проверки роли:
+- «Создать общий чат» (create-shared-chat, mark-shared-chat)
+- «Закрыть сделку (Won)» (mark-won)
+- «Отметить как потеряно (Lost)» (mark-lost)
+
+**Обоснование:** На момент PHASE 2.1–2.9 это сознательная продуктовая политика: все пользователи организации считаются доверенными в рамках доступа к CRM. В коде **нет** вызова `canPermission` для этих эндпоинтов — это не забывчивость, а отражение выбранной модели.
+
+**При смене политики:** Ввести проверку через `canPermission(pool, user.role, 'messaging', 'conversation.mark_won' | 'conversation.mark_lost' | 'conversation.create_shared_chat')` и записи в `role_permissions`. Любое ужесточение — отдельное продуктовое решение с обновлением этого раздела и кода.
+
+---
+
+## 17. Заморозка схемы Conversation v1
+
+**Объявление:** Модель **Conversation** считается стабильной версией **v1** после завершения PHASE 2.1–2.7.
+
+**Текущий набор полей (не расширять без обсуждения):**
+- Идентификация: id, organization_id, bd_account_id, channel, channel_id, contact_id
+- Воронка/лид: lead_id, campaign_id, became_lead_at, first_manager_reply_at
+- Shared: shared_chat_created_at, shared_chat_channel_id
+- Исход сделки: won_at, revenue_amount, lost_at, loss_reason
+- UX: last_viewed_at, created_at, updated_at
+
+**Правило:** Добавление новых полей в таблицу `conversations` допускается только после архитектурного/продуктового решения (отдельная задача, обновление §13 и миграция). Не превращать Conversation в «мусорку» полей (unread_count, assignment, tags, SLA, owner_id, priority и т.п. — по §7 не добавляем).
+
+---
+
+## 18. PHASE 2.8 — Официальные события Conversation (Event Consistency Policy)
+
+Системные сообщения в диалоге (таблица `messages`) при lifecycle-действиях записываются с единым форматом `metadata`:
+
+| Действие | metadata.event | Описание |
+|----------|----------------|----------|
+| Создан общий чат | `shared_chat_created` | После успешного create-shared-chat. В metadata также: title. |
+| Сделка закрыта (Won) | `deal_won` | После mark-won. В metadata также: revenue_amount. |
+| Сделка потеряна (Lost) | `deal_lost` | После mark-lost. В metadata также: reason. |
+
+Константы в коде: `@getsale/types` — `ConversationSystemEvent.SHARED_CHAT_CREATED`, `DEAL_WON`, `DEAL_LOST`. Использовать их при INSERT системных сообщений. Это обеспечивает единый событийный слой для будущих webhook-ов, аналитики и автоматизации.
+
+---
+
+## 19. PHASE 2.8 — Operational monitoring и профилирование Campaign Stats
+
+**Логирование (включено):**
+- **GET /api/campaigns/:id/stats:** при времени ответа > 2 с логируется предупреждение с `campaignId`, `durationMs`, `participantsTotal`.
+- **POST /api/messaging/create-shared-chat:** при вызове bd-accounts > 5 с логируется предупреждение с `durationMs`, `conversationId`.
+- **409 Conflict:** при возврате 409 по create-shared-chat, mark-shared-chat, mark-won, mark-lost логируется предупреждение с именем endpoint и `conversationId` (для анализа повторных попыток).
+
+**Профилирование stats при росте участников:**
+- На 1k / 5k / 10k участников рекомендуется замерить время выполнения GET /api/campaigns/:id/stats (логи дают `durationMs`).
+- В dev для тяжёлых кампаний выполнить в psql по одному из подзапросов stats:
+  `EXPLAIN (ANALYZE, BUFFERS) SELECT ...` (подставить запрос из campaign-service: totalReadRes, avgTimeToSharedRes и т.д.).
+- Убедиться, что используются индексы по `campaign_id`, `conversations(campaign_id, shared_chat_created_at)`. При деградации — рассмотреть materialized view для агрегатов (отдельное решение).
+
+---
+
+## 20. PHASE 2.9 — Observability & Reliability Layer
+
+**Цель:** если что-то сломается — узнавать за минуты, а не часы. Correlation ID + структурированные логи + метрики.
+
+### 20.1 Correlation ID
+
+- **api-gateway:** генерирует `x-correlation-id` (UUID v4), если заголовок не передан; прокидывает во все downstream-сервисы в `onProxyReq`; добавляет в ответ в `onProxyRes` и в `/health`.
+- **messaging-service, campaign-service, bd-accounts-service, pipeline-service:** читают `x-correlation-id` из запроса; при отсутствии — fallback (собственный UUID); кладут в `req.correlationId`; используют во всех структурированных логах (`correlation_id`).
+- **messaging → bd-accounts:** при вызове `create-shared-chat` передаёт текущий `x-correlation-id` в заголовке запроса к bd-accounts.
+
+### 20.2 Структурированный логгер
+
+- Используется `@getsale/logger` (createLogger(serviceName)); формат JSON: `timestamp`, `service`, `level`, `message`, `correlation_id`, `endpoint`, `event`, и др.
+- В messaging-service все предупреждения по 409 и медленным вызовам переведены на `log.warn({ message, correlation_id, endpoint, event, ... })`; ошибки — на `log.error({ message, correlation_id, error })`.
+- В campaign-service медленный stats — `log.warn({ message, correlation_id, endpoint, durationMs, participantsTotal, event: 'slow_stats' })`.
+
+### 20.3 Метрики Prometheus
+
+- **messaging-service:** `GET /metrics` — `http_request_duration_seconds`, `http_requests_total`, `conflicts_409_total` (по endpoint), `shared_chat_created_total`, `deals_won_total`, `external_call_duration_seconds` (target: bd-accounts).
+- **campaign-service:** `GET /metrics` — `http_request_duration_seconds`, `http_requests_total`.
+- pipeline-service, crm-service, automation-service уже имели `/metrics` и счётчики по своим доменам.
+
+### 20.4 Health и Ready
+
+- **GET /health** — процесс жив (есть во всех сервисах).
+- **GET /ready** — готовность к работе: в messaging, campaign, bd-accounts, pipeline — проверка БД (`SELECT 1`); в pipeline дополнительно проверка RabbitMQ. При недоступности БД — 503.
+
+### 20.5 Дальнейшие шаги (P3)
+
+- OpenTelemetry / distributed tracing (Jaeger, Tempo).
+- Alerting по error rate и latency.
+- DB slow query logging, pg_stat_statements, мониторинг connection pool.
+
+---
+
+## 21. PHASE 2.10 — Data Consistency Hardening (обязательно)
+
+**Цель:** Исключить event inconsistency: при сбое между UPDATE conversations и INSERT системного сообщения не должно оставаться «сделка закрыта без записи в чате».
+
+**Реализация (выполнено):** Во всех трёх lifecycle-эндпоинтах используется одна транзакция:
+
+| Эндпоинт | Операции в транзакции | Rollback при ошибке |
+|----------|------------------------|----------------------|
+| POST /api/messaging/create-shared-chat | UPDATE conversations (shared_chat_created_at, shared_chat_channel_id) + INSERT messages (system) | Да |
+| POST /api/messaging/mark-won | UPDATE conversations (won_at, revenue_amount) + INSERT messages (system) | Да |
+| POST /api/messaging/mark-lost | UPDATE conversations (lost_at, loss_reason) + INSERT messages (system) | Да |
+
+**Паттерн в коде:** `const client = await pool.connect(); try { await client.query('BEGIN'); ... await client.query('COMMIT'); } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; } finally { client.release(); }`. Вызов bd-accounts в create-shared-chat выполняется **до** транзакции (откатить внешний API нельзя); транзакция охватывает только запись в БД.
+
+**Governance:** См. §16 (RBAC — flat trust), §17 (Conversation v1 locked). Рекомендуется при появлении тестовой инфраструктуры добавить интеграционный тест: вызов mark-won при принудительном сбое после UPDATE и до INSERT не должен оставлять запись в conversations без системного сообщения (проверка атомарности).
+
+---
+
+## 22. AI Workspace — Right Workspace Panel и Conversation Intelligence
+
+**Цель:** Универсальная правая панель (Telegram-like) с табами AI Assistant и Lead Card; слой AI-аналитики по диалогам с персистентным хранением; обогащение чатов при sync.
+
+### 22.1 Right Workspace Panel
+
+- **Архитектура:** Одна панель `RightWorkspacePanel` с табами `ai_assistant` | `lead_card`. В свёрнутом состоянии — вертикальный rail с кнопками 🤖 AI и 👤 Lead. При клике панель открывается, кнопки становятся табами сверху; одновременно активен один таб.
+- **Состояние:** `isOpen`, `activeTab`; активный таб сохраняется в `sessionStorage` (`messaging_right_panel_tab`), при обновлении страницы восстанавливается.
+- **Условия:** Без выбранного чата кнопки disabled; Lead Card доступен только для чата-лида. Контент AI Assistant — lazy-loaded (dynamic import).
+- **Реализация:** Компонент `RightWorkspacePanel`; контент Lead Card — прежние блоки Lead Panel (Header, Pipeline+Stage, Source+Shared/Won/Lost, Timeline). Контент AI — `AIAssistantTabContent` (Generate Analysis, Summarize, вставка черновика в поле ввода).
+
+### 22.2 Обогащение чатов при sync
+
+- При отдаче списка чатов (GET /api/messaging/chats) в ответ добавлены поля: `account_name` (из bd_accounts: display_name / username / phone / telegram_id), `chat_title` (из bd_account_sync_chats.title для групп).
+- В UI в качестве основного отображения используется CRM-friendly имя (display_name, first_name+last_name, username); `telegram_id` не показывается как основной идентификатор.
+
+### 22.3 Таблица conversation_ai_insights
+
+- **Назначение:** Хранение результатов AI-анализа/саммари/черновиков по диалогу (история генераций, модель, тип).
+- **Поля:** id, conversation_id (FK), account_id (FK bd_accounts), type (`analysis` | `summary` | `draft`), payload_json (структурированный результат, без полного промпта), model_version, generated_from_message_id (nullable), created_at.
+- **Миграция:** `20250629000001_conversation_ai_insights.ts`.
+
+### 22.4 AI Analysis
+
+- **Условие:** Выбран аккаунт, выбран чат, чат — лид. Кнопка «Generate Analysis» в табе AI Assistant.
+- **Backend:** POST /api/messaging/conversations/:id/ai/analysis — загрузка последних N сообщений (лимит контекста), вызов ai-service POST /api/ai/conversations/analyze, сохранение результата в conversation_ai_insights (type=analysis), возврат структурированного JSON.
+- **Structured output:** chat_meta, project_summary, fundraising_status, stage, last_activity, risk_zone, recommendations[], draft_message. Черновик можно вставить в поле ввода (editable, не отправляется автоматически, label «Generated by AI»).
+
+### 22.5 Chat Summarizer
+
+- Кнопка «Summarize Chat» с опциями: Last 7 days, Full chat, Since last sync. Результат сохраняется в conversation_ai_insights (type=summary). Backend: POST /api/messaging/conversations/:id/ai/summary (body: scope).
+
+### 22.6 AI best practices (зафиксировано)
+
+- Не вызывать AI при автоматическом открытии чата; только по явному действию пользователя.
+- Ограничение контекста (последние 100–200 сообщений); при необходимости — internal summary + последние 20.
+- Не хранить полный промпт в БД; в payload_json — только результат.
+- Не блокировать UI: loading state при генерации.
+- Архитектура допускает добавление новых AI-инструментов (расширяемые типы в conversation_ai_insights).

@@ -17,7 +17,7 @@
 - **Input**: плейсхолдер `placeholder:text-muted-foreground`, фокус-кольцо, hover по границе.
 - **Card**: токены `bg-card`, `border-border`, `shadow-soft`, `rounded-xl`, лёгкий hover по тени; заголовок через `font-heading`.
 - **EmptyState**: мягкий контейнер иконки, `font-heading` для заголовка.
-- **Modal / SlideOver**: токены `bg-card`, `border-border`, `shadow-soft-lg`, `rounded-2xl` у модалки; кнопка закрытия с `focus-visible`.
+- **Modal (карточки как диалоги)**: токены `bg-card`, `border-border`, `shadow-soft-lg`, `rounded-2xl` у модалки; кнопка закрытия с `focus-visible`.
 - **SearchInput**: токены `border-input`, `bg-background`, `text-muted-foreground`.
 - **Skeleton / Pagination**: `bg-muted`, `divide-border`, `border-border`, `focus-visible` у кнопок.
 
@@ -28,7 +28,7 @@
 ### 5. Страницы
 - **Dashboard (главная)**: карточки метрик с `border-l-4 border-l-primary`, hover (подъём + тень), ссылки на CRM/Messaging/Pipeline; быстрые действия — кнопки `Button` с иконками и стрелкой; секции через компонент `Card`.
 - **Login**: фон через градиент с `primary`; карточка с `shadow-soft-lg`; форма на компонентах `Input` и `Button`; фокус и доступность у ссылки «Sign up».
-- **CRM**: таблицы и вкладки на токенах (`bg-muted/50` заголовок, `divide-border`, `hover:bg-muted/30`); сообщения об ошибках — `bg-destructive/10`; SlideOver и детали сущностей — `font-heading`, `text-foreground` / `text-muted-foreground`.
+- **CRM**: таблицы и вкладки на токенах (`bg-muted/50` заголовок, `divide-border`, `hover:bg-muted/30`); сообщения об ошибках — `bg-destructive/10`; модалки деталей сущностей — `font-heading`, `text-foreground` / `text-muted-foreground`.
 - **Pipeline**: колонки воронки — `rounded-xl`, `border-border`, `bg-muted/30`, карточки сделок с hover; кнопка «Новая сделка» — компонент `Button` со ссылкой на CRM; пустые состояния — пунктирная граница и мягкий фон.
 
 ### 6. Локализация
@@ -69,7 +69,7 @@ npm run dev
 - **Settings** — вкладки через i18n, Card, Input, Button, токены.
 - **Team** — i18n, Card, EmptyState, модалка приглашения с формой и переводами.
 - **Signup** — полный i18n, Input/Button, градиент и карточка в едином стиле с логином.
-- **CRM** — все подписи, кнопки, пустые состояния, модалка удаления и детали в SlideOver переведены через `t()`.
+- **CRM** — все подписи, кнопки, пустые состояния, модалка удаления и детали в модалках переведены через `t()`.
 - **Pipeline** — заголовок, подзаголовок, кнопка, пустые состояния через i18n.
 
 ### Как использовать тосты

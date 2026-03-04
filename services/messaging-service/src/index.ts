@@ -1,12 +1,51 @@
 import express from 'express';
 import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
+import { register, Counter, Histogram } from 'prom-client';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, MessageSentEvent, MessageDeletedEvent } from '@getsale/events';
-import { MessageChannel, MessageDirection, MessageStatus } from '@getsale/types';
+import { MessageChannel, MessageDirection, MessageStatus, ConversationSystemEvent, LeadActivityLogType } from '@getsale/types';
+import { createLogger } from '@getsale/logger';
 
 const app = express();
 const PORT = process.env.PORT || 3003;
+const log = createLogger('messaging-service');
+const CORRELATION_HEADER = 'x-correlation-id';
+
+const httpRequestDuration = new Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'HTTP request duration in seconds',
+  labelNames: ['method', 'path', 'status'],
+  registers: [register],
+});
+const httpRequestsTotal = new Counter({
+  name: 'http_requests_total',
+  help: 'Total HTTP requests',
+  labelNames: ['method', 'path', 'status'],
+  registers: [register],
+});
+const conflicts409Total = new Counter({
+  name: 'conflicts_409_total',
+  help: 'Total 409 Conflict responses',
+  labelNames: ['endpoint'],
+  registers: [register],
+});
+const sharedChatCreatedTotal = new Counter({
+  name: 'shared_chat_created_total',
+  help: 'Total shared chats created',
+  registers: [register],
+});
+const dealsWonTotal = new Counter({
+  name: 'deals_won_total',
+  help: 'Total deals marked as won',
+  registers: [register],
+});
+const externalCallDuration = new Histogram({
+  name: 'external_call_duration_seconds',
+  help: 'External HTTP call duration (e.g. bd-accounts)',
+  labelNames: ['target'],
+  registers: [register],
+});
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
@@ -17,6 +56,7 @@ const rabbitmq = new RabbitMQClient(
 );
 
 const BD_ACCOUNTS_SERVICE_URL = process.env.BD_ACCOUNTS_SERVICE_URL || 'http://bd-accounts-service:3007';
+const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:3005';
 
 
 function getUser(req: express.Request) {
@@ -100,8 +140,41 @@ async function attachLead(db: Pool, params: { conversationId: string; leadId: st
 
 app.use(express.json());
 
-app.get('/health', (req, res) => {
+// PHASE 2.9 — Correlation ID: read from gateway or generate fallback
+app.use((req: express.Request, _res, next) => {
+  const incoming = req.headers[CORRELATION_HEADER] as string | undefined;
+  (req as any).correlationId = typeof incoming === 'string' && incoming.trim() ? incoming.trim() : randomUUID();
+  next();
+});
+
+// PHASE 2.9 — Request timing and metrics
+app.use((req: express.Request, res: express.Response, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const path = (req.route?.path ?? req.path).replace(/[0-9a-f-]{36}/gi, ':id');
+    const status = String(res.statusCode);
+    httpRequestDuration.observe({ method: req.method, path, status }, (Date.now() - start) / 1000);
+    httpRequestsTotal.inc({ method: req.method, path, status });
+  });
+  next();
+});
+
+app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'messaging-service' });
+});
+
+app.get('/ready', async (_req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.status(200).json({ status: 'ready' });
+  } catch {
+    res.status(503).json({ status: 'not ready', check: 'postgres' });
+  }
+});
+
+app.get('/metrics', async (_req, res) => {
+  res.setHeader('Content-Type', register.contentType);
+  res.end(await register.metrics());
 });
 
 // Get inbox (unread messages)
@@ -238,7 +311,37 @@ app.get('/api/messaging/messages', async (req, res) => {
     params.push(limitNum, offset);
 
     const result = await pool.query(query, params);
-    const rows = (result.rows as any[]).slice().reverse();
+    let rows = (result.rows as any[]).slice().reverse();
+
+    // Для групповых чатов добавляем sender_name для входящих сообщений (от кого из участников)
+    if (bdId && chId && rows.length > 0) {
+      const peerRow = await pool.query(
+        'SELECT peer_type FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+        [bdId, chId]
+      );
+      const peerType = peerRow.rows[0] as { peer_type: string } | undefined;
+      if (peerType && (peerType.peer_type === 'chat' || peerType.peer_type === 'channel')) {
+        const inboundContactIds = [...new Set(
+          (rows as any[]).filter((r) => r.direction === 'inbound' && r.contact_id).map((r) => r.contact_id)
+        )] as string[];
+        let senderNames: Record<string, string> = {};
+        if (inboundContactIds.length > 0) {
+          const contactsRes = await pool.query(
+            `SELECT id, COALESCE(NULLIF(TRIM(display_name), ''), NULLIF(TRIM(CONCAT(COALESCE(first_name,''), ' ', COALESCE(last_name,''))), ''), username, telegram_id::text) AS display_name
+             FROM contacts WHERE id = ANY($1::uuid[])`,
+            [inboundContactIds]
+          );
+          for (const c of contactsRes.rows as { id: string; display_name: string | null }[]) {
+            senderNames[c.id] = (c.display_name && c.display_name.trim()) ? c.display_name.trim() : c.id.slice(0, 8);
+          }
+        }
+        rows = rows.map((r) =>
+          r.direction === 'inbound' && r.contact_id
+            ? { ...r, sender_name: senderNames[r.contact_id] ?? null }
+            : r
+        );
+      }
+    }
 
     let countQuery = 'SELECT COUNT(*) FROM messages WHERE organization_id = $1';
     const countParams: any[] = [user.organizationId];
@@ -342,11 +445,12 @@ app.get('/api/messaging/chats', async (req, res) => {
           c.display_name,
           c.username,
           COALESCE(
-            c.display_name,
-            CASE WHEN NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), '') IS NOT NULL
+            CASE WHEN c.telegram_id IS DISTINCT FROM a.telegram_id THEN c.display_name ELSE NULL END,
+            CASE WHEN c.telegram_id IS DISTINCT FROM a.telegram_id
+                 AND NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), '') IS NOT NULL
                  AND TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) NOT LIKE 'Telegram %'
                  THEN TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) ELSE NULL END,
-            c.username,
+            CASE WHEN c.telegram_id IS DISTINCT FROM a.telegram_id THEN c.username ELSE NULL END,
             CASE WHEN NULLIF(TRIM(COALESCE(s.title, '')), '') IS NOT NULL
                  AND (TRIM(COALESCE(s.title, '')) = NULLIF(TRIM(COALESCE(a.display_name, '')), '')
                       OR TRIM(COALESCE(s.title, '')) = COALESCE(a.username, '')
@@ -364,7 +468,9 @@ app.get('/api/messaging/chats', async (req, res) => {
           conv.became_lead_at,
           conv.last_viewed_at,
           st.name AS lead_stage_name,
-          p.name AS lead_pipeline_name
+          p.name AS lead_pipeline_name,
+          COALESCE(NULLIF(TRIM(a.display_name), ''), a.username, a.phone_number, a.telegram_id::text) AS account_name,
+          s.title AS chat_title
         FROM bd_account_sync_chats s
         JOIN bd_accounts a ON a.id = s.bd_account_id AND a.organization_id = $1
         LEFT JOIN LATERAL (
@@ -401,11 +507,12 @@ app.get('/api/messaging/chats', async (req, res) => {
         c.display_name,
         c.username,
         COALESCE(
-          c.display_name,
-          CASE WHEN NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), '') IS NOT NULL
+          CASE WHEN c.telegram_id IS DISTINCT FROM ba.telegram_id THEN c.display_name ELSE NULL END,
+          CASE WHEN c.telegram_id IS DISTINCT FROM ba.telegram_id
+               AND NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), '') IS NOT NULL
                AND TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) NOT LIKE 'Telegram %'
                THEN TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) ELSE NULL END,
-          c.username,
+          CASE WHEN c.telegram_id IS DISTINCT FROM ba.telegram_id THEN c.username ELSE NULL END,
           CASE WHEN NULLIF(TRIM(COALESCE(s.title, '')), '') IS NOT NULL
                AND (TRIM(COALESCE(s.title, '')) = NULLIF(TRIM(COALESCE(ba.display_name, '')), '')
                     OR TRIM(COALESCE(s.title, '')) = COALESCE(ba.username, '')
@@ -423,7 +530,9 @@ app.get('/api/messaging/chats', async (req, res) => {
         conv.became_lead_at,
         conv.last_viewed_at,
         st.name AS lead_stage_name,
-        p.name AS lead_pipeline_name
+        p.name AS lead_pipeline_name,
+        COALESCE(NULLIF(TRIM(ba.display_name), ''), ba.username, ba.phone_number, ba.telegram_id::text) AS account_name,
+        s.title AS chat_title
       FROM messages m
       LEFT JOIN contacts c ON m.contact_id = c.id
       LEFT JOIN bd_account_sync_chats s ON s.bd_account_id = m.bd_account_id AND s.telegram_chat_id = m.channel_id
@@ -441,7 +550,7 @@ app.get('/api/messaging/chats', async (req, res) => {
     }
 
     query += `
-      GROUP BY m.organization_id, m.channel, m.channel_id, m.bd_account_id, m.contact_id, s.peer_type, c.first_name, c.last_name, c.email, c.telegram_id, c.display_name, c.username, s.title, ba.display_name, ba.username, ba.first_name, conv.id, conv.lead_id, conv.campaign_id, conv.became_lead_at, conv.last_viewed_at, st.name, p.name
+      GROUP BY m.organization_id, m.channel, m.channel_id, m.bd_account_id, m.contact_id, s.peer_type, c.first_name, c.last_name, c.email, c.telegram_id, c.display_name, c.username, s.title, ba.display_name, ba.username, ba.first_name, ba.phone_number, ba.telegram_id, conv.id, conv.lead_id, conv.campaign_id, conv.became_lead_at, conv.last_viewed_at, st.name, p.name
       ORDER BY last_message_at DESC NULLS LAST
     `;
 
@@ -498,6 +607,32 @@ app.patch('/api/messaging/conversations/:id/view', async (req, res) => {
   }
 });
 
+// Разрешить контакт в (bd_account_id, channel_id) для перехода в messaging (по contactId из pipeline/CRM).
+app.get('/api/messaging/resolve-contact', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const contactId = req.query.contactId;
+    if (!contactId || typeof contactId !== 'string') {
+      return res.status(400).json({ error: 'contactId required' });
+    }
+    const row = await pool.query(
+      `SELECT bd_account_id, channel_id FROM conversations
+       WHERE organization_id = $1 AND contact_id = $2
+       ORDER BY updated_at DESC NULLS LAST
+       LIMIT 1`,
+      [user.organizationId, contactId]
+    );
+    if (row.rows.length === 0) {
+      return res.status(404).json({ error: 'No conversation for this contact' });
+    }
+    const r = row.rows[0] as { bd_account_id: string; channel_id: string };
+    res.json({ bd_account_id: r.bd_account_id, channel_id: r.channel_id });
+  } catch (error) {
+    console.error('Error resolving contact:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // PHASE 2.2 — единый контракт для Lead Panel. Всё в одном ответе. Без лишних полей.
 app.get('/api/messaging/conversations/:id/lead-context', async (req, res) => {
   try {
@@ -507,7 +642,7 @@ app.get('/api/messaging/conversations/:id/lead-context', async (req, res) => {
     const conv = await pool.query(
       `SELECT c.id AS conversation_id, c.lead_id, c.campaign_id, c.became_lead_at, c.contact_id,
               c.bd_account_id, c.channel_id,
-              c.shared_chat_created_at, c.shared_chat_channel_id,
+              c.shared_chat_created_at, c.shared_chat_channel_id, c.shared_chat_invite_link,
               c.won_at, c.revenue_amount, c.lost_at, c.loss_reason,
               l.pipeline_id, l.stage_id,
               p.name AS pipeline_name,
@@ -520,12 +655,14 @@ app.get('/api/messaging/conversations/:id/lead-context', async (req, res) => {
               ) AS contact_name,
               c2.telegram_id AS contact_telegram_id,
               c2.username AS contact_username,
-              camp.name AS campaign_name
+              camp.name AS campaign_name,
+              co.name AS company_name
        FROM conversations c
        LEFT JOIN leads l ON l.id = c.lead_id
        LEFT JOIN pipelines p ON p.id = l.pipeline_id
        LEFT JOIN stages st ON st.id = l.stage_id
        LEFT JOIN contacts c2 ON c2.id = c.contact_id
+       LEFT JOIN companies co ON co.id = c2.company_id
        LEFT JOIN campaigns camp ON camp.id = c.campaign_id
        WHERE c.id = $1 AND c.organization_id = $2`,
       [conversationId, user.organizationId]
@@ -564,10 +701,10 @@ app.get('/api/messaging/conversations/:id/lead-context', async (req, res) => {
         `SELECT lal.type, lal.created_at, lal.metadata, s.name AS to_stage_name
          FROM lead_activity_log lal
          LEFT JOIN stages s ON s.id = (lal.metadata->>'to_stage_id')::uuid
-         WHERE lal.lead_id = $1 AND lal.type IN ('lead_created', 'stage_changed', 'deal_created')
+         WHERE lal.lead_id = $1 AND lal.type IN ($2, $3, $4)
          ORDER BY lal.created_at DESC
          LIMIT 10`,
-        [leadId]
+        [leadId, LeadActivityLogType.LEAD_CREATED, LeadActivityLogType.STAGE_CHANGED, LeadActivityLogType.DEAL_CREATED]
       ),
     ]);
 
@@ -585,9 +722,11 @@ app.get('/api/messaging/conversations/:id/lead-context', async (req, res) => {
     const payload = {
       conversation_id: row.conversation_id,
       lead_id: row.lead_id,
+      contact_id: row.contact_id ?? null,
       contact_name: row.contact_name ?? '',
       contact_telegram_id: row.contact_telegram_id != null ? String(row.contact_telegram_id) : null,
       contact_username: typeof row.contact_username === 'string' ? row.contact_username : null,
+      company_name: row.company_name != null ? String(row.company_name).trim() || null : null,
       bd_account_id: row.bd_account_id ?? null,
       channel_id: row.channel_id ?? null,
       pipeline: { id: row.pipeline_id, name: row.pipeline_name ?? '' },
@@ -597,6 +736,7 @@ app.get('/api/messaging/conversations/:id/lead-context', async (req, res) => {
       became_lead_at: row.became_lead_at instanceof Date ? row.became_lead_at.toISOString() : row.became_lead_at,
       shared_chat_created_at: row.shared_chat_created_at != null && row.shared_chat_created_at instanceof Date ? row.shared_chat_created_at.toISOString() : row.shared_chat_created_at,
       shared_chat_channel_id: row.shared_chat_channel_id != null ? String(row.shared_chat_channel_id) : null,
+      shared_chat_invite_link: row.shared_chat_invite_link != null ? String(row.shared_chat_invite_link).trim() || null : null,
       won_at: row.won_at != null && row.won_at instanceof Date ? row.won_at.toISOString() : row.won_at,
       revenue_amount: row.revenue_amount != null ? Number(row.revenue_amount) : null,
       lost_at: row.lost_at != null && row.lost_at instanceof Date ? row.lost_at.toISOString() : row.lost_at,
@@ -607,6 +747,256 @@ app.get('/api/messaging/conversations/:id/lead-context', async (req, res) => {
     res.json(payload);
   } catch (error) {
     console.error('Error fetching lead-context:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Контекст лида по lead_id (для карточки лида на странице pipeline). Тот же контракт, что и lead-context.
+app.get('/api/messaging/lead-context-by-lead/:leadId', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { leadId } = req.params;
+
+    const conv = await pool.query(
+      `SELECT c.id AS conversation_id, c.lead_id, c.campaign_id, c.became_lead_at, c.contact_id,
+              c.bd_account_id, c.channel_id,
+              c.shared_chat_created_at, c.shared_chat_channel_id, c.shared_chat_invite_link,
+              c.won_at, c.revenue_amount, c.lost_at, c.loss_reason,
+              l.pipeline_id, l.stage_id,
+              p.name AS pipeline_name,
+              st.name AS stage_name,
+              COALESCE(
+                NULLIF(TRIM(c2.display_name), ''),
+                NULLIF(TRIM(CONCAT(COALESCE(c2.first_name,''), ' ', COALESCE(c2.last_name,''))), ''),
+                c2.username,
+                c2.telegram_id::text
+              ) AS contact_name,
+              c2.telegram_id AS contact_telegram_id,
+              c2.username AS contact_username,
+              camp.name AS campaign_name,
+              co.name AS company_name
+       FROM conversations c
+       LEFT JOIN leads l ON l.id = c.lead_id
+       LEFT JOIN pipelines p ON p.id = l.pipeline_id
+       LEFT JOIN stages st ON st.id = l.stage_id
+       LEFT JOIN contacts c2 ON c2.id = c.contact_id
+       LEFT JOIN companies co ON co.id = c2.company_id
+       LEFT JOIN campaigns camp ON camp.id = c.campaign_id
+       WHERE c.lead_id = $1 AND c.organization_id = $2`,
+      [leadId, user.organizationId]
+    );
+    if (conv.rows.length === 0) {
+      return res.status(404).json({ error: 'No conversation for this lead' });
+    }
+    const row = conv.rows[0] as any;
+    if (row.lead_id == null) {
+      return res.status(404).json({ error: 'No lead for this conversation' });
+    }
+
+    const pipelineId = row.pipeline_id;
+    const leadIdRes = row.lead_id;
+
+    let sharedChatSettings: { titleTemplate: string; extraUsernames: string[] } = {
+      titleTemplate: 'Чат: {{contact_name}}',
+      extraUsernames: [],
+    };
+    const settingsRow = await pool.query(
+      `SELECT value FROM organization_settings WHERE organization_id = $1 AND key = 'shared_chat'`,
+      [user.organizationId]
+    );
+    if (settingsRow.rows.length > 0 && settingsRow.rows[0].value) {
+      const v = settingsRow.rows[0].value as Record<string, unknown>;
+      if (typeof v?.titleTemplate === 'string') sharedChatSettings.titleTemplate = v.titleTemplate;
+      if (Array.isArray(v?.extraUsernames)) sharedChatSettings.extraUsernames = v.extraUsernames.filter((u): u is string => typeof u === 'string');
+    }
+
+    const [stagesResult, timelineResult] = await Promise.all([
+      pool.query<{ id: string; name: string }>(
+        `SELECT id, name FROM stages WHERE pipeline_id = $1 AND organization_id = $2 ORDER BY order_index`,
+        [pipelineId, user.organizationId]
+      ),
+      pool.query(
+        `SELECT lal.type, lal.created_at, lal.metadata, s.name AS to_stage_name
+         FROM lead_activity_log lal
+         LEFT JOIN stages s ON s.id = (lal.metadata->>'to_stage_id')::uuid
+         WHERE lal.lead_id = $1 AND lal.type IN ($2, $3, $4)
+         ORDER BY lal.created_at DESC
+         LIMIT 10`,
+        [leadIdRes, LeadActivityLogType.LEAD_CREATED, LeadActivityLogType.STAGE_CHANGED, LeadActivityLogType.DEAL_CREATED]
+      ),
+    ]);
+
+    const timeline = timelineResult.rows.map((t: any) => {
+      const item: { type: string; created_at: string; stage_name?: string } = {
+        type: t.type,
+        created_at: t.created_at instanceof Date ? t.created_at.toISOString() : String(t.created_at),
+      };
+      if (t.type === 'stage_changed' && t.to_stage_name != null) {
+        item.stage_name = t.to_stage_name;
+      }
+      return item;
+    });
+
+    const payload = {
+      conversation_id: row.conversation_id,
+      lead_id: row.lead_id,
+      contact_id: row.contact_id ?? null,
+      contact_name: row.contact_name ?? '',
+      contact_telegram_id: row.contact_telegram_id != null ? String(row.contact_telegram_id) : null,
+      contact_username: typeof row.contact_username === 'string' ? row.contact_username : null,
+      company_name: row.company_name != null ? String(row.company_name).trim() || null : null,
+      bd_account_id: row.bd_account_id ?? null,
+      channel_id: row.channel_id ?? null,
+      pipeline: { id: row.pipeline_id, name: row.pipeline_name ?? '' },
+      stage: { id: row.stage_id, name: row.stage_name ?? '' },
+      stages: stagesResult.rows.map((s) => ({ id: s.id, name: s.name })),
+      campaign: row.campaign_id != null ? { id: row.campaign_id, name: row.campaign_name ?? '' } : null,
+      became_lead_at: row.became_lead_at instanceof Date ? row.became_lead_at.toISOString() : row.became_lead_at,
+      shared_chat_created_at: row.shared_chat_created_at != null && row.shared_chat_created_at instanceof Date ? row.shared_chat_created_at.toISOString() : row.shared_chat_created_at,
+      shared_chat_channel_id: row.shared_chat_channel_id != null ? String(row.shared_chat_channel_id) : null,
+      shared_chat_invite_link: row.shared_chat_invite_link != null ? String(row.shared_chat_invite_link).trim() || null : null,
+      won_at: row.won_at != null && row.won_at instanceof Date ? row.won_at.toISOString() : row.won_at,
+      revenue_amount: row.revenue_amount != null ? Number(row.revenue_amount) : null,
+      lost_at: row.lost_at != null && row.lost_at instanceof Date ? row.lost_at.toISOString() : row.lost_at,
+      loss_reason: row.loss_reason != null ? String(row.loss_reason) : null,
+      shared_chat_settings: sharedChatSettings,
+      timeline,
+    };
+    res.json(payload);
+  } catch (error) {
+    console.error('Error fetching lead-context-by-lead:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+const MESSAGES_FOR_AI_LIMIT = 200;
+const AI_INSIGHT_MODEL_VERSION = 'gpt-4';
+
+// POST /api/messaging/conversations/:id/ai/analysis — Conversation Intelligence: анализ диалога, сохранение в conversation_ai_insights.
+app.post('/api/messaging/conversations/:id/ai/analysis', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id: conversationId } = req.params;
+    const correlationId = (req as express.Request & { correlationId?: string }).correlationId;
+
+    const convRes = await pool.query(
+      `SELECT id, organization_id, bd_account_id, channel_id FROM conversations WHERE id = $1 AND organization_id = $2`,
+      [conversationId, user.organizationId]
+    );
+    if (convRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    const conv = convRes.rows[0] as { id: string; bd_account_id: string | null; channel_id: string };
+    const bdAccountId = conv.bd_account_id;
+    const channelId = conv.channel_id;
+    if (!bdAccountId || !channelId) {
+      return res.status(400).json({ error: 'Conversation has no bd_account or channel' });
+    }
+
+    const msgRes = await pool.query(
+      `SELECT id, content, direction, created_at FROM messages
+       WHERE organization_id = $1 AND bd_account_id = $2 AND channel = 'telegram' AND channel_id = $3
+       ORDER BY COALESCE(telegram_date, created_at) DESC LIMIT $4`,
+      [user.organizationId, bdAccountId, channelId, MESSAGES_FOR_AI_LIMIT]
+    );
+    const rows = (msgRes.rows as { id: string; content: string; direction: string; created_at: Date }[]).reverse();
+    const messages = rows.map((m) => ({
+      content: m.content,
+      direction: m.direction,
+      created_at: m.created_at instanceof Date ? m.created_at.toISOString() : String(m.created_at),
+    }));
+    if (messages.length === 0) {
+      return res.status(400).json({ error: 'No messages in conversation' });
+    }
+
+    const aiRes = await fetch(`${AI_SERVICE_URL}/api/ai/conversations/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', [CORRELATION_HEADER]: correlationId || '' },
+      body: JSON.stringify({ messages }),
+    });
+    if (!aiRes.ok) {
+      const errBody = (await aiRes.json().catch(() => ({}))) as { error?: string; message?: string };
+      const message = errBody.message || errBody.error || 'AI service error';
+      return res.status(aiRes.status).json({ error: errBody.error || 'Service Unavailable', message });
+    }
+    const payload = (await aiRes.json()) as Record<string, unknown>;
+
+    await pool.query(
+      `INSERT INTO conversation_ai_insights (conversation_id, account_id, type, payload_json, model_version, created_at)
+       VALUES ($1, $2, 'analysis', $3, $4, NOW())`,
+      [conversationId, bdAccountId, JSON.stringify(payload), AI_INSIGHT_MODEL_VERSION]
+    );
+    res.json(payload);
+  } catch (error) {
+    console.error('Error generating conversation analysis:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/messaging/conversations/:id/ai/summary — саммари диалога, сохранение в conversation_ai_insights.
+app.post('/api/messaging/conversations/:id/ai/summary', async (req, res) => {
+  try {
+    const user = getUser(req);
+    const { id: conversationId } = req.params;
+    const { scope } = (req.body || {}) as { scope?: 'last_7_days' | 'full' | 'since_sync' };
+    const correlationId = (req as express.Request & { correlationId?: string }).correlationId;
+
+    const convRes = await pool.query(
+      `SELECT id, organization_id, bd_account_id, channel_id FROM conversations WHERE id = $1 AND organization_id = $2`,
+      [conversationId, user.organizationId]
+    );
+    if (convRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    const conv = convRes.rows[0] as { id: string; bd_account_id: string | null; channel_id: string };
+    const bdAccountId = conv.bd_account_id;
+    const channelId = conv.channel_id;
+    if (!bdAccountId || !channelId) {
+      return res.status(400).json({ error: 'Conversation has no bd_account or channel' });
+    }
+
+    let dateFilter = '';
+    const params: (string | number)[] = [user.organizationId, bdAccountId, channelId];
+    if (scope === 'last_7_days') {
+      dateFilter = ` AND COALESCE(m.telegram_date, m.created_at) >= NOW() - INTERVAL '7 days'`;
+    }
+    const msgRes = await pool.query(
+      `SELECT id, content, direction, created_at, telegram_date FROM messages m
+       WHERE m.organization_id = $1 AND m.bd_account_id = $2 AND m.channel = 'telegram' AND m.channel_id = $3${dateFilter}
+       ORDER BY COALESCE(m.telegram_date, m.created_at) ASC`,
+      params
+    );
+    const rows = msgRes.rows as { id: string; content: string; direction: string; created_at: Date; telegram_date: Date | null }[];
+    const messages = rows.map((m) => ({
+      content: m.content,
+      direction: m.direction,
+      created_at: (m.telegram_date || m.created_at) instanceof Date ? (m.telegram_date || m.created_at).toISOString() : String(m.created_at),
+    })).filter((m) => m.content && m.content.trim().length > 0);
+    if (messages.length === 0) {
+      return res.status(400).json({ error: 'No messages to summarize' });
+    }
+
+    const aiRes = await fetch(`${AI_SERVICE_URL}/api/ai/chat/summarize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', [CORRELATION_HEADER]: correlationId || '' },
+      body: JSON.stringify({ messages }),
+    });
+    if (!aiRes.ok) {
+      const errBody = (await aiRes.json().catch(() => ({}))) as { error?: string; message?: string };
+      const message = errBody.message || errBody.error || 'AI service error';
+      return res.status(aiRes.status).json({ error: errBody.error || 'Service Unavailable', message });
+    }
+    const aiData = (await aiRes.json()) as { summary?: string };
+    const summary = aiData.summary ?? '';
+
+    await pool.query(
+      `INSERT INTO conversation_ai_insights (conversation_id, account_id, type, payload_json, model_version, created_at)
+       VALUES ($1, $2, 'summary', $3, $4, NOW())`,
+      [conversationId, bdAccountId, JSON.stringify({ summary }), AI_INSIGHT_MODEL_VERSION]
+    );
+    res.json({ summary });
+  } catch (error) {
+    console.error('Error generating conversation summary:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -683,6 +1073,8 @@ app.post('/api/messaging/create-shared-chat', async (req, res) => {
     }
     const conv = convRow.rows[0] as { id: string; bd_account_id: string; channel_id: string; contact_id: string | null; shared_chat_created_at: unknown; contact_name: string | null };
     if (conv.shared_chat_created_at != null) {
+      conflicts409Total.inc({ endpoint: 'create-shared-chat' });
+      log.warn({ message: 'conflict_409 create-shared-chat already created', correlation_id: (req as any).correlationId, endpoint: 'POST /create-shared-chat', conversationId, event: 'conflict_409' });
       return res.status(409).json({ error: 'Shared chat already created for this conversation' });
     }
     if (!conv.bd_account_id) {
@@ -719,6 +1111,7 @@ app.post('/api/messaging/create-shared-chat', async (req, res) => {
       return res.status(400).json({ error: 'Lead Telegram user id (channel_id) is missing or invalid' });
     }
 
+    const externalCallStart = Date.now();
     const createRes = await fetch(
       `${BD_ACCOUNTS_SERVICE_URL}/api/bd-accounts/${conv.bd_account_id}/create-shared-chat`,
       {
@@ -727,6 +1120,7 @@ app.post('/api/messaging/create-shared-chat', async (req, res) => {
           'Content-Type': 'application/json',
           'x-user-id': user.id || '',
           'x-organization-id': user.organizationId || '',
+          [CORRELATION_HEADER]: (req as any).correlationId || '',
         },
         body: JSON.stringify({
           title,
@@ -735,6 +1129,11 @@ app.post('/api/messaging/create-shared-chat', async (req, res) => {
         }),
       }
     );
+    const externalCallMs = Date.now() - externalCallStart;
+    externalCallDuration.observe({ target: 'bd-accounts' }, externalCallMs / 1000);
+    if (externalCallMs > 5000) {
+      log.warn({ message: 'create-shared-chat slow external call', correlation_id: (req as any).correlationId, endpoint: 'POST /create-shared-chat', durationMs: externalCallMs, conversationId, bdAccountId: conv.bd_account_id, event: 'slow_external_call' });
+    }
     if (!createRes.ok) {
       const errBody = await createRes.text();
       let errData: { error?: string; message?: string } = {};
@@ -747,43 +1146,55 @@ app.post('/api/messaging/create-shared-chat', async (req, res) => {
       });
     }
 
-    const created = (await createRes.json()) as { channelId?: string; title?: string };
+    const created = (await createRes.json()) as { channelId?: string; title?: string; inviteLink?: string | null };
     const channelIdRaw = created.channelId;
     const sharedChatChannelId = channelIdRaw != null ? (typeof channelIdRaw === 'string' ? parseInt(channelIdRaw, 10) : Number(channelIdRaw)) : null;
     const sharedChatChannelIdDb = sharedChatChannelId != null && !Number.isNaN(sharedChatChannelId) ? sharedChatChannelId : null;
+    const inviteLink = created.inviteLink && typeof created.inviteLink === 'string' && created.inviteLink.trim() ? created.inviteLink.trim() : null;
 
-    await pool.query(
-      `UPDATE conversations SET shared_chat_created_at = NOW(), shared_chat_channel_id = $3, updated_at = NOW()
-       WHERE id = $1 AND organization_id = $2
-       RETURNING id, shared_chat_created_at, shared_chat_channel_id`,
-      [conversationId, user.organizationId, sharedChatChannelIdDb]
-    );
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE conversations SET shared_chat_created_at = NOW(), shared_chat_channel_id = $3, shared_chat_invite_link = $4, updated_at = NOW()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING id, shared_chat_created_at, shared_chat_channel_id, shared_chat_invite_link`,
+        [conversationId, user.organizationId, sharedChatChannelIdDb, inviteLink]
+      );
+      const systemContent = `[System] Общий чат создан: ${(created.title ?? title).slice(0, 500)}`;
+      await client.query(
+        `INSERT INTO messages (organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata)
+         VALUES ($1, $2, 'telegram', $3, $4, $5, $6, $7, false, $8)`,
+        [
+          user.organizationId,
+          conv.bd_account_id,
+          conv.channel_id,
+          conv.contact_id,
+          MessageDirection.OUTBOUND,
+          systemContent,
+          MessageStatus.DELIVERED,
+          JSON.stringify({ system: true, event: ConversationSystemEvent.SHARED_CHAT_CREATED, title: created.title ?? title }),
+        ]
+      );
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
+    } finally {
+      client.release();
+    }
 
-    const systemContent = `[System] Общий чат создан: ${(created.title ?? title).slice(0, 500)}`;
-    await pool.query(
-      `INSERT INTO messages (organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata)
-       VALUES ($1, $2, 'telegram', $3, $4, $5, $6, $7, false, $8)`,
-      [
-        user.organizationId,
-        conv.bd_account_id,
-        conv.channel_id,
-        conv.contact_id,
-        MessageDirection.OUTBOUND,
-        systemContent,
-        MessageStatus.DELIVERED,
-        JSON.stringify({ system: true, event: 'shared_chat_created', title: created.title ?? title }),
-      ]
-    );
-
+    sharedChatCreatedTotal.inc();
     res.json({
       conversation_id: conversationId,
       shared_chat_created_at: new Date().toISOString(),
       shared_chat_channel_id: sharedChatChannelIdDb != null ? String(sharedChatChannelIdDb) : null,
+      shared_chat_invite_link: inviteLink,
       channel_id: created.channelId,
       title: created.title ?? title,
     });
   } catch (error) {
-    console.error('Error creating shared chat:', error);
+    log.error({ message: 'Error creating shared chat', correlation_id: (req as any).correlationId, error: String(error) });
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -805,6 +1216,8 @@ app.post('/api/messaging/mark-shared-chat', async (req, res) => {
     }
     const existing = check.rows[0] as { id: string; shared_chat_created_at: Date | null };
     if (existing.shared_chat_created_at != null) {
+      conflicts409Total.inc({ endpoint: 'mark-shared-chat' });
+      log.warn({ message: 'conflict_409 mark-shared-chat already created', correlation_id: (req as any).correlationId, endpoint: 'POST /mark-shared-chat', conversationId, event: 'conflict_409' });
       return res.status(409).json({ error: 'Shared chat already created for this conversation' });
     }
     const r = await pool.query(
@@ -819,7 +1232,7 @@ app.post('/api/messaging/mark-shared-chat', async (req, res) => {
       shared_chat_created_at: row.shared_chat_created_at instanceof Date ? row.shared_chat_created_at.toISOString() : row.shared_chat_created_at,
     });
   } catch (error) {
-    console.error('Error marking shared chat:', error);
+    log.error({ message: 'Error marking shared chat', correlation_id: (req as any).correlationId, error: String(error) });
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -847,9 +1260,13 @@ app.post('/api/messaging/mark-won', async (req, res) => {
     }
     const c = check.rows[0] as { id: string; bd_account_id: string; channel_id: string; contact_id: string | null; shared_chat_created_at: Date | null; won_at: Date | null; lost_at: Date | null };
     if (c.won_at != null) {
+      conflicts409Total.inc({ endpoint: 'mark-won' });
+      log.warn({ message: 'conflict_409 mark-won already won', correlation_id: (req as any).correlationId, endpoint: 'POST /mark-won', conversationId, event: 'conflict_409' });
       return res.status(409).json({ error: 'Deal already marked as won' });
     }
     if (c.lost_at != null) {
+      conflicts409Total.inc({ endpoint: 'mark-won' });
+      log.warn({ message: 'conflict_409 mark-won already lost', correlation_id: (req as any).correlationId, endpoint: 'POST /mark-won', conversationId, event: 'conflict_409' });
       return res.status(409).json({ error: 'Deal already marked as lost' });
     }
     if (c.shared_chat_created_at == null) {
@@ -857,37 +1274,48 @@ app.post('/api/messaging/mark-won', async (req, res) => {
     }
 
     const amount = revenueAmount != null ? Math.round(revenueAmount * 100) / 100 : null;
-    await pool.query(
-      `UPDATE conversations SET won_at = NOW(), revenue_amount = $3, updated_at = NOW()
-       WHERE id = $1 AND organization_id = $2`,
-      [conversationId, user.organizationId, amount]
-    );
-
     const systemContent = amount != null
       ? `[System] Сделка закрыта. Сумма: ${amount} €`
       : '[System] Сделка закрыта.';
-    await pool.query(
-      `INSERT INTO messages (organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata)
-       VALUES ($1, $2, 'telegram', $3, $4, $5, $6, $7, false, $8)`,
-      [
-        user.organizationId,
-        c.bd_account_id,
-        c.channel_id,
-        c.contact_id,
-        MessageDirection.OUTBOUND,
-        systemContent,
-        MessageStatus.DELIVERED,
-        JSON.stringify({ system: true, event: 'deal_won', revenue_amount: amount }),
-      ]
-    );
 
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE conversations SET won_at = NOW(), revenue_amount = $3, updated_at = NOW()
+         WHERE id = $1 AND organization_id = $2`,
+        [conversationId, user.organizationId, amount]
+      );
+      await client.query(
+        `INSERT INTO messages (organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata)
+         VALUES ($1, $2, 'telegram', $3, $4, $5, $6, $7, false, $8)`,
+        [
+          user.organizationId,
+          c.bd_account_id,
+          c.channel_id,
+          c.contact_id,
+          MessageDirection.OUTBOUND,
+          systemContent,
+          MessageStatus.DELIVERED,
+          JSON.stringify({ system: true, event: ConversationSystemEvent.DEAL_WON, revenue_amount: amount }),
+        ]
+      );
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    dealsWonTotal.inc();
     res.json({
       conversation_id: conversationId,
       won_at: new Date().toISOString(),
       revenue_amount: amount,
     });
   } catch (error) {
-    console.error('Error marking won:', error);
+    log.error({ message: 'Error marking won', correlation_id: (req as any).correlationId, error: String(error) });
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -911,36 +1339,50 @@ app.post('/api/messaging/mark-lost', async (req, res) => {
     }
     const c = check.rows[0] as { id: string; bd_account_id: string; channel_id: string; contact_id: string | null; won_at: Date | null; lost_at: Date | null };
     if (c.won_at != null) {
+      conflicts409Total.inc({ endpoint: 'mark-lost' });
+      log.warn({ message: 'conflict_409 mark-lost already won', correlation_id: (req as any).correlationId, endpoint: 'POST /mark-lost', conversationId, event: 'conflict_409' });
       return res.status(409).json({ error: 'Deal already marked as won' });
     }
     if (c.lost_at != null) {
+      conflicts409Total.inc({ endpoint: 'mark-lost' });
+      log.warn({ message: 'conflict_409 mark-lost already lost', correlation_id: (req as any).correlationId, endpoint: 'POST /mark-lost', conversationId, event: 'conflict_409' });
       return res.status(409).json({ error: 'Deal already marked as lost' });
     }
 
     const lossReason = reason != null && typeof reason === 'string' ? reason.trim().slice(0, 2000) : null;
-    await pool.query(
-      `UPDATE conversations SET lost_at = NOW(), loss_reason = $3, updated_at = NOW()
-       WHERE id = $1 AND organization_id = $2`,
-      [conversationId, user.organizationId, lossReason]
-    );
-
     const systemContent = lossReason
       ? `[System] Сделка потеряна. Причина: ${lossReason.slice(0, 500)}`
       : '[System] Сделка потеряна.';
-    await pool.query(
-      `INSERT INTO messages (organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata)
-       VALUES ($1, $2, 'telegram', $3, $4, $5, $6, $7, false, $8)`,
-      [
-        user.organizationId,
-        c.bd_account_id,
-        c.channel_id,
-        c.contact_id,
-        MessageDirection.OUTBOUND,
-        systemContent,
-        MessageStatus.DELIVERED,
-        JSON.stringify({ system: true, event: 'deal_lost', reason: lossReason }),
-      ]
-    );
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE conversations SET lost_at = NOW(), loss_reason = $3, updated_at = NOW()
+         WHERE id = $1 AND organization_id = $2`,
+        [conversationId, user.organizationId, lossReason]
+      );
+      await client.query(
+        `INSERT INTO messages (organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata)
+         VALUES ($1, $2, 'telegram', $3, $4, $5, $6, $7, false, $8)`,
+        [
+          user.organizationId,
+          c.bd_account_id,
+          c.channel_id,
+          c.contact_id,
+          MessageDirection.OUTBOUND,
+          systemContent,
+          MessageStatus.DELIVERED,
+          JSON.stringify({ system: true, event: ConversationSystemEvent.DEAL_LOST, reason: lossReason }),
+        ]
+      );
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
+    } finally {
+      client.release();
+    }
 
     res.json({
       conversation_id: conversationId,
@@ -948,7 +1390,7 @@ app.post('/api/messaging/mark-lost', async (req, res) => {
       loss_reason: lossReason,
     });
   } catch (error) {
-    console.error('Error marking lost:', error);
+    log.error({ message: 'Error marking lost', correlation_id: (req as any).correlationId, error: String(error) });
     res.status(500).json({ error: 'Internal server error' });
   }
 });

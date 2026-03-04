@@ -573,7 +573,7 @@ function ContactPickerModal({
                       />
                     </td>
                     <td className="p-2 text-foreground">
-                      {(c.display_name || [c.first_name, c.last_name].filter(Boolean).join(' ')).trim() || (c.telegram_id ? `ID ${c.telegram_id}` : c.id.slice(0, 8))}
+                      {(c.display_name || [c.first_name, c.last_name].filter(Boolean).join(' ')).trim() || (c.username ? `@${String(c.username).replace(/^@/, '')}` : null) || (c.telegram_id ? `ID ${c.telegram_id}` : c.id.slice(0, 8))}
                     </td>
                     <td className="p-2 text-muted-foreground">{c.username ? `@${c.username.replace(/^@/, '')}` : (c.telegram_id ? `@${c.telegram_id}` : '—')}</td>
                     <td className="p-2 text-muted-foreground font-mono text-xs">{c.telegram_id ?? '—'}</td>

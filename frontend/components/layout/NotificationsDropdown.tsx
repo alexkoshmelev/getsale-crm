@@ -2,13 +2,49 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Bell, CheckCheck } from 'lucide-react';
+import { Bell } from 'lucide-react';
 import { clsx } from 'clsx';
+import { useNotificationsStore } from '@/lib/stores/notifications-store';
+import { fetchDueReminders, updateReminder } from '@/lib/api/crm';
+import { playNotificationSound } from '@/lib/notification-sound';
+
+const POLL_INTERVAL_MS = 45_000;
 
 export function NotificationsDropdown() {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [markingRead, setMarkingRead] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const {
+    muted,
+    notificationItems,
+    mergeDueReminders,
+    markAllRead,
+  } = useNotificationsStore();
+
+  const fetchDue = useRef(() => {
+    fetchDueReminders({ limit: 50 })
+      .then((rows) => {
+        const list = rows.map((r) => ({
+          id: r.id,
+          title: r.title ?? null,
+          remind_at: typeof r.remind_at === 'string' ? r.remind_at : new Date(r.remind_at).toISOString(),
+          entity_type: r.entity_type,
+          entity_id: r.entity_id,
+        }));
+        const hasNew = mergeDueReminders(list);
+        if (hasNew && !muted) {
+          playNotificationSound();
+        }
+      })
+      .catch(() => {});
+  });
+
+  useEffect(() => {
+    fetchDue.current();
+    const id = setInterval(() => fetchDue.current(), POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [mergeDueReminders, muted]);
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -17,6 +53,25 @@ export function NotificationsDropdown() {
     if (open) document.addEventListener('click', onClick);
     return () => document.removeEventListener('click', onClick);
   }, [open]);
+
+  const handleMarkAllRead = async () => {
+    if (notificationItems.length === 0) {
+      markAllRead();
+      return;
+    }
+    setMarkingRead(true);
+    try {
+      await Promise.all(
+        notificationItems.map((item) => updateReminder(item.reminderId, { done: true }))
+      );
+      markAllRead();
+      setOpen(false);
+    } finally {
+      setMarkingRead(false);
+    }
+  };
+
+  const count = notificationItems.length;
 
   return (
     <div className="relative" ref={ref}>
@@ -27,22 +82,52 @@ export function NotificationsDropdown() {
         aria-label={t('nav.notifications')}
       >
         <Bell className="w-5 h-5" />
+        {count > 0 && (
+          <span
+            className={clsx(
+              'absolute -top-0.5 -right-0.5 min-w-[1.25rem] h-5 px-1 flex items-center justify-center rounded-full text-[10px] font-semibold bg-primary text-primary-foreground',
+              count > 99 && 'text-[9px]'
+            )}
+          >
+            {count > 99 ? '99+' : count}
+          </span>
+        )}
       </button>
       {open && (
         <div className="absolute right-0 top-full mt-1 w-80 rounded-xl border border-border bg-card shadow-soft-lg overflow-hidden z-50 animate-in fade-in slide-in-from-top-2 duration-150">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border">
             <span className="font-heading text-sm font-semibold text-foreground">{t('nav.notifications')}</span>
-            <button
-              type="button"
-              className="text-xs text-primary hover:underline"
-            >
-              {t('global.notificationsMarkRead')}
-            </button>
+            {count > 0 && (
+              <button
+                type="button"
+                disabled={markingRead}
+                onClick={handleMarkAllRead}
+                className="text-xs text-primary hover:underline disabled:opacity-50"
+              >
+                {markingRead ? '…' : t('global.notificationsMarkRead')}
+              </button>
+            )}
           </div>
-          <div className="p-6 text-center">
-            <Bell className="w-10 h-10 text-muted-foreground/50 mx-auto mb-2" />
-            <p className="text-sm text-muted-foreground">{t('global.notificationsEmpty')}</p>
-            <p className="text-xs text-muted-foreground mt-1">Notifications will appear here when backend is connected.</p>
+          <div className="max-h-80 overflow-y-auto">
+            {count === 0 ? (
+              <div className="p-6 text-center">
+                <Bell className="w-10 h-10 text-muted-foreground/50 mx-auto mb-2" />
+                <p className="text-sm text-muted-foreground">{t('global.notificationsEmpty')}</p>
+              </div>
+            ) : (
+              <ul className="divide-y divide-border">
+                {notificationItems.map((item) => (
+                  <li key={item.id} className="px-4 py-3 hover:bg-muted/50">
+                    <p className="text-sm font-medium text-foreground truncate">
+                      {item.title || t('crm.reminder', 'Напоминание')}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {new Date(item.remind_at).toLocaleString()}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
       )}

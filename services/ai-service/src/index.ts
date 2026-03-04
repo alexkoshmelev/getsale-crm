@@ -83,13 +83,13 @@ async function generateDraft(contactId: string | undefined, context: string) {
     const cached = contactKey ? await redis.get<ContactContext>(contactKey) : null;
     const contact: ContactContext = cached ?? { name: 'Contact', company: 'Company' };
 
-    // Generate draft using OpenAI
+    // Generate draft using OpenAI (gpt-4o for quality)
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4',
+      model: 'gpt-4o',
       messages: [
         {
           role: 'system',
-          content: 'You are a professional sales assistant. Generate concise, friendly responses.',
+          content: 'You are a professional sales assistant. Generate concise, friendly responses. Always respond in the same language as the message you are replying to (e.g. Russian for Russian, English for English).',
         },
         {
           role: 'user',
@@ -173,6 +173,80 @@ app.post('/api/ai/drafts/generate', async (req, res) => {
   }
 });
 
+/** Conversation Intelligence: structured analysis for CRM (project_summary, risk_zone, recommendations, draft_message). */
+app.post('/api/ai/conversations/analyze', async (req, res) => {
+  try {
+    getUser(req);
+    const { messages: rawMessages } = req.body as { messages?: Array<{ content?: string; direction?: string; created_at?: string }> };
+    const list = Array.isArray(rawMessages) ? rawMessages : [];
+    const messages = list
+      .map((m) => ({
+        content: typeof m.content === 'string' ? m.content.trim() : '',
+        direction: typeof m.direction === 'string' ? m.direction : 'inbound',
+        created_at: typeof m.created_at === 'string' ? m.created_at : '',
+      }))
+      .filter((m) => m.content.length > 0)
+      .slice(-200);
+    if (messages.length === 0) {
+      return res.status(400).json({ error: 'No messages to analyze' });
+    }
+    if (!isOpenAIKeyConfigured || !openai) {
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        code: 'OPENAI_NOT_CONFIGURED',
+        message: OPENAI_NOT_CONFIGURED_MSG,
+      });
+    }
+    const conversationText = messages
+      .map((m) => `[${m.direction} ${m.created_at}]: ${m.content.slice(0, 500)}`)
+      .join('\n');
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: `You are a sales CRM assistant. Analyze the conversation and respond with a single JSON object (no markdown, no code block) with these exact keys:
+chat_meta: object (optional, e.g. participant info),
+project_summary: string (brief project/context summary),
+fundraising_status: string (if relevant),
+stage: string (sales stage if inferrable),
+last_activity: string (brief),
+risk_zone: string ("green"|"yellow"|"red"),
+recommendations: array of strings (short action items),
+draft_message: string (suggested next message to send, concise).
+Always write all text fields (project_summary, recommendations, draft_message, etc.) in the same language as the conversation (e.g. Russian for Russian dialogue, English for English).`,
+        },
+        { role: 'user', content: conversationText.slice(-12000) },
+      ],
+      temperature: 0.4,
+      max_tokens: 800,
+    });
+    const raw = completion.choices[0].message.content?.trim() || '{}';
+    let payload: Record<string, unknown>;
+    try {
+      const cleaned = raw.replace(/^```\w*\n?|\n?```$/g, '').trim();
+      payload = JSON.parse(cleaned) as Record<string, unknown>;
+    } catch {
+      payload = { project_summary: raw, risk_zone: 'yellow', recommendations: [], draft_message: '' };
+    }
+    if (!payload.recommendations || !Array.isArray(payload.recommendations)) {
+      payload.recommendations = [];
+    }
+    res.json(payload);
+  } catch (error: unknown) {
+    const err = error as Error & { statusCode?: number };
+    if (err.statusCode === 503 || err.message === OPENAI_NOT_CONFIGURED_MSG) {
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        code: 'OPENAI_NOT_CONFIGURED',
+        message: OPENAI_NOT_CONFIGURED_MSG,
+      });
+    }
+    console.error('Error analyzing conversation:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Summarize chat messages (for AI panel in messenger)
 app.post('/api/ai/chat/summarize', async (req, res) => {
   try {
@@ -195,12 +269,12 @@ app.post('/api/ai/chat/summarize', async (req, res) => {
       });
     }
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4',
+      model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
           content:
-            'You are a concise assistant. Summarize the following chat conversation in 2-4 short sentences. Focus on: main topic, key decisions or requests, and next steps if any. Use the same language as the conversation.',
+            'You are a concise assistant. Summarize the following chat conversation in 2-4 short sentences. Focus on: main topic, key decisions or requests, and next steps if any. Always write the summary in the same language as the conversation (e.g. Russian for Russian, English for English).',
         },
         { role: 'user', content: conversation.slice(-8000) },
       ],

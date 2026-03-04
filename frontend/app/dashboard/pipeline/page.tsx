@@ -3,12 +3,13 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
-import { Plus, Circle, LayoutGrid, List, CalendarClock, GripVertical, MoreVertical, Settings, Pencil, Trash2 } from 'lucide-react';
+import { Plus, Circle, LayoutGrid, List, CalendarClock, GripVertical, MoreVertical, Settings, Pencil, Trash2, User } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Pagination } from '@/components/ui/Pagination';
 import { fetchPipelines, fetchStages, fetchLeads, updateLead, removeLead, type Pipeline, type Stage, type Lead } from '@/lib/api/pipeline';
 import { PipelineManageModal } from '@/components/pipeline/PipelineManageModal';
+import { LeadCardModal } from '@/components/pipeline/LeadCardModal';
 
 function leadContactName(lead: Lead): string {
   const parts = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim();
@@ -49,6 +50,7 @@ export default function PipelinePage() {
   const [draggingLeadId, setDraggingLeadId] = useState<string | null>(null);
   const [movingLeadId, setMovingLeadId] = useState<string | null>(null);
   const [leadMenuId, setLeadMenuId] = useState<string | null>(null);
+  const [leadCardModalLeadId, setLeadCardModalLeadId] = useState<string | null>(null);
   const [manageModalOpen, setManageModalOpen] = useState(false);
   const [filterStageId, setFilterStageId] = useState<string | null>(null);
   const [filterSearch, setFilterSearch] = useState('');
@@ -477,7 +479,15 @@ export default function PipelinePage() {
                                     aria-hidden
                                     onClick={() => setLeadMenuId(null)}
                                   />
-                                  <div className="absolute right-0 top-full mt-1 py-1 rounded-lg border border-border bg-card shadow-lg z-20 min-w-[160px]">
+                                  <div className="absolute right-0 top-full mt-1 py-1 rounded-lg border border-border bg-card shadow-lg z-20 min-w-[200px]">
+                                    <button
+                                      type="button"
+                                      onClick={() => { setLeadCardModalLeadId(lead.id); setLeadMenuId(null); }}
+                                      className="w-full text-left px-3 py-2 text-sm text-foreground hover:bg-accent flex items-center gap-2"
+                                    >
+                                      <User className="w-3.5 h-3.5" />
+                                      {t('messaging.openLeadCard', 'Открыть карточку лида')}
+                                    </button>
                                     <button
                                       type="button"
                                       onClick={() => handleRemoveLead(lead.id)}
@@ -617,21 +627,57 @@ export default function PipelinePage() {
                                   const inFunnel = formatInFunnel(lead.created_at);
                                   return (
                                     <li key={lead.id}>
-                                      <Link
-                                        href={`/dashboard/messaging?contactId=${lead.contact_id}`}
-                                        className="block bg-card rounded-lg p-2.5 border border-border border-l-4 shadow-sm hover:shadow-md hover:border-primary/30 transition-shadow"
+                                      <div
+                                        className="flex items-start gap-1 bg-card rounded-lg p-2.5 border border-border border-l-4 shadow-sm hover:shadow-md hover:border-primary/30 transition-shadow min-w-0"
                                         style={stageColor ? { borderLeftColor: stageColor } : undefined}
                                       >
-                                        <p className="font-medium text-foreground text-sm truncate">{leadContactName(lead)}</p>
-                                        <div className="flex flex-wrap items-center gap-x-2 text-[10px] text-muted-foreground mt-1">
-                                          <span title={createdDate.toLocaleString(i18n.language || 'ru')}>
-                                            {createdDate.toLocaleDateString(i18n.language || 'ru', { day: 'numeric', month: 'short', year: 'numeric' })} {createdDate.toLocaleTimeString(i18n.language || 'ru', { hour: '2-digit', minute: '2-digit' })}
-                                          </span>
-                                          <span className={inFunnel.isLong ? 'text-amber-600 dark:text-amber-400 font-medium' : undefined} title={t('pipeline.timelineDaysInFunnelHint')}>
-                                            {inFunnel.text}
-                                          </span>
+                                        <Link
+                                          href={`/dashboard/messaging?contactId=${lead.contact_id}`}
+                                          className="flex-1 min-w-0"
+                                        >
+                                          <p className="font-medium text-foreground text-sm truncate">{leadContactName(lead)}</p>
+                                          <div className="flex flex-wrap items-center gap-x-2 text-[10px] text-muted-foreground mt-1">
+                                            <span title={createdDate.toLocaleString(i18n.language || 'ru')}>
+                                              {createdDate.toLocaleDateString(i18n.language || 'ru', { day: 'numeric', month: 'short', year: 'numeric' })} {createdDate.toLocaleTimeString(i18n.language || 'ru', { hour: '2-digit', minute: '2-digit' })}
+                                            </span>
+                                            <span className={inFunnel.isLong ? 'text-amber-600 dark:text-amber-400 font-medium' : undefined} title={t('pipeline.timelineDaysInFunnelHint')}>
+                                              {inFunnel.text}
+                                            </span>
+                                          </div>
+                                        </Link>
+                                        <div className="relative shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={(e) => { e.preventDefault(); setLeadMenuId(leadMenuId === lead.id ? null : lead.id); }}
+                                            className="p-1 rounded text-muted-foreground hover:bg-accent"
+                                          >
+                                            <MoreVertical className="w-4 h-4" />
+                                          </button>
+                                          {leadMenuId === lead.id && (
+                                            <>
+                                              <div className="fixed inset-0 z-10" aria-hidden onClick={() => setLeadMenuId(null)} />
+                                              <div className="absolute right-0 top-full mt-1 py-1 rounded-lg border border-border bg-card shadow-lg z-20 min-w-[200px]">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => { setLeadCardModalLeadId(lead.id); setLeadMenuId(null); }}
+                                                  className="w-full text-left px-3 py-2 text-sm text-foreground hover:bg-accent flex items-center gap-2"
+                                                >
+                                                  <User className="w-3.5 h-3.5" />
+                                                  {t('messaging.openLeadCard', 'Открыть карточку лида')}
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => { handleRemoveLead(lead.id); setLeadMenuId(null); }}
+                                                  className="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10 flex items-center gap-2"
+                                                >
+                                                  <Trash2 className="w-3.5 h-3.5" />
+                                                  {t('pipeline.removeFromFunnel')}
+                                                </button>
+                                              </div>
+                                            </>
+                                          )}
                                         </div>
-                                      </Link>
+                                      </div>
                                     </li>
                                   );
                                 })}
@@ -743,7 +789,15 @@ export default function PipelinePage() {
                                   aria-hidden
                                   onClick={() => setLeadMenuId(null)}
                                 />
-                                <div className="absolute right-0 top-full mt-1 py-1 rounded-lg border border-border bg-card shadow-lg z-20 min-w-[160px]">
+                                <div className="absolute right-0 top-full mt-1 py-1 rounded-lg border border-border bg-card shadow-lg z-20 min-w-[200px]">
+                                  <button
+                                    type="button"
+                                    onClick={() => { setLeadCardModalLeadId(lead.id); setLeadMenuId(null); }}
+                                    className="w-full text-left px-3 py-2 text-sm text-foreground hover:bg-accent flex items-center gap-2"
+                                  >
+                                    <User className="w-3.5 h-3.5" />
+                                    {t('messaging.openLeadCard', 'Открыть карточку лида')}
+                                  </button>
                                   <button
                                     type="button"
                                     onClick={() => handleRemoveLead(lead.id)}
@@ -788,6 +842,11 @@ export default function PipelinePage() {
         selectedPipelineId={selectedPipelineId}
         onPipelinesChange={loadPipelines}
         onStagesChange={loadStagesAndLeads}
+      />
+      <LeadCardModal
+        leadId={leadCardModalLeadId}
+        open={leadCardModalLeadId != null}
+        onClose={() => setLeadCardModalLeadId(null)}
       />
     </div>
   );

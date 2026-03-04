@@ -1,12 +1,29 @@
 import express from 'express';
 import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
+import { register, Counter, Histogram } from 'prom-client';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType } from '@getsale/events';
-import { CampaignStatus } from '@getsale/types';
+import { CampaignStatus, CampaignParticipantFilter } from '@getsale/types';
+import { createLogger } from '@getsale/logger';
 
 const app = express();
 const PORT = process.env.PORT || 3012;
+const log = createLogger('campaign-service');
+const CORRELATION_HEADER = 'x-correlation-id';
+
+const httpRequestDuration = new Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'HTTP request duration in seconds',
+  labelNames: ['method', 'path', 'status'],
+  registers: [register],
+});
+const httpRequestsTotal = new Counter({
+  name: 'http_requests_total',
+  help: 'Total HTTP requests',
+  labelNames: ['method', 'path', 'status'],
+  registers: [register],
+});
 
 const pool = new Pool({
   connectionString:
@@ -676,8 +693,40 @@ function getUser(req: express.Request) {
 
 app.use(express.json());
 
-app.get('/health', (req, res) => {
+// PHASE 2.9 — Correlation ID
+app.use((req: express.Request, _res, next) => {
+  const incoming = req.headers[CORRELATION_HEADER] as string | undefined;
+  (req as any).correlationId = typeof incoming === 'string' && incoming.trim() ? incoming.trim() : randomUUID();
+  next();
+});
+
+app.use((req: express.Request, res: express.Response, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const path = (req.route?.path ?? req.path).replace(/[0-9a-f-]{36}/gi, ':id');
+    const status = String(res.statusCode);
+    httpRequestDuration.observe({ method: req.method, path, status }, (Date.now() - start) / 1000);
+    httpRequestsTotal.inc({ method: req.method, path, status });
+  });
+  next();
+});
+
+app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'campaign-service' });
+});
+
+app.get('/ready', async (_req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.status(200).json({ status: 'ready' });
+  } catch {
+    res.status(503).json({ status: 'not ready', check: 'postgres' });
+  }
+});
+
+app.get('/metrics', async (_req, res) => {
+  res.setHeader('Content-Type', register.contentType);
+  res.end(await register.metrics());
 });
 
 // --- Campaigns ---
@@ -1601,6 +1650,7 @@ app.delete('/api/campaigns/:campaignId/sequences/:stepId', async (req, res) => {
 // --- Participants & Stats ---
 
 app.get('/api/campaigns/:id/stats', async (req, res) => {
+  const statsStartMs = Date.now();
   try {
     const user = getUser(req);
     const { id } = req.params;
@@ -1713,6 +1763,10 @@ app.get('/api/campaigns/:id/stats', async (req, res) => {
     const revenuePerReply = totalReplied > 0 ? Math.round((totalRevenue / totalReplied) * 100) / 100 : 0;
     const avgRevenuePerWon = totalWon > 0 ? Math.round((totalRevenue / totalWon) * 100) / 100 : 0;
     const dr = dateRangeRes.rows[0] as { first_send_at: string | null; last_send_at: string | null };
+    const statsDurationMs = Date.now() - statsStartMs;
+    if (statsDurationMs > 2000) {
+      log.warn({ message: 'GET /campaigns/:id/stats slow', correlation_id: (req as any).correlationId, endpoint: 'GET /campaigns/:id/stats', campaignId: id, durationMs: statsDurationMs, participantsTotal: total, event: 'slow_stats' });
+    }
     res.json({
       total,
       byStatus,
@@ -1805,12 +1859,12 @@ app.get('/api/campaigns/:id/participants', async (req, res) => {
     let whereFilter = '';
     const params: any[] = [id];
     const statusParam = status && typeof status === 'string' ? status : (filter && typeof filter === 'string' ? filter : null);
-    if (statusParam === 'replied') {
+    if (statusParam === CampaignParticipantFilter.REPLIED) {
       whereStatus = ' AND cp.status = $2';
-      params.push('replied');
-    } else if (statusParam === 'not_replied') {
+      params.push(CampaignParticipantFilter.REPLIED);
+    } else if (statusParam === CampaignParticipantFilter.NOT_REPLIED) {
       whereStatus = " AND (cp.status IS NULL OR cp.status != 'replied')";
-    } else if (statusParam === 'shared') {
+    } else if (statusParam === CampaignParticipantFilter.SHARED) {
       whereFilter = ' AND conv.shared_chat_created_at IS NOT NULL';
     }
     const limitIdx = params.length + 1;

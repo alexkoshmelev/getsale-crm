@@ -53,7 +53,6 @@ import { Pagination } from '@/components/ui/Pagination';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { TableSkeleton } from '@/components/ui/Skeleton';
 import Button from '@/components/ui/Button';
-import { SlideOver } from '@/components/ui/SlideOver';
 import { CompanyFormModal } from '@/components/crm/CompanyFormModal';
 import { ContactFormModal } from '@/components/crm/ContactFormModal';
 import { DealFormModal } from '@/components/crm/DealFormModal';
@@ -626,14 +625,15 @@ export default function CRMPage() {
         )}
       </div>
 
-      {/* Detail SlideOver (companies & contacts only; deals open in modal) */}
-      <SlideOver
+      {/* Карточка компании/контакта как диалог (как карточка сделки) */}
+      <Modal
         isOpen={Boolean(detailId && detailType && detailType !== 'deals')}
         onClose={() => { setDetailId(null); setDetailType(null); setDetailData(null); }}
         title={
           detailType === 'companies' ? t('common.company') :
           detailType === 'contacts' ? t('common.contact') : t('common.deal')
         }
+        size="lg"
       >
         {detailData && detailType === 'companies' && (
           <CompanyDetail
@@ -652,7 +652,7 @@ export default function CRMPage() {
             t={t}
           />
         )}
-      </SlideOver>
+      </Modal>
 
       {/* Modals */}
       <CompanyFormModal

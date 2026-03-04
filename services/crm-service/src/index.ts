@@ -882,6 +882,35 @@ app.delete('/api/crm/reminders/:id', async (req, res, next) => {
   }
 });
 
+/** Due reminders: remind_at <= now(), done = false. For push notifications panel. */
+app.get('/api/crm/reminders/due', async (req, res, next) => {
+  try {
+    const user = getUser(req);
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit), 10) || 50));
+    const now = new Date();
+    const result = await pool.query(
+      `SELECT r.id, r.entity_type, r.entity_id, r.remind_at, r.title, r.done, r.user_id, r.created_at
+       FROM reminders r
+       WHERE r.organization_id = $1 AND r.done = false AND r.remind_at <= $2
+       ORDER BY r.remind_at DESC
+       LIMIT $3`,
+      [user.organizationId, now, limit]
+    );
+    const rows = result.rows.map((r: any) => ({
+      id: r.id,
+      entity_type: r.entity_type,
+      entity_id: r.entity_id,
+      remind_at: r.remind_at instanceof Date ? r.remind_at.toISOString() : r.remind_at,
+      title: r.title,
+      done: r.done,
+      created_at: r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at,
+    }));
+    res.json(rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
 /** Upcoming reminders for the organization (done = false, remind_at from now to +horizon). For widget "Предстоящие напоминания". */
 app.get('/api/crm/reminders/upcoming', async (req, res, next) => {
   try {

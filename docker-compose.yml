@@ -189,6 +189,7 @@ services:
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
       - WEBSOCKET_SERVICE_URL=http://websocket-service:3004
       - BD_ACCOUNTS_SERVICE_URL=http://bd-accounts-service:3007
+      - AI_SERVICE_URL=http://ai-service:3005
     depends_on:
       postgres:
         condition: service_healthy
