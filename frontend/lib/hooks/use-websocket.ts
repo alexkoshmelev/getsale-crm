@@ -11,12 +11,12 @@ export function useWebSocket() {
   const socketRef = useRef<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { accessToken, user } = useAuthStore();
+  const { user } = useAuthStore();
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const disconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    if (!accessToken) {
+    if (!user) {
       if (disconnectTimeoutRef.current) {
         clearTimeout(disconnectTimeoutRef.current);
         disconnectTimeoutRef.current = null;
@@ -40,9 +40,7 @@ export function useWebSocket() {
 
     if (!reuseSocket) {
       socket = io(WS_URL, {
-        auth: {
-          token: accessToken,
-        },
+        withCredentials: true,
         transports: ['websocket', 'polling'],
         reconnection: true,
         reconnectionDelay: 1000,
@@ -50,8 +48,6 @@ export function useWebSocket() {
         reconnectionAttempts: 100,
       });
       socketRef.current = socket;
-    } else {
-      (socket as any).auth = { token: accessToken };
     }
     const s: Socket = socket as Socket;
 
@@ -123,7 +119,7 @@ export function useWebSocket() {
         s.disconnect();
       }, DISCONNECT_DELAY_MS);
     };
-  }, [accessToken]);
+  }, [user]);
 
   const subscribe = useCallback((room: string) => {
     if (socketRef.current && isConnected) {
@@ -170,24 +166,24 @@ export function useWebSocket() {
     const onVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return;
       const s = socketRef.current;
-      if (!s || !accessToken) return;
+      if (!s || !user) return;
       if (s.connected) return;
       s.connect();
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [accessToken]);
+  }, [user]);
 
   // Периодическая попытка переподключения при длительном отключении (на случай исчерпания попыток Socket.IO или «тихого» обрыва)
   useEffect(() => {
-    if (!accessToken) return;
+    if (!user) return;
     const interval = setInterval(() => {
       const s = socketRef.current;
       if (!s || s.connected || (s as Socket & { connecting?: boolean }).connecting) return;
       s.connect();
     }, 60000);
     return () => clearInterval(interval);
-  }, [accessToken]);
+  }, [user]);
 
   return {
     isConnected,

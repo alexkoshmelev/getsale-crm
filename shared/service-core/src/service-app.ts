@@ -7,6 +7,7 @@ import { createLogger, Logger } from '@getsale/logger';
 import {
   correlationId,
   extractUser,
+  internalAuth,
   requestLogger,
   errorHandler,
 } from './middleware';
@@ -58,12 +59,36 @@ export async function createServiceApp(config: ServiceConfig): Promise<ServiceCo
   // Express setup
   const app = express();
   if (config.cors) {
-    app.use(cors({ origin: process.env.CORS_ORIGIN || '*', credentials: true }));
+    // With credentials: true the browser forbids Access-Control-Allow-Origin: *. Use concrete origin.
+    const corsOrigin = process.env.CORS_ORIGIN?.trim();
+    const origin = corsOrigin
+      ? corsOrigin.split(',').map((o) => o.trim()).filter(Boolean)
+      : undefined;
+    app.use(
+      cors({
+        origin: origin?.length
+          ? (reqOrigin: string | undefined, cb: (err: Error | null, allow?: boolean | string) => void) => {
+              const o = (reqOrigin ?? process.env.FRONTEND_ORIGIN ?? 'http://localhost:3000').trim();
+              cb(null, origin!.includes(o) ? o : origin![0]);
+            }
+          : (reqOrigin: string | undefined, cb: (err: Error | null, allow?: boolean | string) => void) => {
+              cb(null, (reqOrigin ?? process.env.FRONTEND_ORIGIN ?? 'http://localhost:3000').trim() || 'http://localhost:3000');
+            },
+        credentials: true,
+      })
+    );
   }
   app.use(express.json({ limit: '5mb' }));
   app.use(correlationId());
   if (!config.skipUserExtract) {
     app.use(extractUser());
+  }
+  // Require X-Internal-Auth when INTERNAL_AUTH_SECRET is set (gateway bypass prevention)
+  if (process.env.INTERNAL_AUTH_SECRET?.trim()) {
+    app.use((req, res, next) => {
+      if (req.path === '/health' || req.path === '/metrics') return next();
+      return internalAuth()(req, res, next);
+    });
   }
 
   // Prometheus
@@ -110,7 +135,7 @@ export async function createServiceApp(config: ServiceConfig): Promise<ServiceCo
       connectionString:
         process.env.DATABASE_URL ||
         `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
-      max: 20,
+      max: 8, // Keep low to avoid exhausting PostgreSQL max_connections; use PgBouncer in production
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 5_000,
       ...config.poolConfig,
@@ -179,9 +204,37 @@ export async function createServiceApp(config: ServiceConfig): Promise<ServiceCo
     start() {
       app.use(errorHandler(log));
 
-      app.listen(port, () => {
+      const server = app.listen(port, () => {
         log.info({ message: `${config.name} running on port ${port}` });
       });
+
+      const shutdown = async (signal: string) => {
+        log.info({ message: `${config.name} received ${signal}, shutting down gracefully` });
+        server.close(() => {
+          log.info({ message: `${config.name} HTTP server closed` });
+        });
+        const shutdownTimeout = setTimeout(() => {
+          log.warn({ message: `${config.name} shutdown timeout, exiting` });
+          process.exit(1);
+        }, 15_000);
+
+        try {
+          if (!config.skipDb && pool) {
+            await pool.end();
+            log.info({ message: `${config.name} DB pool closed` });
+          }
+          await rabbitmq.close();
+          log.info({ message: `${config.name} RabbitMQ closed` });
+        } catch (err) {
+          log.warn({ message: `${config.name} error during shutdown`, error: String(err) });
+        } finally {
+          clearTimeout(shutdownTimeout);
+          process.exit(0);
+        }
+      };
+
+      process.on('SIGTERM', () => shutdown('SIGTERM'));
+      process.on('SIGINT', () => shutdown('SIGINT'));
     },
   };
 

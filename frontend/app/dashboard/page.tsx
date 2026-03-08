@@ -3,13 +3,11 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
-import axios from 'axios';
 import { Building2, Users, MessageSquare, TrendingUp, ArrowRight, Bell } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
+import { apiClient } from '@/lib/api/client';
 import { fetchUpcomingReminders, type Reminder } from '@/lib/api/crm';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 const statCardsConfig = [
   { titleKey: 'companies', icon: Building2, href: '/dashboard/crm' },
@@ -33,16 +31,16 @@ export default function DashboardPage() {
     const fetchStats = async () => {
       try {
         const [companiesRes, contactsRes, messagesRes, pipelinesRes] = await Promise.all([
-          axios.get(`${API_URL}/api/crm/companies`).catch(() => ({ data: [] })),
-          axios.get(`${API_URL}/api/crm/contacts`).catch(() => ({ data: [] })),
-          axios.get(`${API_URL}/api/messaging/inbox`).catch(() => ({ data: [] })),
-          axios.get(`${API_URL}/api/pipeline`).catch(() => ({ data: [] })),
+          apiClient.get('/api/crm/companies').catch(() => ({ data: [] })),
+          apiClient.get('/api/crm/contacts').catch(() => ({ data: [] })),
+          apiClient.get('/api/messaging/inbox').catch(() => ({ data: [] })),
+          apiClient.get('/api/pipeline').catch(() => ({ data: [] })),
         ]);
         const pipelines = Array.isArray(pipelinesRes.data) ? pipelinesRes.data : [];
         const defaultPipeline = pipelines.find((p: { is_default?: boolean }) => p.is_default) || pipelines[0];
         let leadsTotal = 0;
         if (defaultPipeline?.id) {
-          const leadsRes = await axios.get(`${API_URL}/api/pipeline/leads`, { params: { pipelineId: defaultPipeline.id, limit: 1 } }).catch(() => ({ data: { pagination: { total: 0 } } }));
+          const leadsRes = await apiClient.get('/api/pipeline/leads', { params: { pipelineId: defaultPipeline.id, limit: 1 } }).catch(() => ({ data: { pagination: { total: 0 } } }));
           leadsTotal = leadsRes.data?.pagination?.total ?? 0;
         }
 

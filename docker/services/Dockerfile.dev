@@ -1,6 +1,6 @@
 # Development Dockerfile for backend services (monorepo). Shared for all services via SERVICE_PATH.
 # Build context: repo root. Example: docker build -f docker/services/Dockerfile.dev --build-arg SERVICE_PATH=services/api-gateway .
-FROM node:18-alpine
+FROM node:22-alpine
 
 ARG SERVICE_PATH=services/api-gateway
 

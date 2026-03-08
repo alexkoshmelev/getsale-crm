@@ -58,6 +58,21 @@ services:
     networks:
       - getsale-network
 
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: getsale-pgbouncer
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 25
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - getsale-network
+
   # ==================== Services ====================
   
   api-gateway:
@@ -72,8 +87,11 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=8000
+      - CORS_ORIGIN=http://localhost:5173,http://localhost:3000
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - JWT_SECRET=${JWT_SECRET:-dev_jwt_secret_change_in_production}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
       - AUTH_SERVICE_URL=http://auth-service:3001
       - CRM_SERVICE_URL=http://crm-service:3002
       - MESSAGING_SERVICE_URL=http://messaging-service:3003
@@ -120,11 +138,12 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3001
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@pgbouncer:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
-      - JWT_SECRET=dev_jwt_secret_change_in_production
-      - JWT_REFRESH_SECRET=dev_refresh_secret_change_in_production
+      - JWT_SECRET=${JWT_SECRET:-dev_jwt_secret_change_in_production}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-dev_refresh_secret_change_in_production}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
     depends_on:
       postgres:
         condition: service_healthy
@@ -156,9 +175,10 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3002
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@pgbouncer:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
     depends_on:
       postgres:
         condition: service_healthy
@@ -190,9 +210,10 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3003
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@pgbouncer:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
       - WEBSOCKET_SERVICE_URL=http://websocket-service:3004
       - BD_ACCOUNTS_SERVICE_URL=http://bd-accounts-service:3007
       - AI_SERVICE_URL=http://ai-service:3005
@@ -229,6 +250,7 @@ services:
       - PORT=3004
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
       - AUTH_SERVICE_URL=http://auth-service:3001
       - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:5173}
       - MAX_CONNECTIONS_PER_ORG=100
@@ -263,6 +285,7 @@ services:
       - PORT=3005
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     depends_on:
       redis:
@@ -293,9 +316,10 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3006
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@pgbouncer:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
     depends_on:
       postgres:
@@ -328,9 +352,10 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3007
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@pgbouncer:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
       - TELEGRAM_API_ID=${TELEGRAM_API_ID}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
     depends_on:
@@ -370,9 +395,10 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3008
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@pgbouncer:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
     depends_on:
       postgres:
         condition: service_healthy
@@ -404,9 +430,10 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3009
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@pgbouncer:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
       - PIPELINE_SERVICE_URL=http://pipeline-service:3008
     depends_on:
       postgres:
@@ -439,9 +466,10 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3010
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@pgbouncer:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
     depends_on:
       postgres:
         condition: service_healthy
@@ -473,9 +501,10 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3011
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@pgbouncer:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
     depends_on:
       postgres:
         condition: service_healthy
@@ -507,9 +536,10 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3012
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@postgres:5432/postgres
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@pgbouncer:5432/postgres
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
       - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
       - MESSAGING_SERVICE_URL=http://messaging-service:3003
       - PIPELINE_SERVICE_URL=http://pipeline-service:3008
     depends_on:

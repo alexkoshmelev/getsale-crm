@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes } from '@getsale/service-core';
 import { extractBearerToken } from '../helpers';
+import { AUTH_COOKIE_ACCESS } from '../cookies';
 
 interface Deps {
   pool: Pool;
@@ -35,7 +36,7 @@ export function invitesRouter({ pool }: Deps): Router {
 
   // Authenticated: accept invite
   router.post('/:token/accept', asyncHandler(async (req, res) => {
-    const decoded = extractBearerToken(req);
+    const decoded = extractBearerToken(req, req.cookies?.[AUTH_COOKIE_ACCESS]);
 
     const userResult = await pool.query('SELECT id FROM users WHERE id = $1', [decoded.userId]);
     if (userResult.rows.length === 0) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);

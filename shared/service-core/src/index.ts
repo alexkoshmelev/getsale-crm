@@ -3,6 +3,7 @@ export { AppError, isAppError, ErrorCodes, type ErrorCode } from './errors';
 export {
   correlationId,
   extractUser,
+  internalAuth,
   requireUser,
   requireRole,
   canPermission,

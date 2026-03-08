@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes } from '@getsale/service-core';
 import { extractBearerToken, canPermission, auditLog, resolveRole, getClientIp } from '../helpers';
+import { AUTH_COOKIE_ACCESS } from '../cookies';
 
 interface Deps {
   pool: Pool;
@@ -12,15 +13,17 @@ interface Deps {
 export function organizationRouter({ pool, log }: Deps): Router {
   const router = Router();
 
+  const tokenFromReq = (req: { cookies?: { [k: string]: string } }) => req.cookies?.[AUTH_COOKIE_ACCESS];
+
   router.get('/organization', asyncHandler(async (req, res) => {
-    const decoded = extractBearerToken(req);
+    const decoded = extractBearerToken(req, tokenFromReq(req));
     const rows = await pool.query('SELECT id, name, slug FROM organizations WHERE id = $1', [decoded.organizationId]);
     if (rows.rows.length === 0) throw new AppError(404, 'Organization not found', ErrorCodes.NOT_FOUND);
     res.json(rows.rows[0]);
   }));
 
   router.patch('/organization', asyncHandler(async (req, res) => {
-    const decoded = extractBearerToken(req);
+    const decoded = extractBearerToken(req, tokenFromReq(req));
     const role = await resolveRole(pool, decoded.userId, decoded.organizationId, decoded.role);
     const canUpdate = await canPermission(pool, role, 'workspace', 'update');
     if (!canUpdate) throw new AppError(403, 'Only owner or admin can update workspace settings', ErrorCodes.FORBIDDEN);
@@ -61,7 +64,7 @@ export function organizationRouter({ pool, log }: Deps): Router {
   }));
 
   router.post('/organization/transfer-ownership', asyncHandler(async (req, res) => {
-    const decoded = extractBearerToken(req);
+    const decoded = extractBearerToken(req, tokenFromReq(req));
     const role = await resolveRole(pool, decoded.userId, decoded.organizationId, decoded.role);
     if (role.toLowerCase() !== 'owner') throw new AppError(403, 'Only the current owner can transfer ownership', ErrorCodes.FORBIDDEN);
 
@@ -88,7 +91,7 @@ export function organizationRouter({ pool, log }: Deps): Router {
   }));
 
   router.get('/audit-logs', asyncHandler(async (req, res) => {
-    const decoded = extractBearerToken(req);
+    const decoded = extractBearerToken(req, tokenFromReq(req));
     const role = await resolveRole(pool, decoded.userId, decoded.organizationId, decoded.role);
     const allowed = await canPermission(pool, role, 'audit', 'read');
     if (!allowed) throw new AppError(403, 'Only owner or admin can view audit logs', ErrorCodes.FORBIDDEN);

@@ -41,3 +41,44 @@ export const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
 export const UNFURL_TIMEOUT_MS = 4000;
 export const UNFURL_MAX_BODY = 300_000; // 300 KB
 export const URL_REGEX = /^https?:\/\/[^\s<>"']+$/i;
+
+/** Block internal/private URLs to prevent SSRF. Only allow public internet URLs. */
+export function isUrlAllowedForUnfurl(rawUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  const host = url.hostname.toLowerCase();
+
+  // Block localhost and reserved hostnames (IPv6 loopback may appear as ::1 or [::1])
+  if (host === 'localhost' || host === '::1' || host === '[::1]' || host.endsWith('.local') || host.endsWith('.internal')) {
+    return false;
+  }
+  // Block common internal service hostnames (Docker Compose / K8s)
+  const blockedHosts = [
+    'redis', 'postgres', 'rabbitmq', 'api-gateway', 'auth-service', 'crm-service',
+    'messaging-service', 'websocket-service', 'ai-service', 'user-service', 'bd-accounts-service',
+    'pipeline-service', 'automation-service', 'analytics-service', 'team-service', 'campaign-service',
+  ];
+  if (blockedHosts.includes(host)) return false;
+
+  // IPv4: block private, loopback, link-local
+  const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const [, a, b, c] = ipv4Match.map(Number);
+    if (a === 127) return false; // 127.0.0.0/8
+    if (a === 10) return false; // 10.0.0.0/8
+    if (a === 172 && b >= 16 && b <= 31) return false; // 172.16.0.0/12
+    if (a === 192 && b === 168) return false; // 192.168.0.0/16
+    if (a === 169 && b === 254) return false; // 169.254.0.0/16 link-local
+    if (a === 0) return false; // 0.0.0.0/8
+  }
+
+  // IPv6: block loopback and unique-local
+  if (host === '::1' || host === '[::1]' || host.startsWith('fd') || host.startsWith('fe80')) return false;
+
+  return true;
+}

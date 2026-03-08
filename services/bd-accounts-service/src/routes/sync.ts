@@ -6,10 +6,9 @@ import { asyncHandler, AppError, ErrorCodes, canPermission } from '@getsale/serv
 import { TelegramManager } from '../telegram-manager';
 import {
   requireAccountOwner,
+  requireBidiOwnAccount,
   isAccountOwnerName,
-  fetchFoldersFromTelegramAndSave,
   ensureFoldersFromSyncChats,
-  refreshChatsFromFolders,
   SYNC_STALE_MINUTES,
 } from '../helpers';
 
@@ -224,7 +223,15 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
 
     if (result.rows.length === 0 && telegramManager.isConnected(id)) {
       try {
-        const rows = await fetchFoldersFromTelegramAndSave(pool, telegramManager, id);
+        const filters = await telegramManager.getDialogFilters(id);
+        const rows = filters.map((f, i) => ({
+          id: `virtual-${f.id}`,
+          folder_id: f.id,
+          folder_title: (f.title || '').trim() || `Папка ${f.id}`,
+          order_index: i,
+          is_user_created: f.isCustom ?? false,
+          icon: f.emoticon ?? null,
+        }));
         return res.json(rows);
       } catch (err: any) {
         log.warn({ message: 'Initial folders fetch from Telegram failed', error: err?.message, entity_id: id });
@@ -233,24 +240,26 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     res.json(result.rows);
   }));
 
-  // POST /:id/folders-refetch — refresh folders from Telegram
+  // POST /:id/folders-refetch — fetch folders (+ dialogs) from Telegram for UI only; does NOT save to DB.
+  // Only selected chats/folders are saved when user clicks "Save and sync" (POST sync-chats).
   router.post('/:id/folders-refetch', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const user = req.user;
     const { id } = req.params;
 
     const accountResult = await pool.query(
       'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
-      [id, organizationId]
+      [id, user.organizationId]
     );
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, id, user);
     if (!telegramManager.isConnected(id)) {
       throw new AppError(400, 'Account is not connected to Telegram', ErrorCodes.BAD_REQUEST);
     }
-    const rows = await fetchFoldersFromTelegramAndSave(pool, telegramManager, id);
-    await refreshChatsFromFolders(pool, telegramManager, id, log);
-    res.json({ folders: rows, success: true });
+    const filters = await telegramManager.getDialogFilters(id);
+    const folders = [{ id: 0, title: 'Все чаты', isCustom: false, emoticon: '💬' }, ...filters];
+    res.json({ folders, success: true });
   }));
 
   // POST /:id/sync-folders — save selected folders + extra chats
@@ -266,6 +275,7 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, id, user);
     const isOwner = await requireAccountOwner(pool, id, user);
     if (!isOwner) {
       throw new AppError(403, 'Only the account owner can change sync folders', ErrorCodes.FORBIDDEN);
@@ -343,6 +353,7 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, id, user);
     const isOwner = await requireAccountOwner(pool, id, user);
     if (!isOwner) {
       throw new AppError(403, 'Only the account owner can create folders', ErrorCodes.FORBIDDEN);
@@ -381,6 +392,7 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, id, user);
     const isOwner = await requireAccountOwner(pool, id, user);
     if (!isOwner) {
       throw new AppError(403, 'Only the account owner can reorder folders', ErrorCodes.FORBIDDEN);
@@ -403,17 +415,18 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
 
   // PATCH /:id/sync-folders/:folderRowId — update folder icon or title
   router.patch('/:id/sync-folders/:folderRowId', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const user = req.user;
     const { id: accountId, folderRowId } = req.params;
     const { icon, folder_title: folderTitle } = req.body;
 
     const accountResult = await pool.query(
       'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
-      [accountId, organizationId]
+      [accountId, user.organizationId]
     );
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, accountId, user);
     const updates: string[] = [];
     const values: any[] = [];
     let i = 1;
@@ -455,6 +468,7 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, accountId, user);
     const isOwner = await requireAccountOwner(pool, accountId, user);
     if (!isOwner) {
       throw new AppError(403, 'Only the account owner can delete folders', ErrorCodes.FORBIDDEN);
@@ -482,19 +496,19 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     res.status(204).send();
   }));
 
-  // POST /:id/sync-folders-refresh — refresh chats from selected folders
+  // POST /:id/sync-folders-refresh — no longer overwrites selection; only selected chats are stored via POST sync-chats.
   router.post('/:id/sync-folders-refresh', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const user = req.user;
     const { id } = req.params;
 
     const accountResult = await pool.query(
       'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
-      [id, organizationId]
+      [id, user.organizationId]
     );
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
-    await refreshChatsFromFolders(pool, telegramManager, id, log);
+    await requireBidiOwnAccount(pool, id, user);
     res.json({ success: true });
   }));
 
@@ -510,6 +524,7 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, id, user);
     const isOwner = await requireAccountOwner(pool, id, user);
     if (!isOwner) {
       throw new AppError(403, 'Only the account owner can push folders to Telegram', ErrorCodes.FORBIDDEN);
@@ -566,6 +581,7 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, id, user);
     const isOwner = await requireAccountOwner(pool, id, user);
     if (!isOwner) {
       throw new AppError(403, 'Only the account owner can change sync chats', ErrorCodes.FORBIDDEN);
@@ -616,6 +632,15 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
 
     await ensureFoldersFromSyncChats(pool, telegramManager, id);
 
+    // Обогатить контакты по личным чатам из Telegram (first_name, last_name, username, phone, bio, premium) — в БД.
+    // Важно: после первичной синхронизации пользователь ожидает, что мета уже сохранена, поэтому ждём завершения.
+    try {
+      const r = await telegramManager.enrichContactsForAccountSyncChats(user.organizationId, id, { delayMs: 60 });
+      log.info({ message: `Enriched ${r.enriched} contacts for sync chats`, entity_id: id });
+    } catch (err: unknown) {
+      log.warn({ message: 'enrichContactsForAccountSyncChats failed', entity_id: id, error: (err as Error)?.message });
+    }
+
     const chatsRows = await pool.query(
       'SELECT id, telegram_chat_id, title, peer_type, folder_id, created_at FROM bd_account_sync_chats WHERE bd_account_id = $1 ORDER BY folder_id NULLS LAST, created_at',
       [id]
@@ -648,6 +673,7 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, id, user);
     const isOwner = await requireAccountOwner(pool, id, user);
     if (!isOwner) {
       throw new AppError(403, 'Only the account owner can start sync', ErrorCodes.FORBIDDEN);
@@ -728,17 +754,18 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
 
   // PATCH /:id/chats/:chatId/folder — assign chat to folders
   router.patch('/:id/chats/:chatId/folder', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const user = req.user;
     const { id: accountId, chatId } = req.params;
     const { folder_ids: folderIdsRaw, folder_id: legacyFolderId } = req.body;
 
     const accountResult = await pool.query(
       'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
-      [accountId, organizationId]
+      [accountId, user.organizationId]
     );
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, accountId, user);
 
     let folderIds: number[] = [];
     if (Array.isArray(folderIdsRaw)) {
@@ -783,6 +810,7 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, accountId, user);
     const isOwner = await requireAccountOwner(pool, accountId, user);
     const canDeleteChat = await checkPermission(user.role, 'bd_accounts', 'chat.delete');
     if (!isOwner && !canDeleteChat) {

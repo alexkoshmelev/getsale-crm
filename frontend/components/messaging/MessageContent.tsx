@@ -20,9 +20,7 @@ function useMediaUrl(mediaUrl: string | null) {
     const cached = blobUrlCache.get(key);
     if (cached) { setUrl(cached); return () => setUrl(null); }
     let cancelled = false;
-    const authStorage = typeof window !== 'undefined' ? localStorage.getItem('auth-storage') : null;
-    const token = authStorage ? (JSON.parse(authStorage)?.state?.accessToken as string) : null;
-    fetch(mediaUrl, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    fetch(mediaUrl, { credentials: 'include' })
       .then((r) => (r.ok ? r.blob() : Promise.reject(new Error('Failed to load media'))))
       .then((blob) => {
         const u = URL.createObjectURL(blob);

@@ -1,5 +1,110 @@
 import type { BDAccount, Chat, Message, MessageMediaType } from './types';
 
+// ─── Chat list mapping (API raw → Chat[], merge by channel_id, sort) ───
+
+/** Map a single raw chat from /api/messaging/chats to Chat. */
+export function mapRawChatToChat(chat: Record<string, unknown>): Chat {
+  const folderIds = Array.isArray(chat.folder_ids)
+    ? (chat.folder_ids as unknown[]).map((x) => Number(x)).filter((n) => !Number.isNaN(n))
+    : chat.folder_id != null
+      ? [Number(chat.folder_id)]
+      : [];
+  return {
+    channel: (chat.channel as string) || 'telegram',
+    channel_id: String(chat.channel_id),
+    folder_id: chat.folder_id != null ? Number(chat.folder_id) : (folderIds[0] ?? null),
+    folder_ids: folderIds.length > 0 ? folderIds : undefined,
+    contact_id: (chat.contact_id as string) ?? null,
+    first_name: (chat.first_name as string) ?? null,
+    last_name: (chat.last_name as string) ?? null,
+    email: (chat.email as string) ?? null,
+    telegram_id: (chat.telegram_id as string) ?? null,
+    display_name: (chat.display_name as string) ?? null,
+    username: (chat.username as string) ?? null,
+    name: (chat.name as string) ?? null,
+    peer_type: (chat.peer_type as string) ?? null,
+    unread_count: parseInt(String(chat.unread_count), 10) || 0,
+    last_message_at:
+      chat.last_message_at && String(chat.last_message_at).trim() ? String(chat.last_message_at) : '',
+    last_message: (chat.last_message as string) ?? null,
+    conversation_id: (chat.conversation_id as string) ?? null,
+    lead_id: (chat.lead_id as string) ?? null,
+    lead_stage_name: (chat.lead_stage_name as string) ?? null,
+    lead_pipeline_name: (chat.lead_pipeline_name as string) ?? null,
+    chat_title: (chat.chat_title as string) ?? null,
+  };
+}
+
+/** Merge chats that share the same channel_id (prefer newer, aggregate unread_count), then sort by last_message_at desc. */
+export function mergeAndSortChatsByChannelId(chats: Chat[]): Chat[] {
+  const byChannelId = new Map<string, Chat>();
+  const isIdOnly = (name: string | null, cid: string) =>
+    !name || name.trim() === '' || name === cid || /^\d+$/.test(String(name).trim());
+  for (const chat of chats) {
+    const existing = byChannelId.get(chat.channel_id);
+    const chatTime = new Date(chat.last_message_at).getTime();
+    const existingTime = existing ? new Date(existing.last_message_at).getTime() : 0;
+    const preferNew =
+      !existing ||
+      chatTime > existingTime ||
+      (chatTime === existingTime &&
+        isIdOnly(existing.name ?? existing.telegram_id ?? '', existing.channel_id) &&
+        !isIdOnly(chat.name ?? chat.telegram_id ?? '', chat.channel_id));
+    if (preferNew) {
+      const merged = { ...chat };
+      if (existing) merged.unread_count = (existing.unread_count || 0) + (merged.unread_count || 0);
+      byChannelId.set(chat.channel_id, merged);
+    } else if (existing) {
+      existing.unread_count = (existing.unread_count || 0) + (chat.unread_count || 0);
+    }
+  }
+  return Array.from(byChannelId.values()).sort((a, b) => {
+    const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+    const tb = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+    if (Number.isNaN(ta)) return 1;
+    if (Number.isNaN(tb)) return -1;
+    return tb - ta;
+  });
+}
+
+/** Map raw chats from API to Chat[] (map + merge + sort). */
+export function mapRawChatsToChatList(rawChats: Record<string, unknown>[]): Chat[] {
+  const mapped = rawChats.map((chat) => mapRawChatToChat(chat));
+  return mergeAndSortChatsByChannelId(mapped);
+}
+
+/** Map a single new-lead row from /api/messaging/new-leads to Chat. */
+export function mapNewLeadRowToChat(r: Record<string, unknown>): Chat {
+  const nameStr =
+    (r.display_name as string)?.trim() ||
+    [`${(r.first_name as string) || ''}`.trim(), `${(r.last_name as string) || ''}`.trim()]
+      .filter(Boolean)
+      .join(' ') ||
+    (r.username as string) ||
+    (r.telegram_id != null ? String(r.telegram_id) : '') ||
+    null;
+  return {
+    channel: (r.channel as string) || 'telegram',
+    channel_id: String(r.channel_id),
+    contact_id: (r.contact_id as string) ?? null,
+    first_name: (r.first_name as string) ?? null,
+    last_name: (r.last_name as string) ?? null,
+    email: null,
+    telegram_id: r.telegram_id != null ? String(r.telegram_id) : null,
+    display_name: (r.display_name as string) ?? null,
+    username: (r.username as string) ?? null,
+    name: nameStr ?? null,
+    unread_count: Number(r.unread_count) || 0,
+    last_message_at: r.last_message_at != null ? String(r.last_message_at) : '',
+    last_message: (r.last_message as string) ?? null,
+    conversation_id: (r.conversation_id as string) ?? null,
+    lead_id: (r.lead_id as string) ?? null,
+    lead_stage_name: (r.lead_stage_name as string) ?? null,
+    lead_pipeline_name: (r.lead_pipeline_name as string) ?? null,
+    bd_account_id: (r.bd_account_id as string) ?? null,
+  };
+}
+
 // ─── Account Helpers ─────────────────────────────────────────────────
 
 export function getAccountDisplayName(account: BDAccount): string {
@@ -23,6 +128,9 @@ export function getAccountInitials(account: BDAccount): string {
 // ─── Chat Helpers ────────────────────────────────────────────────────
 
 export function getChatDisplayName(chat: Chat): string {
+  const isGroup = chat.peer_type === 'chat' || chat.peer_type === 'channel';
+  if (isGroup && chat.chat_title?.trim()) return chat.chat_title.trim();
+  if (isGroup && chat.name?.trim()) return chat.name.trim();
   if (chat.display_name?.trim()) return chat.display_name.trim();
   const firstLast = `${chat.first_name || ''} ${chat.last_name || ''}`.trim();
   if (firstLast && !/^Telegram\s+\d+$/.test(firstLast)) return firstLast;
@@ -45,6 +153,9 @@ export function getChatName(
   chat: Chat,
   overrides?: { firstName?: string; lastName?: string; usernames?: string[] },
 ): string {
+  const isGroup = chat.peer_type === 'chat' || chat.peer_type === 'channel';
+  if (isGroup && chat.chat_title?.trim()) return chat.chat_title.trim();
+  if (isGroup && chat.name?.trim()) return chat.name.trim();
   if (chat.display_name?.trim()) return chat.display_name.trim();
   const first = (overrides?.firstName ?? chat.first_name ?? '').trim();
   const last = (overrides?.lastName ?? chat.last_name ?? '').trim();
@@ -56,6 +167,22 @@ export function getChatName(
   if (chat.email?.trim()) return chat.email.trim();
   if (chat.telegram_id) return chat.telegram_id;
   return 'Unknown';
+}
+
+/**
+ * Returns a display name that is unique among the given chats.
+ * When multiple chats resolve to the same base name, appends a short channel_id suffix for duplicates.
+ */
+export function getChatNameUniqueInList(
+  chat: Chat,
+  allChats: Chat[],
+  getBaseName: (c: Chat) => string,
+): string {
+  const base = getBaseName(chat);
+  const sameNameChats = allChats.filter((c) => getBaseName(c) === base);
+  if (sameNameChats.length <= 1) return base;
+  const suffix = chat.channel_id.replace(/\D/g, '').slice(-4);
+  return suffix ? `${base} (…${suffix})` : base;
 }
 
 // ─── Message Helpers ─────────────────────────────────────────────────
@@ -101,7 +228,7 @@ export function getForwardedFromLabel(msg: Message): string | null {
 }
 
 export function getMediaProxyUrl(bdAccountId: string, channelId: string, telegramMessageId: string): string {
-  const base = typeof window !== 'undefined' ? (process.env.NEXT_PUBLIC_API_URL || '') : '';
+  const base = typeof window !== 'undefined' ? '' : (process.env.NEXT_PUBLIC_API_URL || process.env.API_URL || '');
   const params = new URLSearchParams({ channelId, messageId: telegramMessageId });
   return `${base}/api/bd-accounts/${bdAccountId}/media?${params.toString()}`;
 }

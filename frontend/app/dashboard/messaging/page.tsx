@@ -23,15 +23,19 @@ import { RightWorkspacePanel } from '@/components/messaging/RightWorkspacePanel'
 import { AccountList } from '@/components/messaging/AccountList';
 import { ChatList } from '@/components/messaging/ChatList';
 import { ChatAvatar } from '@/components/messaging/ChatAvatar';
+import { LeadContextAvatarFromContext } from '@/components/messaging/LeadContextAvatar';
 import { MessageBubble } from '@/components/messaging/MessageBubble';
 import { BroadcastToGroupsModal } from '@/components/messaging/BroadcastToGroupsModal';
 import { ForwardMessageModal } from '@/components/messaging/ForwardMessageModal';
+import { EditContactNameModal } from '@/components/messaging/EditContactNameModal';
+import { AddNoteModal } from '@/components/messaging/AddNoteModal';
+import { AddReminderModal } from '@/components/messaging/AddReminderModal';
 import dynamic from 'next/dynamic';
 import { clsx } from 'clsx';
 import { apiClient } from '@/lib/api/client';
 import {
-  fetchContactNotes, createContactNote, deleteNote,
-  fetchContactReminders, createContactReminder, updateReminder, deleteReminder,
+  fetchContactNotes, deleteNote,
+  fetchContactReminders, updateReminder, deleteReminder,
 } from '@/lib/api/crm';
 import { formatDealAmount } from '@/lib/format/currency';
 import type { LeadContext, Message } from './types';
@@ -61,10 +65,11 @@ export default function MessagingPage() {
   const handleSelectChat = useCallback(
     (chat: Parameters<typeof s.setSelectedChat>[0]) => {
       s.setSelectedChat(chat);
-      if (chat && s.selectedAccountId) {
+      const chatObj = typeof chat === 'function' ? null : chat;
+      if (chatObj && s.selectedAccountId) {
         const q = new URLSearchParams(searchParams?.toString() ?? '');
         q.set('bdAccountId', s.selectedAccountId);
-        q.set('open', chat.channel_id);
+        q.set('open', chatObj.channel_id);
         router.replace(`${pathname}?${q.toString()}`, { scroll: false });
       }
     },
@@ -74,6 +79,9 @@ export default function MessagingPage() {
   const convId = data.convId;
   const isLead = data.isLead;
   const isLeadPanelOpen = data.isLeadPanelOpen;
+  // Agent (bidi): can write only from accounts they connected; other roles can write from any org account
+  const canWriteFromSelectedAccount =
+    (currentUser?.role?.toLowerCase() !== 'bidi') || (actions.isSelectedAccountMine === true);
 
   const handleContextMenuMessage = useCallback((e: React.MouseEvent, msg: Message) => {
     s.setChatContextMenu(null);
@@ -127,6 +135,7 @@ export default function MessagingPage() {
           newLeads={s.newLeads}
           newLeadsLoading={s.newLeadsLoading}
           getChatNameWithOverrides={actions.getChatNameWithOverrides}
+          getChatNameDisplay={actions.getChatNameDisplay}
           onSelectChat={handleSelectChat}
           onSelectAccount={s.setSelectedAccountId}
           onCollapse={s.setChatsCollapsed}
@@ -173,7 +182,7 @@ export default function MessagingPage() {
                         <button type="button" onClick={() => { s.setShowChatHeaderMenu(false); actions.openEditNameModal(); }} disabled={!s.selectedChat.contact_id} className="w-full px-4 py-2 text-left text-sm hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2" role="menuitem">
                           <UserCircle className="w-4 h-4 shrink-0" />{s.selectedChat.contact_id ? t('messaging.changeContactName') : t('messaging.noContact')}
                         </button>
-                        {s.selectedChat.contact_id && (
+                        {s.selectedChat.contact_id && s.selectedChat.peer_type === 'user' && (
                           <button type="button" onClick={() => { s.setShowChatHeaderMenu(false); s.setAddToFunnelFromChat({ contactId: s.selectedChat!.contact_id!, contactName: actions.getChatNameWithOverrides(s.selectedChat!), leadTitle: actions.getChatNameWithOverrides(s.selectedChat!), bdAccountId: s.selectedAccountId ?? undefined, channel: s.selectedChat!.channel, channelId: s.selectedChat!.channel_id }); }} className="w-full px-4 py-2 text-left text-sm hover:bg-accent flex items-center gap-2" role="menuitem">
                             <Filter className="w-4 h-4 shrink-0" />{t('pipeline.addToFunnel')}
                           </button>
@@ -184,20 +193,14 @@ export default function MessagingPage() {
                 </div>
               </div>
 
-              {/* Edit Name Modal */}
-              {s.showEditNameModal && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => !s.savingDisplayName && s.setShowEditNameModal(false)}>
-                  <div className="bg-card rounded-xl shadow-xl p-6 max-w-md w-full mx-4 border border-border" onClick={(e) => e.stopPropagation()}>
-                    <h3 className="text-lg font-semibold mb-2 text-foreground">{t('messaging.contactName')}</h3>
-                    <p className="text-sm text-muted-foreground mb-4">{t('messaging.contactNameHint')}</p>
-                    <Input value={s.editDisplayNameValue} onChange={(e) => s.setEditDisplayNameValue(e.target.value)} placeholder={t('messaging.enterName')} className="mb-4" />
-                    <div className="flex justify-end gap-2">
-                      <Button variant="outline" onClick={() => s.setShowEditNameModal(false)} disabled={s.savingDisplayName}>Отмена</Button>
-                      <Button onClick={actions.saveDisplayName} disabled={s.savingDisplayName}>{s.savingDisplayName ? <Loader2 className="w-4 h-4 animate-spin" /> : t('common.save')}</Button>
-                    </div>
-                  </div>
-                </div>
-              )}
+              <EditContactNameModal
+                open={s.showEditNameModal}
+                onClose={() => !s.savingDisplayName && s.setShowEditNameModal(false)}
+                value={s.editDisplayNameValue}
+                onChange={(v) => s.setEditDisplayNameValue(v)}
+                onSave={actions.saveDisplayName}
+                saving={s.savingDisplayName}
+              />
 
               {/* Message List */}
               <div className="relative flex-1 min-h-0 flex flex-col">
@@ -303,7 +306,7 @@ export default function MessagingPage() {
                     >
                       <Sparkles className="w-4 h-4 text-yellow-600" />{t('messaging.aiCmdDraftShort', 'Suggest reply')}
                     </button>
-                    {s.selectedChat?.contact_id && (
+                    {s.selectedChat?.contact_id && s.selectedChat?.peer_type === 'user' && (
                       <button
                         onClick={() => { s.setShowCommandsMenu(false); s.setAddToFunnelFromChat({ contactId: s.selectedChat!.contact_id!, contactName: actions.getChatNameWithOverrides(s.selectedChat!), leadTitle: actions.getChatNameWithOverrides(s.selectedChat!), bdAccountId: s.selectedAccountId ?? undefined, channel: s.selectedChat!.channel, channelId: s.selectedChat!.channel_id }); }}
                         className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg hover:bg-accent"
@@ -327,7 +330,7 @@ export default function MessagingPage() {
                 )}
                 <div className="flex items-end gap-2">
                   <div className="relative attach-menu">
-                    <button onClick={() => s.setShowAttachMenu(!s.showAttachMenu)} className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors" title={t('messaging.attachFile')}><Paperclip className="w-5 h-5" /></button>
+                    <button onClick={() => canWriteFromSelectedAccount && s.setShowAttachMenu(!s.showAttachMenu)} disabled={!canWriteFromSelectedAccount} className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed" title={t('messaging.attachFile')}><Paperclip className="w-5 h-5" /></button>
                     {s.showAttachMenu && (
                       <div className="absolute bottom-full left-0 mb-2 bg-card border border-border rounded-lg shadow-lg p-2 z-10 min-w-[180px]">
                         <button onClick={actions.handleAttachFile} className="w-full flex items-center gap-3 px-3 py-2 text-sm hover:bg-accent rounded-lg"><Image className="w-4 h-4 text-blue-600" />{t('messaging.photo')}</button>
@@ -337,7 +340,7 @@ export default function MessagingPage() {
                     )}
                     <input ref={s.fileInputRef} type="file" className="hidden" accept="image/*,video/*,.pdf,.doc,.docx,.txt,*/*" onChange={actions.handleFileSelect} />
                   </div>
-                  <button onClick={actions.handleVoiceMessage} className={`p-2 rounded-lg transition-colors ${s.isRecording ? 'bg-red-100 text-red-600 animate-pulse' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}`} title={t('messaging.voiceMessage')}><Mic className="w-5 h-5" /></button>
+                  <button onClick={actions.handleVoiceMessage} disabled={!canWriteFromSelectedAccount} className={`p-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${s.isRecording ? 'bg-red-100 text-red-600 animate-pulse' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}`} title={t('messaging.voiceMessage')}><Mic className="w-5 h-5" /></button>
                   {s.replyToMessage && (
                     <div className="flex items-center gap-2 mb-2 py-1.5 px-3 rounded-lg bg-muted/60 border-l-2 border-primary text-sm">
                       <Reply className="w-4 h-4 text-primary shrink-0" />
@@ -348,24 +351,24 @@ export default function MessagingPage() {
                   <div className="flex-1 relative flex items-end min-h-[40px]">
                     <textarea
                       ref={s.messageInputRef}
-                      placeholder={actions.isSelectedAccountMine ? t('messaging.writeMessage') : t('messaging.colleagueViewOnly')}
+                      placeholder={canWriteFromSelectedAccount ? t('messaging.writeMessage') : (currentUser?.role?.toLowerCase() === 'bidi' ? t('messaging.agentViewOnly', 'View only — you can send only from accounts you connected') : t('messaging.colleagueViewOnly'))}
                       value={s.newMessage}
                       onChange={(e) => s.setNewMessage(e.target.value)}
                       onPaste={(e) => {
                         const items = e.clipboardData?.items;
-                        if (!items?.length || !actions.isSelectedAccountMine) return;
+                        if (!items?.length || !canWriteFromSelectedAccount) return;
                         for (let i = 0; i < items.length; i++) {
                           if (items[i].kind === 'file') { const file = items[i].getAsFile(); if (file?.type.startsWith('image/')) { e.preventDefault(); s.setPendingFile(file); return; } }
                         }
                       }}
                       onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); actions.handleSendMessage(); } }}
-                      disabled={!actions.isSelectedAccountMine}
+                      disabled={!canWriteFromSelectedAccount}
                       rows={1}
                       className="w-full min-h-[40px] max-h-[120px] py-2.5 px-3 pr-10 rounded-xl resize-none border border-input bg-background text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     />
                     <button onClick={() => s.setShowCommandsMenu(!s.showCommandsMenu)} className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg transition-colors ${s.showCommandsMenu ? 'bg-blue-100 text-blue-600' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}`} title={t('messaging.crmCommands')}><Bot className="w-4 h-4" /></button>
                   </div>
-                  <Button onClick={actions.handleSendMessage} disabled={!actions.isSelectedAccountMine || (!s.newMessage.trim() && !s.pendingFile) || s.sendingMessage} className="px-4" title={!actions.isSelectedAccountMine ? t('messaging.onlyOwnerCanSend') : undefined}>
+                  <Button onClick={actions.handleSendMessage} disabled={!canWriteFromSelectedAccount || (!s.newMessage.trim() && !s.pendingFile) || s.sendingMessage} className="px-4" title={!canWriteFromSelectedAccount ? (currentUser?.role?.toLowerCase() === 'bidi' ? t('messaging.agentViewOnly', 'View only — you can send only from accounts you connected') : t('messaging.onlyOwnerCanSend')) : undefined}>
                     {s.sendingMessage ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
                   </Button>
                 </div>
@@ -407,7 +410,7 @@ export default function MessagingPage() {
               : s.leadContext ? (
                 <div className="space-y-4 px-4 py-4">
                   <div className="flex items-start gap-3">
-                    <div className="p-2.5 rounded-xl bg-primary/10 text-primary shrink-0"><User className="w-6 h-6" /></div>
+                    <LeadContextAvatarFromContext leadContext={s.leadContext} bdAccountId={s.selectedAccountId} className="w-10 h-10 shrink-0" />
                     <div className="min-w-0 flex-1">
                       <h3 className="font-heading text-base font-semibold text-foreground truncate">{s.leadContext.contact_name || (s.selectedChat && actions.getChatNameWithOverrides(s.selectedChat)) || '—'}</h3>
                       <p className="text-sm text-muted-foreground mt-0.5 truncate">{s.leadContext.company_name || (s.leadContext.contact_username ? `@${String(s.leadContext.contact_username).replace(/^@/, '')}` : null) || '—'}</p>
@@ -439,6 +442,22 @@ export default function MessagingPage() {
                     {s.leadContext.won_at && <div className="text-xs font-medium text-emerald-600 dark:text-emerald-400">✓ {t('messaging.dealWon', 'Сделка закрыта')}{s.leadContext.revenue_amount != null && s.leadContext.revenue_amount > 0 ? ` — ${formatDealAmount(s.leadContext.revenue_amount, 'EUR')}` : ''}</div>}
                     {s.leadContext.lost_at && <div className="text-xs text-muted-foreground">✕ {t('messaging.dealLost', 'Сделка потеряна')}</div>}
                   </div>
+                  {s.leadContext.contact_id && (
+                    <div className="grid grid-cols-3 gap-2">
+                      <Button variant="outline" size="sm" className="justify-center gap-1.5" onClick={() => s.setLeadNoteModalOpen(true)}>
+                        <StickyNote className="w-4 h-4" />
+                        <span className="text-xs">{t('pipeline.dealFormAddNote', 'Добавить заметку')}</span>
+                      </Button>
+                      <Button variant="outline" size="sm" className="justify-center gap-1.5" onClick={() => s.setLeadReminderModalOpen(true)}>
+                        <Bell className="w-4 h-4" />
+                        <span className="text-xs">{t('pipeline.dealFormAddReminder', 'Добавить напоминание')}</span>
+                      </Button>
+                      <a href={`/dashboard/messaging?contactId=${s.leadContext.contact_id}`} className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-3 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors">
+                        <MessageSquare className="w-4 h-4" />
+                        <span className="text-xs">{t('pipeline.dealFormOpenChat', 'Открыть чат')}</span>
+                      </a>
+                    </div>
+                  )}
                   <Button variant="outline" size="sm" className="w-full justify-center gap-2" onClick={() => s.setLeadCardModalOpen(true)}><User className="w-4 h-4" />{t('messaging.openLeadCard', 'Открыть карточку лида')}</Button>
                 </div>
               ) : null}
@@ -452,7 +471,7 @@ export default function MessagingPage() {
           <Modal isOpen={s.leadCardModalOpen} onClose={() => s.setLeadCardModalOpen(false)} title={t('messaging.leadCardTitle', 'Карточка лида')} size="lg">
             <div className="space-y-5">
               <div className="flex flex-col items-center text-center pb-4 border-b border-border">
-                <div className="p-3 rounded-xl bg-primary/10 text-primary"><User className="w-10 h-10" /></div>
+                <LeadContextAvatarFromContext leadContext={s.leadContext} bdAccountId={s.selectedAccountId} className="w-14 h-14" />
                 <h2 className="mt-3 font-heading text-xl font-semibold text-foreground truncate w-full px-2">{s.leadContext.contact_name || (s.selectedChat && actions.getChatNameWithOverrides(s.selectedChat)) || '—'}</h2>
                 <p className="text-sm text-muted-foreground mt-1">{s.leadContext.company_name || (s.leadContext.contact_username ? `@${String(s.leadContext.contact_username).replace(/^@/, '')}` : null) || '—'}</p>
               </div>
@@ -476,7 +495,7 @@ export default function MessagingPage() {
                   <ul className="space-y-2 max-h-28 overflow-y-auto">{s.leadNotes.map((n) => (
                     <li key={n.id} className="flex items-start justify-between gap-2 text-sm bg-muted/40 rounded-lg p-2"><span className="text-foreground flex-1 break-words">{n.content}</span><button type="button" onClick={() => deleteNote(n.id).then(() => fetchContactNotes(s.leadContext!.contact_id!).then(s.setLeadNotes))} className="text-muted-foreground hover:text-destructive shrink-0">×</button></li>
                   ))}</ul>
-                  <div className="flex gap-2"><input type="text" value={s.leadNoteText} onChange={(e) => s.setLeadNoteText(e.target.value)} placeholder={t('crm.addNote', 'Добавить заметку')} className="flex-1 min-w-0 px-2.5 py-1.5 rounded-xl border border-border bg-background text-sm text-foreground" /><Button size="sm" disabled={!s.leadNoteText.trim() || s.addingLeadNote} onClick={async () => { if (!s.leadContext?.contact_id || !s.leadNoteText.trim()) return; s.setAddingLeadNote(true); try { await createContactNote(s.leadContext.contact_id, s.leadNoteText.trim()); s.setLeadNoteText(''); fetchContactNotes(s.leadContext.contact_id).then(s.setLeadNotes); } finally { s.setAddingLeadNote(false); } }}>{s.addingLeadNote ? '…' : t('common.add', 'Добавить')}</Button></div>
+                  <Button variant="outline" size="sm" className="w-full justify-center gap-2" onClick={() => s.setLeadNoteModalOpen(true)}><StickyNote className="w-4 h-4" />{t('pipeline.dealFormAddNote', 'Добавить заметку')}</Button>
                 </div>
               )}
               {s.leadContext.contact_id && (
@@ -485,7 +504,7 @@ export default function MessagingPage() {
                   <ul className="space-y-2 max-h-24 overflow-y-auto">{s.leadReminders.map((r) => (
                     <li key={r.id} className={clsx('flex items-center justify-between gap-2 text-sm rounded-lg p-2', r.done ? 'bg-muted/30 text-muted-foreground' : 'bg-muted/40')}><span className="flex-1 truncate">{r.title || new Date(r.remind_at).toLocaleString()}</span><div className="flex items-center gap-1 shrink-0">{!r.done && <button type="button" onClick={() => updateReminder(r.id, { done: true }).then(() => { if (s.leadContext?.contact_id) fetchContactReminders(s.leadContext.contact_id).then(s.setLeadReminders); })} className="p-1 rounded text-green-600 hover:bg-green-500/20" title={t('crm.markDone', 'Выполнено')}><Check className="w-4 h-4" /></button>}<button type="button" onClick={() => deleteReminder(r.id).then(() => { if (s.leadContext?.contact_id) fetchContactReminders(s.leadContext.contact_id).then(s.setLeadReminders); })} className="p-1 rounded text-muted-foreground hover:text-destructive">×</button></div></li>
                   ))}</ul>
-                  <div className="flex flex-wrap gap-2 items-end"><input type="datetime-local" value={s.leadRemindAt} onChange={(e) => s.setLeadRemindAt(e.target.value)} className="px-2.5 py-1.5 rounded-xl border border-border bg-background text-sm text-foreground" /><input type="text" value={s.leadRemindTitle} onChange={(e) => s.setLeadRemindTitle(e.target.value)} placeholder={t('crm.reminderTitle', 'Текст')} className="w-28 px-2.5 py-1.5 rounded-xl border border-border bg-background text-sm text-foreground" /><Button size="sm" disabled={!s.leadRemindAt || s.addingLeadReminder} onClick={async () => { if (!s.leadContext?.contact_id || !s.leadRemindAt) return; s.setAddingLeadReminder(true); try { await createContactReminder(s.leadContext.contact_id, { remind_at: new Date(s.leadRemindAt).toISOString(), title: s.leadRemindTitle.trim() || undefined }); s.setLeadRemindAt(''); s.setLeadRemindTitle(''); fetchContactReminders(s.leadContext.contact_id).then(s.setLeadReminders); } finally { s.setAddingLeadReminder(false); } }}>{s.addingLeadReminder ? '…' : t('common.add', 'Добавить')}</Button></div>
+                  <Button variant="outline" size="sm" className="w-full justify-center gap-2" onClick={() => s.setLeadReminderModalOpen(true)}><Bell className="w-4 h-4" />{t('pipeline.dealFormAddReminder', 'Добавить напоминание')}</Button>
                 </div>
               )}
               <div className="border-t border-border pt-4 space-y-2">
@@ -524,7 +543,7 @@ export default function MessagingPage() {
           {actions.pinnedSet.has(s.chatContextMenu.chat.channel_id)
             ? <ContextMenuItem icon={<PinOff className="w-4 h-4" />} label={t('messaging.unpinChat')} onClick={() => actions.handleUnpinChat(s.chatContextMenu!.chat)} />
             : <ContextMenuItem icon={<Pin className="w-4 h-4" />} label={t('messaging.pinChat')} onClick={() => actions.handlePinChat(s.chatContextMenu!.chat)} />}
-          {s.chatContextMenu.chat.contact_id && <ContextMenuItem icon={<Filter className="w-4 h-4" />} label={t('pipeline.addToFunnel')} onClick={() => { s.setChatContextMenu(null); s.setAddToFunnelFromChat({ contactId: s.chatContextMenu!.chat.contact_id!, contactName: actions.getChatNameWithOverrides(s.chatContextMenu!.chat), leadTitle: actions.getChatNameWithOverrides(s.chatContextMenu!.chat), bdAccountId: s.selectedAccountId ?? undefined, channel: s.chatContextMenu!.chat.channel, channelId: s.chatContextMenu!.chat.channel_id }); }} />}
+          {s.chatContextMenu.chat.contact_id && s.chatContextMenu.chat.peer_type === 'user' && <ContextMenuItem icon={<Filter className="w-4 h-4" />} label={t('pipeline.addToFunnel')} onClick={() => { s.setChatContextMenu(null); s.setAddToFunnelFromChat({ contactId: s.chatContextMenu!.chat.contact_id!, contactName: actions.getChatNameWithOverrides(s.chatContextMenu!.chat), leadTitle: actions.getChatNameWithOverrides(s.chatContextMenu!.chat), bdAccountId: s.selectedAccountId ?? undefined, channel: s.chatContextMenu!.chat.channel, channelId: s.chatContextMenu!.chat.channel_id }); }} />}
           <ContextMenuSection label={t('messaging.addToFolder')}>
             <ContextMenuItem label={t('messaging.folderNone')} onClick={() => actions.handleChatFoldersClear(s.chatContextMenu!.chat)} />
             {actions.displayFolders.filter((f) => f.folder_id !== 0).length === 0 ? <ContextMenuItem label={t('messaging.folderNoFolders')} disabled /> : actions.displayFolders.filter((f) => f.folder_id !== 0).map((f) => { const isIn = actions.chatFolderIds(s.chatContextMenu!.chat).includes(f.folder_id); return <ContextMenuItem key={f.id} icon={isIn ? <Check className="w-4 h-4 text-primary" /> : undefined} label={<><span className="truncate flex-1">{f.folder_title}</span><span className="text-[10px] text-muted-foreground shrink-0">{f.is_user_created ? 'CRM' : 'TG'}</span></>} onClick={() => actions.handleChatFoldersToggle(s.chatContextMenu!.chat, f.folder_id)} />; })}
@@ -534,7 +553,29 @@ export default function MessagingPage() {
       </ContextMenu>
 
       <FolderManageModal open={s.showFolderManageModal} onClose={() => s.setShowFolderManageModal(false)} folders={s.folders} onFoldersChange={s.setFolders} selectedAccountId={s.selectedAccountId} isAccountOwner={!!actions.isSelectedAccountMine} hideEmptyFolders={s.hideEmptyFolders} onHideEmptyFoldersChange={s.setHideEmptyFolders} onCreateFolder={actions.handleCreateFolder} onReorder={actions.handleReorderFolders} onUpdateFolder={actions.handleUpdateFolder} onDeleteFolder={actions.handleDeleteFolder} onFolderDeleted={actions.handleFolderDeleted} />
-      <AddToFunnelModal isOpen={!!s.addToFunnelFromChat} onClose={() => s.setAddToFunnelFromChat(null)} contactId={s.addToFunnelFromChat?.contactId ?? ''} contactName={s.addToFunnelFromChat?.contactName} leadTitle={s.addToFunnelFromChat?.leadTitle} defaultPipelineId={typeof window !== 'undefined' ? window.localStorage.getItem('pipeline.selectedPipelineId') : null} />
+      <AddToFunnelModal
+        isOpen={!!s.addToFunnelFromChat}
+        onClose={() => s.setAddToFunnelFromChat(null)}
+        contactId={s.addToFunnelFromChat?.contactId ?? ''}
+        contactName={s.addToFunnelFromChat?.contactName}
+        leadTitle={s.addToFunnelFromChat?.leadTitle}
+        defaultPipelineId={typeof window !== 'undefined' ? window.localStorage.getItem('pipeline.selectedPipelineId') : null}
+        onSuccess={() => {
+          const channelId = s.addToFunnelFromChat?.channelId;
+          data.fetchChats().then((chats) => {
+            if (!chats?.length || !channelId) return;
+            const updated = chats.find((c) => c.channel_id === channelId);
+            if (updated) {
+              if (s.selectedChat?.channel_id === channelId) s.setSelectedChat(updated);
+              s.setChatContextMenu((prev) => (prev?.chat.channel_id === channelId ? { ...prev, chat: updated } : prev));
+            }
+            s.setRightPanelTab('lead_card');
+            s.setRightPanelOpen(true);
+            const cid = updated?.conversation_id ?? s.selectedChat?.conversation_id;
+            if (cid) s.setLeadPanelOpenByConvId((prev) => ({ ...prev, [cid]: true }));
+          });
+        }}
+      />
 
       {s.broadcastModalOpen && s.selectedAccountId && <BroadcastToGroupsModal accountId={s.selectedAccountId} accountName={s.accounts.find((a) => a.id === s.selectedAccountId) ? getAccountDisplayName(s.accounts.find((a) => a.id === s.selectedAccountId)!) : ''} onClose={() => s.setBroadcastModalOpen(false)} />}
 
@@ -555,6 +596,23 @@ export default function MessagingPage() {
           <ContextMenuItem icon={s.deletingMessageId === s.messageContextMenu.message.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />} label={t('messaging.deleteMessage')} destructive onClick={() => actions.handleDeleteMessage(s.messageContextMenu!.message.id)} disabled={s.deletingMessageId === s.messageContextMenu.message.id} />
         </>)}
       </ContextMenu>
+
+      {s.leadContext?.contact_id && (
+        <>
+          <AddNoteModal
+            open={s.leadNoteModalOpen}
+            onClose={() => s.setLeadNoteModalOpen(false)}
+            contactId={s.leadContext.contact_id}
+            onSuccess={() => fetchContactNotes(s.leadContext!.contact_id!).then(s.setLeadNotes)}
+          />
+          <AddReminderModal
+            open={s.leadReminderModalOpen}
+            onClose={() => s.setLeadReminderModalOpen(false)}
+            contactId={s.leadContext.contact_id}
+            onSuccess={() => fetchContactReminders(s.leadContext!.contact_id!).then(s.setLeadReminders)}
+          />
+        </>
+      )}
 
       {s.mediaViewer && <MediaViewer url={s.mediaViewer.url} type={s.mediaViewer.type} onClose={() => s.setMediaViewer(null)} />}
       {s.forwardModal && s.selectedAccountId && <ForwardMessageModal selectedAccountId={s.selectedAccountId} displayChats={actions.displayChats} currentChannelId={s.selectedChat?.channel_id ?? null} forwardingToChatId={s.forwardingToChatId} getChatNameWithOverrides={actions.getChatNameWithOverrides} onForward={actions.handleForwardToChat} onClose={() => { s.setForwardModal(null); s.setForwardingToChatId(null); }} />}

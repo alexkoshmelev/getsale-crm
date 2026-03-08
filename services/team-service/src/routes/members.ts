@@ -202,7 +202,9 @@ export function membersRouter({ pool, rabbitmq, log }: Deps): Router {
 
   router.put('/:id/role', asyncHandler(async (req, res) => {
     const user = req.user;
-    const allowed = await checkPermission(user.role, 'team', 'update');
+    const roleLower = (user.role || '').toLowerCase();
+    const isOwnerOrAdmin = roleLower === 'owner' || roleLower === 'admin';
+    const allowed = isOwnerOrAdmin || (await checkPermission(user.role, 'team', 'update'));
     if (!allowed) {
       throw new AppError(403, 'Only owner or admin can change member roles', ErrorCodes.FORBIDDEN);
     }

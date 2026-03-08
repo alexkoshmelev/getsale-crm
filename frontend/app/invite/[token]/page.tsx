@@ -20,7 +20,7 @@ export default function InvitePage() {
   const params = useParams();
   const { t } = useTranslation();
   const token = params?.token as string;
-  const isLoggedIn = useAuthStore((s) => !!s.accessToken);
+  const isLoggedIn = useAuthStore((s) => !!s.user);
   const fetchWorkspaces = useAuthStore((s) => s.fetchWorkspaces);
   const switchWorkspace = useAuthStore((s) => s.switchWorkspace);
   const [invite, setInvite] = useState<InviteInfo | null>(null);

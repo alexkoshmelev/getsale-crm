@@ -3,13 +3,11 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
-import axios from 'axios';
 import { BarChart3, TrendingUp, Users, DollarSign } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { EmptyState } from '@/components/ui/EmptyState';
 import Button from '@/components/ui/Button';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+import { apiClient } from '@/lib/api/client';
 
 export default function AnalyticsPage() {
   const { t } = useTranslation();
@@ -25,9 +23,9 @@ export default function AnalyticsPage() {
   const fetchAnalytics = async () => {
     try {
       const [conversionRes, pipelineRes, teamRes] = await Promise.all([
-        axios.get(`${API_URL}/api/analytics/conversion-rates`).catch(() => ({ data: [] })),
-        axios.get(`${API_URL}/api/analytics/pipeline-value`).catch(() => ({ data: [] })),
-        axios.get(`${API_URL}/api/analytics/team-performance`).catch(() => ({ data: [] })),
+        apiClient.get('/api/analytics/conversion-rates').catch(() => ({ data: [] })),
+        apiClient.get('/api/analytics/pipeline-value').catch(() => ({ data: [] })),
+        apiClient.get('/api/analytics/team-performance').catch(() => ({ data: [] })),
       ]);
 
       setConversionRates(conversionRes.data);

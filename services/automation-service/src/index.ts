@@ -1,6 +1,6 @@
 import { Counter } from 'prom-client';
 import { createLogger } from '@getsale/logger';
-import { createServiceApp } from '@getsale/service-core';
+import { createServiceApp, ServiceHttpClient } from '@getsale/service-core';
 import { subscribeToEvents, executeRule } from './event-handlers';
 import { runSlaCronOnce, startCronJobs } from './sla-cron';
 import { rulesRouter } from './routes/rules';
@@ -61,10 +61,31 @@ async function main() {
     registers: [registry],
   });
 
+  const crmClient = new ServiceHttpClient(
+    {
+      baseUrl: process.env.CRM_SERVICE_URL || 'http://crm-service:3002',
+      name: 'crm-service',
+      timeoutMs: 15_000,
+      retries: 2,
+    },
+    log
+  );
+  const pipelineClient = new ServiceHttpClient(
+    {
+      baseUrl: process.env.PIPELINE_SERVICE_URL || 'http://pipeline-service:3008',
+      name: 'pipeline-service',
+      timeoutMs: 15_000,
+      retries: 2,
+    },
+    log
+  );
+
   const eventHandlerDeps = {
     pool,
     rabbitmq,
     log,
+    crmClient,
+    pipelineClient,
     automationEventsTotal,
     automationProcessedTotal,
     automationSkippedTotal,
@@ -93,7 +114,7 @@ async function main() {
   const runSlaCronOnceFn = (filterOrgId?: string, filterLeadId?: string) =>
     runSlaCronOnce(slaCronDeps, filterOrgId, filterLeadId);
 
-  const executeRuleBound = (rule: any, event: any) =>
+  const executeRuleBound = (rule: import('./event-handlers').AutomationRuleRow, event: import('./event-handlers').AutomationEventPayload) =>
     executeRule(eventHandlerDeps, rule, event);
 
   startCronJobs(

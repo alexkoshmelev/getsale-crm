@@ -4,11 +4,52 @@ import { Counter } from 'prom-client';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, AutomationRuleTriggeredEvent, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
+import { ServiceHttpClient, ServiceCallError } from '@getsale/service-core';
+
+/** Event payload as received from RabbitMQ (timestamp may be string). id optional when built by cron. */
+export interface AutomationEventPayload {
+  id?: string;
+  type: string;
+  organizationId?: string;
+  userId?: string;
+  timestamp?: Date | string;
+  data?: {
+    leadId?: string;
+    pipelineId?: string;
+    toStageId?: string;
+    contactId?: string;
+    clientId?: string;
+    dealId?: string;
+    correlationId?: string;
+    breachDate?: string;
+    [key: string]: unknown;
+  };
+}
+
+/** DB row shape for automation_rules (relevant fields). actions may be JSON string or array. */
+export interface AutomationRuleRow {
+  id: string;
+  trigger_type: string;
+  trigger_conditions: unknown;
+  conditions: unknown;
+  actions?: unknown;
+}
+
+/** Action from rule.actions[]. */
+export interface AutomationAction {
+  type: string;
+  targetStageId?: string;
+  ruleName?: string;
+  message?: string;
+  userIds?: string[];
+}
 
 interface EventHandlerDeps {
   pool: Pool;
   rabbitmq: RabbitMQClient;
   log: Logger;
+  crmClient: ServiceHttpClient;
+  pipelineClient: ServiceHttpClient;
   automationEventsTotal: Counter<string>;
   automationProcessedTotal: Counter;
   automationSkippedTotal: Counter;
@@ -36,7 +77,7 @@ export function subscribeToEvents(deps: EventHandlerDeps): Promise<void> {
   );
 }
 
-async function processEvent(deps: EventHandlerDeps, event: any) {
+async function processEvent(deps: EventHandlerDeps, event: AutomationEventPayload) {
   try {
     if (event.type === EventType.LEAD_STAGE_CHANGED) {
       deps.automationEventsTotal.inc({ event_type: EventType.LEAD_STAGE_CHANGED });
@@ -48,22 +89,22 @@ async function processEvent(deps: EventHandlerDeps, event: any) {
         entity_type: 'lead',
         entity_id: event.data?.leadId,
       });
-      await processLeadStageChanged(deps, event, correlationId);
+      await processLeadStageChanged(deps, event, correlationId ?? event.id ?? '');
       return;
     }
 
     if (event.type === EventType.LEAD_SLA_BREACH || event.type === EventType.DEAL_SLA_BREACH) {
       deps.automationEventsTotal.inc({ event_type: event.type });
-      const correlationId = event.data?.correlationId ?? event.id;
+      const slaCorrelationId = event.data?.correlationId ?? event.id ?? '';
       deps.log.info({
         message: event.type === EventType.LEAD_SLA_BREACH ? 'consume lead.sla.breach' : 'consume deal.sla.breach',
-        correlation_id: correlationId,
+        correlation_id: slaCorrelationId,
         event_id: event.id,
         entity_type: event.type === EventType.LEAD_SLA_BREACH ? 'lead' : 'deal',
         entity_id: event.data?.leadId ?? event.data?.dealId,
         breach_date: event.data?.breachDate,
       });
-      await processSlaBreach(deps, event, correlationId);
+      await processSlaBreach(deps, event, slaCorrelationId);
       return;
     }
 
@@ -100,7 +141,7 @@ async function processEvent(deps: EventHandlerDeps, event: any) {
   }
 }
 
-async function processLeadStageChanged(deps: EventHandlerDeps, event: any, correlationId: string) {
+async function processLeadStageChanged(deps: EventHandlerDeps, event: AutomationEventPayload, correlationId: string) {
   const { organizationId, data } = event;
   const leadId = data?.leadId;
   const pipelineId = data?.pipelineId;
@@ -139,7 +180,7 @@ async function processLeadStageChanged(deps: EventHandlerDeps, event: any, corre
 
     const actions =
       typeof rule.actions === 'string' ? JSON.parse(rule.actions || '[]') : rule.actions || [];
-    const createDealAction = actions.find((a: any) => a.type === 'create_deal');
+    const createDealAction = actions.find((a: AutomationAction) => a.type === 'create_deal');
     if (!createDealAction) continue;
 
     const existing = await deps.pool.query(
@@ -161,8 +202,6 @@ async function processLeadStageChanged(deps: EventHandlerDeps, event: any, corre
       continue;
     }
 
-    const crmServiceUrl = process.env.CRM_SERVICE_URL || 'http://crm-service:3002';
-    const MAX_CRM_RETRIES = 3;
     let dealId: string | null = null;
     let status: 'success' | 'skipped' | 'failed' = 'success';
 
@@ -175,51 +214,29 @@ async function processLeadStageChanged(deps: EventHandlerDeps, event: any, corre
       effectiveUserId = userRow.rows[0]?.id ?? '';
     }
 
-    for (let attempt = 1; attempt <= MAX_CRM_RETRIES; attempt++) {
-      try {
-        const res = await fetch(`${crmServiceUrl}/api/crm/deals`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-User-Id': effectiveUserId,
-            'X-Organization-Id': organizationId,
-            'X-Correlation-Id': correlationId,
-          },
-          body: JSON.stringify({
-            leadId,
-            pipelineId,
-            contactId: data?.contactId,
-            title: `Deal from lead ${leadId.slice(0, 8)}`,
-          }),
-        });
-
-        if (res.status === 201) {
-          const body = (await res.json()) as { id?: string };
-          dealId = body.id ?? null;
-          deps.dealCreatedTotal.inc();
-          break;
-        }
-        if (res.status === 409) {
-          status = 'skipped';
-          deps.automationSkippedTotal.inc();
-          break;
-        }
-        status = 'failed';
-        deps.log.error({
-          message: 'lead.stage.changed CRM returned non-success',
-          correlation_id: correlationId,
-          event_id: event.id,
-          rule_id: rule.id,
-          entity_id: leadId,
-          status: 'failed',
-          http_status: res.status,
-          response: await res.text(),
-          attempt,
-        });
-        if (attempt < MAX_CRM_RETRIES) {
-          await new Promise((r) => setTimeout(r, 500 * attempt));
-        }
-      } catch (err) {
+    const headers: Record<string, string> = {
+      'X-User-Id': effectiveUserId ?? '',
+      'X-Organization-Id': organizationId,
+      'X-Correlation-Id': correlationId,
+    };
+    try {
+      const body = await deps.crmClient.post<{ id?: string }>(
+        '/api/crm/deals',
+        {
+          leadId,
+          pipelineId,
+          contactId: data?.contactId,
+          title: `Deal from lead ${leadId.slice(0, 8)}`,
+        },
+        headers
+      );
+      dealId = body?.id ?? null;
+      deps.dealCreatedTotal.inc();
+    } catch (err) {
+      if (err instanceof ServiceCallError && err.statusCode === 409) {
+        status = 'skipped';
+        deps.automationSkippedTotal.inc();
+      } else {
         status = 'failed';
         deps.log.error({
           message: 'lead.stage.changed CRM call failed',
@@ -229,18 +246,14 @@ async function processLeadStageChanged(deps: EventHandlerDeps, event: any, corre
           entity_id: leadId,
           status: 'failed',
           error: err instanceof Error ? err.message : String(err),
-          attempt,
         });
-        if (attempt < MAX_CRM_RETRIES) {
-          await new Promise((r) => setTimeout(r, 500 * attempt));
-        }
       }
     }
 
     if (status === 'failed') {
       deps.automationFailedTotal.inc();
       try {
-        await deps.rabbitmq.publishToDlq('lead.stage.changed.dlq', event);
+        await deps.rabbitmq.publishToDlq('lead.stage.changed.dlq', event as Event);
         deps.automationDlqTotal.inc({ event_type: EventType.LEAD_STAGE_CHANGED });
         deps.log.warn({
           message: 'lead.stage.changed sent to DLQ after retries exceeded',
@@ -266,8 +279,8 @@ async function processLeadStageChanged(deps: EventHandlerDeps, event: any, corre
          VALUES ($1, $2, $3, $4, 'lead', $5, $6, $7, $8, NOW())`,
         [rule.id, organizationId, event.type, status, leadId, dealId, correlationId, event.id ?? null]
       );
-    } catch (insertErr: any) {
-      if (insertErr?.code === '23505') {
+    } catch (insertErr: unknown) {
+      if ((insertErr as { code?: string })?.code === '23505') {
         deps.automationSkippedTotal.inc();
         deps.log.info({
           message: 'lead.stage.changed execution already exists (unique), treat as success, ACK',
@@ -297,7 +310,7 @@ async function processLeadStageChanged(deps: EventHandlerDeps, event: any, corre
   }
 }
 
-async function processSlaBreach(deps: EventHandlerDeps, event: any, correlationId: string) {
+async function processSlaBreach(deps: EventHandlerDeps, event: AutomationEventPayload, correlationId: string) {
   const { organizationId, data } = event;
   const breachDate = data?.breachDate;
   const pipelineId = data?.pipelineId;
@@ -314,7 +327,7 @@ async function processSlaBreach(deps: EventHandlerDeps, event: any, correlationI
       breachDate: breachDate ?? null,
       pipelineId: pipelineId ?? null,
       stageId: stageId ?? null,
-      entity_id: entityId ?? null,
+      entity_id: entityId ?? undefined,
     });
     return;
   }
@@ -383,8 +396,8 @@ async function processSlaBreach(deps: EventHandlerDeps, event: any, correlationI
         entity_id: entityId,
         breach_date: breachDate,
       });
-    } catch (insertErr: any) {
-      if (insertErr?.code === '23505') {
+    } catch (insertErr: unknown) {
+      if ((insertErr as { code?: string })?.code === '23505') {
         deps.automationSlaSkippedTotal.inc();
         deps.log.info({
           message: 'sla.breach execution already exists (unique), skip, ACK',
@@ -403,9 +416,12 @@ async function processSlaBreach(deps: EventHandlerDeps, event: any, correlationI
   }
 }
 
-function evaluateCondition(condition: any, event: any): boolean {
-  const { field, operator, value } = condition;
-  const eventValue = event.data?.[field];
+/** Exported for unit tests. */
+export function evaluateCondition(condition: Record<string, unknown>, event: AutomationEventPayload): boolean {
+  const field = condition.field as string | undefined;
+  const operator = condition.operator as string | undefined;
+  const value = condition.value;
+  const eventValue = field != null ? event.data?.[field] : undefined;
 
   switch (operator) {
     case 'eq':
@@ -413,20 +429,21 @@ function evaluateCondition(condition: any, event: any): boolean {
     case 'ne':
       return eventValue !== value;
     case 'gt':
-      return eventValue > value;
+      return Number(eventValue) > Number(value);
     case 'lt':
-      return eventValue < value;
+      return Number(eventValue) < Number(value);
     case 'contains':
-      return String(eventValue).includes(String(value));
+      return String(eventValue ?? '').includes(String(value ?? ''));
     default:
       return false;
   }
 }
 
 /** Exported for use by time-based cron. */
-export async function executeRule(deps: EventHandlerDeps, rule: any, event: any) {
+export async function executeRule(deps: EventHandlerDeps, rule: AutomationRuleRow, event: AutomationEventPayload) {
   try {
-    const actions = rule.actions || [];
+    const rawActions = typeof rule.actions === 'string' ? JSON.parse(rule.actions || '[]') : rule.actions;
+    const actions: AutomationAction[] = Array.isArray(rawActions) ? rawActions : [];
 
     for (const action of actions) {
       switch (action.type) {
@@ -459,11 +476,11 @@ export async function executeRule(deps: EventHandlerDeps, rule: any, event: any)
       id: crypto.randomUUID(),
       type: EventType.AUTOMATION_RULE_TRIGGERED,
       timestamp: new Date(),
-      organizationId: event.organizationId,
+      organizationId: event.organizationId ?? '',
       userId: event.userId,
       data: {
         ruleId: rule.id,
-        clientId: event.data?.clientId || event.data?.contactId,
+        clientId: event.data?.clientId ?? event.data?.contactId ?? '',
         action: lastActionType,
       },
     };
@@ -473,53 +490,45 @@ export async function executeRule(deps: EventHandlerDeps, rule: any, event: any)
   }
 }
 
-async function moveToStage(deps: EventHandlerDeps, action: any, event: any) {
+async function moveToStage(deps: EventHandlerDeps, action: AutomationAction, event: AutomationEventPayload) {
   const dealId = event.data?.dealId;
   const organizationId = event.organizationId;
+  const payload = {
+    stageId: action.targetStageId,
+    reason: `Automated by rule: ${action.ruleName || 'N/A'}`,
+    autoMoved: true,
+  };
   if (dealId && organizationId && action.targetStageId) {
-    const crmServiceUrl = process.env.CRM_SERVICE_URL || 'http://crm-service:3002';
     const userRow = await deps.pool.query(
       'SELECT id FROM users WHERE organization_id = $1 LIMIT 1',
       [organizationId]
     );
-    const userId = event.userId || userRow.rows[0]?.id || '';
-    await fetch(`${crmServiceUrl}/api/crm/deals/${dealId}/stage`, {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-User-Id': userId,
-        'X-Organization-Id': organizationId,
-      },
-      body: JSON.stringify({
-        stageId: action.targetStageId,
-        reason: `Automated by rule: ${action.ruleName || 'N/A'}`,
-        autoMoved: true,
-      }),
-    });
+    const userId = event.userId ?? userRow.rows[0]?.id ?? '';
+    await deps.crmClient.patch(
+      `/api/crm/deals/${dealId}/stage`,
+      { ...payload, stageId: action.targetStageId },
+      { 'X-User-Id': userId, 'X-Organization-Id': organizationId }
+    );
     return;
   }
-  const pipelineServiceUrl = process.env.PIPELINE_SERVICE_URL || 'http://pipeline-service:3008';
-  await fetch(
-    `${pipelineServiceUrl}/api/pipeline/clients/${event.data?.clientId || event.data?.contactId}/stage`,
-    {
+  const clientId = event.data?.clientId ?? event.data?.contactId;
+  if (clientId && action.targetStageId) {
+    await deps.pipelineClient.request(`/api/pipeline/clients/${clientId}/stage`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        stageId: action.targetStageId,
-        dealId: event.data?.dealId,
-        autoMoved: true,
-        reason: `Automated by rule: ${action.ruleName || 'N/A'}`,
-      }),
-    }
-  );
+      body: {
+        ...payload,
+        dealId: event.data?.dealId ?? undefined,
+      },
+    });
+  }
 }
 
-async function notifyTeam(deps: EventHandlerDeps, action: any, event: any) {
+async function notifyTeam(deps: EventHandlerDeps, action: AutomationAction, event: AutomationEventPayload) {
   const triggerEvent = {
     id: crypto.randomUUID(),
     type: EventType.TRIGGER_EXECUTED,
     timestamp: new Date(),
-    organizationId: event.organizationId,
+    organizationId: event.organizationId ?? '',
     userId: event.userId,
     data: {
       type: 'notification',
@@ -531,6 +540,6 @@ async function notifyTeam(deps: EventHandlerDeps, action: any, event: any) {
   await deps.rabbitmq.publishEvent(triggerEvent as Event);
 }
 
-async function createTask(deps: EventHandlerDeps, action: any, event: any) {
+async function createTask(deps: EventHandlerDeps, action: AutomationAction, event: AutomationEventPayload) {
   deps.log.info({ message: 'Create task (TODO: integrate with task service)', action_type: action.type, event_id: event?.id });
 }

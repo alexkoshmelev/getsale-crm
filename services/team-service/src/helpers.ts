@@ -2,11 +2,17 @@ import { Pool } from 'pg';
 import { Request } from 'express';
 
 const ALLOWED_ROLES = ['owner', 'admin', 'supervisor', 'bidi', 'viewer'] as const;
+const ROLE_LEVEL: Record<string, number> = { owner: 4, admin: 3, supervisor: 2, bidi: 1, viewer: 0 };
 
 export function normalizeRole(role: string | undefined): string {
   const r = (role || 'bidi').toLowerCase();
   if (r === 'member') return 'bidi';
   return ALLOWED_ROLES.includes(r as (typeof ALLOWED_ROLES)[number]) ? r : 'bidi';
+}
+
+/** Role hierarchy level for invite link creation: can only assign roles at or below own level. */
+export function getRoleLevel(role: string): number {
+  return ROLE_LEVEL[role.toLowerCase()] ?? 0;
 }
 
 export function getClientIp(req: Request): string | null {

@@ -82,6 +82,8 @@ export interface Contact {
   telegram_id?: string | null;
   display_name?: string | null;
   username?: string | null;
+  bio?: string | null;
+  premium?: boolean | null;
   consent_flags?: Record<string, boolean>;
   created_at: string;
   updated_at: string;

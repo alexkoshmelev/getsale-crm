@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import Redis from 'ioredis';
+import { Pool } from 'pg';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType } from '@getsale/events';
 import { UserRole } from '@getsale/types';
@@ -16,13 +17,18 @@ interface AuthUserData {
   role: UserRole;
 }
 
+if (process.env.NODE_ENV === 'production' && (!process.env.CORS_ORIGIN || process.env.CORS_ORIGIN.trim() === '')) {
+  throw new Error('CORS_ORIGIN must be set in production for WebSocket service.');
+}
+const wsCorsOrigin = process.env.CORS_ORIGIN || '*';
+
 const app = express();
 const httpServer = createServer(app);
 const PORT = process.env.PORT || 3004;
 
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.CORS_ORIGIN || '*',
+    origin: wsCorsOrigin,
     methods: ['GET', 'POST'],
   },
 });
@@ -91,6 +97,12 @@ io.adapter(createAdapter(pubClient, subClient));
 const rabbitmq = new RabbitMQClient(
   process.env.RABBITMQ_URL || 'amqp://getsale:getsale_dev@localhost:5672'
 );
+
+// Optional DB for room ownership verification (bd-account, chat)
+const databaseUrl = process.env.DATABASE_URL;
+const pool: Pool | null = databaseUrl
+  ? new Pool({ connectionString: databaseUrl, max: 4 })
+  : null;
 
 (async () => {
   try {
@@ -226,11 +238,22 @@ async function subscribeToEvents() {
   );
 }
 
-// Authentication middleware - verify token with auth service
+function getCookieFromHeader(cookieHeader: string | undefined, name: string): string | undefined {
+  if (!cookieHeader) return undefined;
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+  return match ? decodeURIComponent(match[1].trim()) : undefined;
+}
+
+const ACCESS_TOKEN_COOKIE = 'access_token';
+
+// Authentication middleware - verify token (from cookie, auth object, or Authorization header) with auth service
 io.use(async (socket, next) => {
   try {
-    const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.replace('Bearer ', '');
-    
+    const token =
+      getCookieFromHeader(socket.handshake.headers.cookie, ACCESS_TOKEN_COOKIE) ||
+      socket.handshake.auth?.token ||
+      socket.handshake.headers?.authorization?.replace(/^Bearer\s+/i, '')?.trim();
+
     if (!token) {
       return next(new Error('Authentication error: No token provided'));
     }
@@ -368,34 +391,107 @@ io.on('connection', (socket) => {
     return true;
   };
 
-  // Handle subscriptions with rate limiting
-  socket.on('subscribe', (room: string) => {
+  // Handle subscriptions with rate limiting and ownership verification (A6: cross-tenant leak prevention)
+  socket.on('subscribe', async (room: string) => {
     if (!checkRateLimit()) {
       socket.emit('error', { message: 'Rate limit exceeded' });
       return;
     }
 
-    if (typeof room !== 'string') {
+    if (typeof room !== 'string' || !room.trim()) {
       socket.emit('error', { message: 'Invalid room format' });
       return;
     }
 
-    // Validate room format (security)
-    const validRoomPatterns = [
-      `org:${user.organizationId}`,
-      `user:${user.id}`,
-      `bd-account:`,
-      `chat:`,
-    ];
+    const trimmed = room.trim();
 
-    const isValid = validRoomPatterns.some(pattern => room.startsWith(pattern));
-    if (!isValid && !room.startsWith(`org:${user.organizationId}`)) {
-      socket.emit('error', { message: 'Invalid room access' });
+    // org: only own organization
+    if (trimmed.startsWith('org:')) {
+      const orgId = trimmed.slice(4);
+      if (orgId !== user.organizationId) {
+        socket.emit('error', { message: 'Invalid room access' });
+        return;
+      }
+      socket.join(trimmed);
+      socket.emit('subscribed', { room: trimmed });
       return;
     }
 
-    socket.join(room);
-    socket.emit('subscribed', { room });
+    // user: only own user room
+    if (trimmed.startsWith('user:')) {
+      const userId = trimmed.slice(5);
+      if (userId !== user.id) {
+        socket.emit('error', { message: 'Invalid room access' });
+        return;
+      }
+      socket.join(trimmed);
+      socket.emit('subscribed', { room: trimmed });
+      return;
+    }
+
+    // bd-account: verify account belongs to user's organization
+    if (trimmed.startsWith('bd-account:')) {
+      const accountId = trimmed.slice(11);
+      if (!accountId) {
+        socket.emit('error', { message: 'Invalid room format' });
+        return;
+      }
+      if (!pool) {
+        socket.emit('error', { message: 'Room verification unavailable' });
+        return;
+      }
+      try {
+        const row = await pool.query(
+          'SELECT organization_id FROM bd_accounts WHERE id = $1',
+          [accountId]
+        );
+        if (row.rows.length === 0 || row.rows[0].organization_id !== user.organizationId) {
+          socket.emit('error', { message: 'Invalid room access' });
+          return;
+        }
+      } catch (err) {
+        console.error('[WebSocket] Room ownership check failed:', err);
+        socket.emit('error', { message: 'Room verification failed' });
+        return;
+      }
+      socket.join(trimmed);
+      socket.emit('subscribed', { room: trimmed });
+      return;
+    }
+
+    // chat: allow only with same ownership check via bd_account (conversations.bd_account_id -> bd_accounts.organization_id)
+    if (trimmed.startsWith('chat:')) {
+      if (!pool) {
+        socket.emit('error', { message: 'Room verification unavailable' });
+        return;
+      }
+      const conversationId = trimmed.slice(5);
+      if (!conversationId) {
+        socket.emit('error', { message: 'Invalid room format' });
+        return;
+      }
+      try {
+        const row = await pool.query(
+          `SELECT ba.organization_id FROM conversations c
+           JOIN bd_accounts ba ON ba.id = c.bd_account_id
+           WHERE c.id = $1`,
+          [conversationId]
+        );
+        if (row.rows.length === 0 || row.rows[0].organization_id !== user.organizationId) {
+          socket.emit('error', { message: 'Invalid room access' });
+          return;
+        }
+      } catch (err) {
+        console.error('[WebSocket] Chat room ownership check failed:', err);
+        socket.emit('error', { message: 'Room verification failed' });
+        return;
+      }
+      socket.join(trimmed);
+      socket.emit('subscribed', { room: trimmed });
+      return;
+    }
+
+    socket.emit('error', { message: 'Invalid room format' });
   });
 
   socket.on('unsubscribe', (room: string) => {

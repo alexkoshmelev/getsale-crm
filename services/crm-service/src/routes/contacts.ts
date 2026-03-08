@@ -220,7 +220,10 @@ export function contactsRouter({ pool, rabbitmq, log }: Deps): Router {
       throw new AppError(404, 'Contact not found', ErrorCodes.NOT_FOUND);
     }
 
-    await pool.query('UPDATE deals SET contact_id = NULL, updated_at = NOW() WHERE contact_id = $1', [id]);
+    await pool.query(
+      'UPDATE deals SET contact_id = NULL, updated_at = NOW() WHERE contact_id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
     await pool.query('DELETE FROM contacts WHERE id = $1 AND organization_id = $2', [id, organizationId]);
     res.status(204).send();
   }));

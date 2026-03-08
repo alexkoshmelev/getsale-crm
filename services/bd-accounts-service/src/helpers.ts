@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
+import { AppError, ErrorCodes } from '@getsale/service-core';
 import { TelegramManager } from './telegram-manager';
 
 export const SYNC_STALE_MINUTES = 15;
@@ -19,7 +20,10 @@ export function getTelegramApiCredentials(): { apiId: number; apiHash: string } 
   return { apiId: parseInt(String(apiId), 10), apiHash };
 }
 
-export async function requireAccountOwner(
+/** Agent (bidi) role: can write only from accounts they connected themselves. */
+export const BIDI_ROLE = 'bidi';
+
+export async function isAccountOwner(
   pool: Pool,
   accountId: string,
   user: { id: string; organizationId: string }
@@ -31,6 +35,57 @@ export async function requireAccountOwner(
   if (r.rows.length === 0) return false;
   const ownerId = r.rows[0].created_by_user_id;
   return ownerId != null && ownerId === user.id;
+}
+
+/** @deprecated Use isAccountOwner */
+export async function requireAccountOwner(
+  pool: Pool,
+  accountId: string,
+  user: { id: string; organizationId: string }
+): Promise<boolean> {
+  return isAccountOwner(pool, accountId, user);
+}
+
+/**
+ * For role "bidi" (agent): allow write only if the user is the one who connected this BD account.
+ * Other roles are not restricted. Throws 403 if agent tries to write to an account they don't own.
+ */
+export async function requireBidiCanWriteAccount(
+  pool: Pool,
+  accountId: string,
+  user: { id: string; organizationId: string; role?: string }
+): Promise<void> {
+  const role = (user.role || '').toLowerCase();
+  if (role !== BIDI_ROLE) return;
+  const owner = await isAccountOwner(pool, accountId, user);
+  if (!owner) {
+    throw new AppError(
+      403,
+      'As an agent you can only send messages from accounts you connected yourself. This account was connected by another user.',
+      ErrorCodes.FORBIDDEN
+    );
+  }
+}
+
+/**
+ * For role "bidi" (agent): only the account owner may perform the action (edit, sync, pause, delete).
+ * Other roles are not restricted. Throws 403 if agent acts on an account they don't own.
+ */
+export async function requireBidiOwnAccount(
+  pool: Pool,
+  accountId: string,
+  user: { id: string; organizationId: string; role?: string }
+): Promise<void> {
+  const role = (user.role || '').toLowerCase();
+  if (role !== BIDI_ROLE) return;
+  const owner = await isAccountOwner(pool, accountId, user);
+  if (!owner) {
+    throw new AppError(
+      403,
+      'As an agent you can only manage accounts you connected yourself. This account was connected by another user.',
+      ErrorCodes.FORBIDDEN
+    );
+  }
 }
 
 export function isAccountOwnerName(
@@ -139,10 +194,10 @@ export async function refreshChatsFromFolders(
   log: Logger
 ): Promise<void> {
   const accRow = await pool.query(
-    'SELECT organization_id, display_name, username, first_name FROM bd_accounts WHERE id = $1 LIMIT 1',
+    'SELECT organization_id, display_name, username, first_name, telegram_id FROM bd_accounts WHERE id = $1 LIMIT 1',
     [accountId]
   );
-  const account = accRow.rows[0] as { organization_id?: string; display_name?: string | null; username?: string | null; first_name?: string | null } | undefined;
+  const account = accRow.rows[0] as { organization_id?: string; display_name?: string | null; username?: string | null; first_name?: string | null; telegram_id?: string | null } | undefined;
   const organizationId = account?.organization_id;
   const foldersRows = await pool.query(
     'SELECT folder_id, folder_title FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index',
@@ -192,7 +247,7 @@ export async function refreshChatsFromFolders(
         if (d.isChannel) peerType = 'channel';
         else if (d.isGroup) peerType = 'chat';
         let title = (d.name ?? '').trim() || chatId;
-        if (account && isAccountOwnerName(account, title)) title = chatId;
+        if (account && (isAccountOwnerName(account, title) || (peerType === 'user' && account.telegram_id != null && String(account.telegram_id) === chatId))) title = chatId;
         await pool.query(
           `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
            VALUES ($1, $2, $3, $4, false, $5)

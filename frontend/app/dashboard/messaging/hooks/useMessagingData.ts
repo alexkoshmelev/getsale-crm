@@ -7,7 +7,7 @@ import {
 } from '@/lib/api/crm';
 import type { Chat, LeadContext } from '../types';
 import { MESSAGES_PAGE_SIZE, MAX_CACHED_CHATS } from '../types';
-import { getDraftKey, getMessagesCacheKey } from '../utils';
+import { getDraftKey, getMessagesCacheKey, mapRawChatsToChatList, mapNewLeadRowToChat } from '../utils';
 import type { MessagingState } from './useMessagingState';
 
 export function useMessagingData(s: MessagingState) {
@@ -35,8 +35,8 @@ export function useMessagingData(s: MessagingState) {
   }, [s.selectedAccountId]);
 
   // ─── Fetch Chats ─────────────────────────────────────────────────
-  const fetchChats = useCallback(async () => {
-    if (!s.selectedAccountId) return;
+  const fetchChats = useCallback(async (): Promise<Chat[]> => {
+    if (!s.selectedAccountId) return [];
     s.setLoadingChats(true);
     try {
       let chatsFromDB: unknown[] = [];
@@ -48,61 +48,13 @@ export function useMessagingData(s: MessagingState) {
       } catch (chatsError) {
         console.warn('Could not fetch chats from messaging service:', chatsError);
       }
-      const mapped: Chat[] = (chatsFromDB as Record<string, unknown>[]).map((chat) => {
-        const folderIds = Array.isArray(chat.folder_ids) ? (chat.folder_ids as unknown[]).map((x) => Number(x)).filter((n) => !Number.isNaN(n)) : (chat.folder_id != null ? [Number(chat.folder_id)] : []);
-        return {
-          channel: (chat.channel as string) || 'telegram',
-          channel_id: String(chat.channel_id),
-          folder_id: chat.folder_id != null ? Number(chat.folder_id) : (folderIds[0] ?? null),
-          folder_ids: folderIds.length > 0 ? folderIds : undefined,
-          contact_id: chat.contact_id as string | null,
-          first_name: chat.first_name as string | null,
-          last_name: chat.last_name as string | null,
-          email: chat.email as string | null,
-          telegram_id: chat.telegram_id as string | null,
-          display_name: (chat.display_name as string) ?? null,
-          username: (chat.username as string) ?? null,
-          name: (chat.name as string) || null,
-          peer_type: (chat.peer_type as string) ?? null,
-          unread_count: parseInt(String(chat.unread_count)) || 0,
-          last_message_at: chat.last_message_at && String(chat.last_message_at).trim() ? String(chat.last_message_at) : '',
-          last_message: chat.last_message as string | null,
-          conversation_id: (chat.conversation_id as string) ?? null,
-          lead_id: (chat.lead_id as string) ?? null,
-          lead_stage_name: (chat.lead_stage_name as string) ?? null,
-          lead_pipeline_name: (chat.lead_pipeline_name as string) ?? null,
-        };
-      });
-      const byChannelId = new Map<string, Chat>();
-      const isIdOnly = (name: string | null, channelId: string) =>
-        !name || name.trim() === '' || name === channelId || /^\d+$/.test(String(name).trim());
-      for (const chat of mapped) {
-        const existing = byChannelId.get(chat.channel_id);
-        const chatTime = new Date(chat.last_message_at).getTime();
-        const existingTime = existing ? new Date(existing.last_message_at).getTime() : 0;
-        const preferNew =
-          !existing ||
-          chatTime > existingTime ||
-          (chatTime === existingTime && isIdOnly(existing.name ?? existing.telegram_id ?? '', existing.channel_id) && !isIdOnly(chat.name ?? chat.telegram_id ?? '', chat.channel_id));
-        if (preferNew) {
-          const merged = { ...chat };
-          if (existing) merged.unread_count = (existing.unread_count || 0) + (merged.unread_count || 0);
-          byChannelId.set(chat.channel_id, merged);
-        } else if (existing) {
-          existing.unread_count = (existing.unread_count || 0) + (chat.unread_count || 0);
-        }
-      }
-      const formattedChats = Array.from(byChannelId.values()).sort((a, b) => {
-        const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
-        const tb = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
-        if (Number.isNaN(ta)) return 1;
-        if (Number.isNaN(tb)) return -1;
-        return tb - ta;
-      });
+      const formattedChats = mapRawChatsToChatList(chatsFromDB as Record<string, unknown>[]);
       s.setChats(formattedChats);
+      return formattedChats;
     } catch (error) {
       console.error('Error fetching chats:', error);
       s.setChats([]);
+      return [];
     } finally {
       s.setLoadingChats(false);
     }
@@ -141,23 +93,7 @@ export function useMessagingData(s: MessagingState) {
     try {
       const res = await apiClient.get<Record<string, unknown>[]>('/api/messaging/new-leads');
       const rows = Array.isArray(res.data) ? res.data : [];
-      const mapped: Chat[] = rows.map((r) => {
-        const nameStr = (r.display_name as string)?.trim() || [(`${r.first_name || ''}`).trim(), (`${r.last_name || ''}`).trim()].filter(Boolean).join(' ') || (r.username as string) || (r.telegram_id != null ? String(r.telegram_id) : '') || null;
-        return {
-          channel: (r.channel as string) || 'telegram', channel_id: String(r.channel_id),
-          contact_id: (r.contact_id as string) ?? null, first_name: (r.first_name as string) ?? null,
-          last_name: (r.last_name as string) ?? null, email: null,
-          telegram_id: r.telegram_id != null ? String(r.telegram_id) : null,
-          display_name: (r.display_name as string) ?? null, username: (r.username as string) ?? null,
-          name: nameStr || null, unread_count: Number(r.unread_count) || 0,
-          last_message_at: r.last_message_at != null ? String(r.last_message_at) : '',
-          last_message: (r.last_message as string) ?? null,
-          conversation_id: (r.conversation_id as string) ?? null, lead_id: (r.lead_id as string) ?? null,
-          lead_stage_name: (r.lead_stage_name as string) ?? null, lead_pipeline_name: (r.lead_pipeline_name as string) ?? null,
-          bd_account_id: (r.bd_account_id as string) ?? null,
-        };
-      });
-      s.setNewLeads(mapped);
+      s.setNewLeads(rows.map((r) => mapNewLeadRowToChat(r)));
     } catch { s.setNewLeads([]); } finally { s.setNewLeadsLoading(false); }
   }, []);
 
@@ -231,45 +167,7 @@ export function useMessagingData(s: MessagingState) {
       .then((res) => {
         if (cancelled) return;
         const chatsFromDB = Array.isArray(res.data) ? res.data : [];
-        const mapped: Chat[] = (chatsFromDB as Record<string, unknown>[]).map((chat) => {
-          const folderIds = Array.isArray(chat.folder_ids) ? (chat.folder_ids as unknown[]).map((x) => Number(x)).filter((n) => !Number.isNaN(n)) : (chat.folder_id != null ? [Number(chat.folder_id)] : []);
-          return {
-            channel: (chat.channel as string) || 'telegram', channel_id: String(chat.channel_id),
-            folder_id: chat.folder_id != null ? Number(chat.folder_id) : (folderIds[0] ?? null),
-            folder_ids: folderIds.length > 0 ? folderIds : undefined,
-            contact_id: chat.contact_id as string | null, first_name: chat.first_name as string | null,
-            last_name: chat.last_name as string | null, email: chat.email as string | null,
-            telegram_id: chat.telegram_id as string | null,
-            display_name: (chat.display_name as string) ?? null, username: (chat.username as string) ?? null,
-            name: (chat.name as string) || null, peer_type: (chat.peer_type as string) ?? null,
-            unread_count: parseInt(String(chat.unread_count), 10) || 0,
-            last_message_at: chat.last_message_at && String(chat.last_message_at).trim() ? String(chat.last_message_at) : '',
-            last_message: chat.last_message as string | null,
-            conversation_id: (chat.conversation_id as string) ?? null, lead_id: (chat.lead_id as string) ?? null,
-            lead_stage_name: (chat.lead_stage_name as string) ?? null, lead_pipeline_name: (chat.lead_pipeline_name as string) ?? null,
-          };
-        });
-        const byChannelId = new Map<string, Chat>();
-        const isIdOnly = (name: string | null, cid: string) => !name || name.trim() === '' || name === cid || /^\d+$/.test(String(name).trim());
-        for (const chat of mapped) {
-          const existing = byChannelId.get(chat.channel_id);
-          const chatTime = new Date(chat.last_message_at).getTime();
-          const existingTime = existing ? new Date(existing.last_message_at).getTime() : 0;
-          const preferNew = !existing || chatTime > existingTime || (chatTime === existingTime && isIdOnly(existing.name ?? existing.telegram_id ?? '', existing.channel_id) && !isIdOnly(chat.name ?? chat.telegram_id ?? '', chat.channel_id));
-          if (preferNew) {
-            const merged = { ...chat };
-            if (existing) merged.unread_count = (existing.unread_count || 0) + (merged.unread_count || 0);
-            byChannelId.set(chat.channel_id, merged);
-          } else if (existing) {
-            existing.unread_count = (existing.unread_count || 0) + (chat.unread_count || 0);
-          }
-        }
-        const formattedChats = Array.from(byChannelId.values()).sort((a, b) => {
-          const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
-          const tb = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
-          return Number.isNaN(ta) ? 1 : Number.isNaN(tb) ? -1 : tb - ta;
-        });
-        s.setChats(formattedChats);
+        s.setChats(mapRawChatsToChatList(chatsFromDB as Record<string, unknown>[]));
       })
       .catch((err) => { if (!cancelled) { console.error('Error fetching chats:', err); s.setChats([]); } })
       .finally(() => { if (!cancelled) s.setLoadingChats(false); });

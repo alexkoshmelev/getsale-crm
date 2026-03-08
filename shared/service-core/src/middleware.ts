@@ -22,6 +22,30 @@ declare global {
   }
 }
 
+// ─── Internal auth (gateway → backend) ────────────────────────────────────
+
+const INTERNAL_AUTH_HEADER = 'x-internal-auth';
+
+/** Reject requests that did not come from the gateway (missing or invalid X-Internal-Auth). Skip when INTERNAL_AUTH_SECRET is not set.
+ *  Fallback: if X-User-Id and X-Organization-Id are both present and non-empty, allow (gateway sets these after JWT verification). */
+export function internalAuth(): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    const secret = process.env.INTERNAL_AUTH_SECRET?.trim();
+    if (!secret) {
+      return next();
+    }
+    const value = req.headers[INTERNAL_AUTH_HEADER];
+    const headerOk = typeof value === 'string' && value.trim() === secret;
+    const userId = req.headers['x-user-id'];
+    const orgId = req.headers['x-organization-id'];
+    const hasUserHeaders = typeof userId === 'string' && userId.trim() !== '' && typeof orgId === 'string' && orgId.trim() !== '';
+    if (headerOk || hasUserHeaders) {
+      return next();
+    }
+    return next(new AppError(401, 'Unauthorized', ErrorCodes.UNAUTHORIZED));
+  };
+}
+
 // ─── Correlation ID ──────────────────────────────────────────────────────
 
 const CORRELATION_HEADER = 'x-correlation-id';

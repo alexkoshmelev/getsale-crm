@@ -8,8 +8,15 @@ import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes } from '@getsale/service-core';
 import { randomUUID } from 'crypto';
 import {
-  signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken,
+  signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken, hashRefreshToken,
 } from '../helpers';
+import {
+  AUTH_COOKIE_ACCESS,
+  AUTH_COOKIE_REFRESH,
+  AUTH_COOKIE_OPTS,
+  ACCESS_MAX_AGE_SEC,
+  REFRESH_MAX_AGE_SEC,
+} from '../cookies';
 
 interface Deps {
   pool: Pool;
@@ -28,6 +35,9 @@ export function authRouter({ pool, rabbitmq, log }: Deps): Router {
     const { email, password, organizationName, inviteToken } = req.body;
 
     if (!email || !password) throw new AppError(400, 'Email and password required', ErrorCodes.BAD_REQUEST);
+    if (typeof password !== 'string' || password.length < 8) {
+      throw new AppError(400, 'Password must be at least 8 characters', ErrorCodes.VALIDATION);
+    }
 
     let organization: { id: string; name: string };
     let user: { id: string; email: string; organization_id: string; role: string };
@@ -116,11 +126,13 @@ export function authRouter({ pool, rabbitmq, log }: Deps): Router {
 
     const accessToken = signAccessToken({ userId: user.id, organizationId: organization.id, role: user.role });
     const refreshToken = signRefreshToken(user.id);
+    const tokenHash = hashRefreshToken(refreshToken);
     await pool.query('INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
-      [user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)]);
+      [user.id, tokenHash, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)]);
 
+    res.cookie(AUTH_COOKIE_ACCESS, accessToken, { ...AUTH_COOKIE_OPTS, maxAge: ACCESS_MAX_AGE_SEC * 1000 });
+    res.cookie(AUTH_COOKIE_REFRESH, refreshToken, { ...AUTH_COOKIE_OPTS, maxAge: REFRESH_MAX_AGE_SEC * 1000 });
     res.json({
-      accessToken, refreshToken,
       user: { id: user.id, email: user.email, organizationId: organization.id, role: user.role },
     });
   }));
@@ -138,28 +150,56 @@ export function authRouter({ pool, rabbitmq, log }: Deps): Router {
 
     const accessToken = signAccessToken({ userId: user.id, organizationId: user.organization_id, role: user.role });
     const refreshToken = signRefreshToken(user.id);
+    const tokenHash = hashRefreshToken(refreshToken);
 
     try {
       await pool.query('INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
-        [user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)]);
+        [user.id, tokenHash, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)]);
     } catch (e: unknown) {
       const err = e as { code?: string };
       if (err.code === '23505') {
         await pool.query('UPDATE refresh_tokens SET expires_at = $1 WHERE token = $2',
-          [new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), refreshToken]);
+          [new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), tokenHash]);
       } else throw e;
     }
 
     log.info({ message: 'User signed in', entity_type: 'user', entity_id: user.id });
 
+    res.cookie(AUTH_COOKIE_ACCESS, accessToken, { ...AUTH_COOKIE_OPTS, maxAge: ACCESS_MAX_AGE_SEC * 1000 });
+    res.cookie(AUTH_COOKIE_REFRESH, refreshToken, { ...AUTH_COOKIE_OPTS, maxAge: REFRESH_MAX_AGE_SEC * 1000 });
     res.json({
-      accessToken, refreshToken,
       user: { id: user.id, email: user.email, organizationId: user.organization_id, role: user.role },
     });
   }));
 
+  router.get('/me', asyncHandler(async (req, res) => {
+    const token = req.cookies?.[AUTH_COOKIE_ACCESS] || req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
+    if (!token) throw new AppError(401, 'Not authenticated', ErrorCodes.UNAUTHORIZED);
+
+    const decoded = verifyAccessToken(token);
+    const result = await pool.query('SELECT id, email FROM users WHERE id = $1', [decoded.userId]);
+    if (result.rows.length === 0) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
+
+    const user = result.rows[0];
+    // Return organizationId and role from JWT (current workspace), not from DB — so switch-workspace is reflected.
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.json({
+      id: user.id,
+      email: user.email,
+      organization_id: decoded.organizationId,
+      organizationId: decoded.organizationId,
+      role: decoded.role ?? '',
+    });
+  }));
+
+  router.post('/logout', asyncHandler(async (_req, res) => {
+    res.cookie(AUTH_COOKIE_ACCESS, '', { ...AUTH_COOKIE_OPTS, maxAge: 0 });
+    res.cookie(AUTH_COOKIE_REFRESH, '', { ...AUTH_COOKIE_OPTS, maxAge: 0 });
+    res.status(204).send();
+  }));
+
   router.post('/verify', asyncHandler(async (req, res) => {
-    const { token } = req.body;
+    const token = req.cookies?.[AUTH_COOKIE_ACCESS] || req.body?.token || req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
     if (!token) throw new AppError(400, 'Token required', ErrorCodes.BAD_REQUEST);
 
     const decoded = verifyAccessToken(token);
@@ -187,7 +227,7 @@ export function authRouter({ pool, rabbitmq, log }: Deps): Router {
       refreshAttempts.set(clientId, { count: 1, resetAt: now + REFRESH_RATE_WINDOW });
     }
 
-    const { refreshToken } = req.body;
+    const refreshToken = req.cookies?.[AUTH_COOKIE_REFRESH] || req.body?.refreshToken;
     if (!refreshToken) throw new AppError(400, 'Refresh token required', ErrorCodes.BAD_REQUEST);
 
     let decoded: { userId: string };
@@ -197,7 +237,14 @@ export function authRouter({ pool, rabbitmq, log }: Deps): Router {
       throw new AppError(401, 'Invalid or expired refresh token', ErrorCodes.UNAUTHORIZED);
     }
 
-    const tokenCheck = await pool.query('SELECT * FROM refresh_tokens WHERE token = $1', [refreshToken]);
+    const tokenHash = hashRefreshToken(refreshToken);
+    let tokenCheck = await pool.query('SELECT * FROM refresh_tokens WHERE token = $1', [tokenHash]);
+    if (tokenCheck.rows.length === 0) {
+      tokenCheck = await pool.query('SELECT * FROM refresh_tokens WHERE token = $1', [refreshToken]);
+      if (tokenCheck.rows.length > 0) {
+        await pool.query('UPDATE refresh_tokens SET token = $1 WHERE id = $2', [tokenHash, tokenCheck.rows[0].id]);
+      }
+    }
     if (tokenCheck.rows.length === 0) throw new AppError(401, 'Invalid refresh token', ErrorCodes.UNAUTHORIZED);
     if (new Date(tokenCheck.rows[0].expires_at) <= new Date()) throw new AppError(401, 'Refresh token expired', ErrorCodes.UNAUTHORIZED);
 
@@ -208,7 +255,10 @@ export function authRouter({ pool, rabbitmq, log }: Deps): Router {
     const accessToken = signAccessToken({ userId: user.id, organizationId: user.organization_id, role: user.role });
 
     refreshAttempts.delete(clientId);
-    res.json({ accessToken });
+    res.cookie(AUTH_COOKIE_ACCESS, accessToken, { ...AUTH_COOKIE_OPTS, maxAge: ACCESS_MAX_AGE_SEC * 1000 });
+    res.json({
+      user: { id: user.id, email: user.email, organizationId: user.organization_id, role: user.role },
+    });
   }));
 
   return router;

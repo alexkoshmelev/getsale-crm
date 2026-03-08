@@ -5,7 +5,7 @@ import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes } from '@getsale/service-core';
 import { TelegramManager } from '../telegram-manager';
 import { serializeMessage } from '../telegram-serialize';
-import { MAX_FILE_SIZE_BYTES, BULK_SEND_DELAY_MS } from '../helpers';
+import { MAX_FILE_SIZE_BYTES, BULK_SEND_DELAY_MS, requireBidiCanWriteAccount } from '../helpers';
 
 interface Deps {
   pool: Pool;
@@ -40,6 +40,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     if ((accountResult.rows[0] as { is_demo?: boolean }).is_demo) {
       throw new AppError(403, 'Sending messages is disabled for demo accounts. Connect a real Telegram account to send messages.', ErrorCodes.FORBIDDEN);
     }
+    await requireBidiCanWriteAccount(pool, id, req.user);
     if (!telegramManager.isConnected(id)) {
       throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
     }
@@ -94,6 +95,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     if ((accountResult.rows[0] as { is_demo?: boolean }).is_demo) {
       throw new AppError(403, 'Sending messages is disabled for demo accounts.', ErrorCodes.FORBIDDEN);
     }
+    await requireBidiCanWriteAccount(pool, id, req.user);
     if (!telegramManager.isConnected(id)) {
       throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
     }
@@ -133,6 +135,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiCanWriteAccount(pool, id, req.user);
     if (!telegramManager.isConnected(id)) {
       throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
     }
@@ -168,6 +171,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiCanWriteAccount(pool, id, req.user);
     if (!telegramManager.isConnected(id)) {
       throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
     }
@@ -203,7 +207,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
-
+    await requireBidiCanWriteAccount(pool, id, req.user);
     if (!telegramManager.isConnected(id)) {
       throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
     }
@@ -267,6 +271,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiCanWriteAccount(pool, accountId, req.user);
     if (!telegramManager.isConnected(accountId)) {
       throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
     }

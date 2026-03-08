@@ -1,6 +1,6 @@
 # Migrations Dockerfile. Build context: repo root (works on Windows and in CI).
 # Build: docker build -f docker/migrations/Dockerfile .
-FROM node:18-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 

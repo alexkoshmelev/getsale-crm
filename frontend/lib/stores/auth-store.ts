@@ -15,127 +15,80 @@ interface Workspace {
 }
 
 interface AuthState {
-  accessToken: string | null;
-  refreshToken: string | null;
   user: User | null;
   isAuthenticated: boolean;
   workspaces: Workspace[] | null;
   login: (email: string, password: string) => Promise<void>;
   signup: (email: string, password: string, organizationName?: string, inviteToken?: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   refreshAccessToken: () => Promise<void>;
   fetchWorkspaces: () => Promise<void>;
   switchWorkspace: (organizationId: string) => Promise<void>;
   refreshUser: () => Promise<void>;
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// Cookie-setting operations (login, signup, refresh, switch-workspace, logout) MUST go
+// directly to the gateway so Set-Cookie headers reach the browser without Next.js rewrite interference.
+// Read-only operations (me, workspaces) go to same origin via Next.js rewrite (cookie is sent automatically).
+const GATEWAY_URL = typeof window !== 'undefined'
+  ? (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000')
+  : (process.env.NEXT_PUBLIC_API_URL || process.env.API_URL || 'http://localhost:8000');
+const SAME_ORIGIN_URL = typeof window !== 'undefined'
+  ? ''
+  : (process.env.NEXT_PUBLIC_API_URL || process.env.API_URL || 'http://localhost:8000');
+const axiosConfig = { withCredentials: true };
 
 export const useAuthStore = create<AuthState>()(
   persist(
     (set, get) => ({
-      accessToken: null,
-      refreshToken: null,
       user: null,
       isAuthenticated: false,
       workspaces: null,
 
       login: async (email: string, password: string) => {
-        try {
-          const response = await axios.post(`${API_URL}/api/auth/signin`, {
-            email,
-            password,
-          });
-
-          const { accessToken, refreshToken, user } = response.data;
-
-          set({
-            accessToken,
-            refreshToken,
-            user,
-            isAuthenticated: true,
-          });
-
-          // Set default axios header
-          axios.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
-        } catch (error: any) {
-          throw new Error(error.response?.data?.error || 'Login failed');
-        }
+        const response = await axios.post(
+          `${GATEWAY_URL}/api/auth/signin`,
+          { email, password },
+          axiosConfig
+        );
+        const { user } = response.data;
+        set({ user, isAuthenticated: true });
       },
 
       signup: async (email: string, password: string, organizationName?: string, inviteToken?: string) => {
-        try {
-          const body: Record<string, unknown> = { email, password };
-          if (inviteToken) {
-            body.inviteToken = inviteToken;
-          } else {
-            body.organizationName = organizationName ?? 'My Organization';
-          }
-          const response = await axios.post(`${API_URL}/api/auth/signup`, body);
-
-          const { accessToken, refreshToken, user } = response.data;
-
-          set({
-            accessToken,
-            refreshToken,
-            user,
-            isAuthenticated: true,
-          });
-
-          // Set default axios header
-          axios.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
-        } catch (error: any) {
-          throw new Error(error.response?.data?.error || 'Signup failed');
-        }
+        const body: Record<string, unknown> = { email, password };
+        if (inviteToken) body.inviteToken = inviteToken;
+        else body.organizationName = organizationName ?? 'My Organization';
+        const response = await axios.post(`${GATEWAY_URL}/api/auth/signup`, body, axiosConfig);
+        const { user } = response.data;
+        set({ user, isAuthenticated: true });
       },
 
-      logout: () => {
-        set({
-          accessToken: null,
-          refreshToken: null,
-          user: null,
-          isAuthenticated: false,
-          workspaces: null,
-        });
-        delete axios.defaults.headers.common['Authorization'];
+      logout: async () => {
+        try {
+          await axios.post(`${GATEWAY_URL}/api/auth/logout`, {}, axiosConfig);
+        } catch (_) {}
+        set({ user: null, isAuthenticated: false, workspaces: null });
       },
 
       refreshAccessToken: async () => {
-        const { refreshToken } = get();
-        if (!refreshToken) {
-          get().logout();
-          throw new Error('No refresh token available');
-        }
-
-        try {
-          const response = await axios.post(`${API_URL}/api/auth/refresh`, {
-            refreshToken,
-          });
-
-          const { accessToken, refreshToken: newRefreshToken } = response.data;
-
-          // Update both tokens if new refresh token is provided
-          set({ 
-            accessToken,
-            ...(newRefreshToken && { refreshToken: newRefreshToken })
-          });
-          axios.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
-        } catch (error: any) {
-          // If refresh token expired or invalid, logout immediately
-          get().logout();
-          
-          // Throw error so interceptor knows refresh failed
-          throw error;
-        }
+        const response = await axios.post<{ user: User }>(
+          `${GATEWAY_URL}/api/auth/refresh`,
+          {},
+          axiosConfig
+        );
+        const { user } = response.data;
+        if (user) set({ user });
       },
 
       fetchWorkspaces: async () => {
-        const { accessToken } = get();
-        if (!accessToken) return;
+        const { user } = get();
+        if (!user) return;
         try {
-          const response = await axios.get<Workspace[]>(`${API_URL}/api/auth/workspaces`, {
-            headers: { Authorization: `Bearer ${accessToken}` },
-          });
+          const response = await axios.get<Workspace[]>(
+            `${SAME_ORIGIN_URL}/api/auth/workspaces`,
+            axiosConfig
+          );
           set({ workspaces: response.data });
         } catch {
           set({ workspaces: [] });
@@ -143,167 +96,56 @@ export const useAuthStore = create<AuthState>()(
       },
 
       switchWorkspace: async (organizationId: string) => {
-        const { accessToken } = get();
-        if (!accessToken) throw new Error('Not authenticated');
-        const response = await axios.post<{ accessToken: string; user: User }>(
-          `${API_URL}/api/auth/switch-workspace`,
+        const { user } = get();
+        if (!user) throw new Error('Not authenticated');
+        const response = await axios.post<{ user: User }>(
+          `${GATEWAY_URL}/api/auth/switch-workspace`,
           { organizationId },
-          { headers: { Authorization: `Bearer ${accessToken}` } }
+          axiosConfig
         );
-        const { accessToken: newAccessToken, user } = response.data;
-        set({ accessToken: newAccessToken, user });
-        axios.defaults.headers.common['Authorization'] = `Bearer ${newAccessToken}`;
+        const { user: newUser } = response.data;
+        set({ user: newUser });
+        // Persist new user to localStorage before redirect so rehydration after reload uses correct workspace.
         if (typeof window !== 'undefined') {
+          const key = 'auth-storage';
+          const payload = { state: { user: newUser, isAuthenticated: true }, version: 0 };
+          try {
+            localStorage.setItem(key, JSON.stringify(payload));
+          } catch (_) {}
           window.location.href = '/dashboard';
         }
       },
 
       refreshUser: async () => {
-        const { accessToken } = get();
-        if (!accessToken) return;
         try {
-          const response = await axios.post<{ id: string; email: string; organization_id: string; organizationId: string; role: string }>(
-            `${API_URL}/api/auth/verify`,
-            { token: accessToken }
+          const response = await axios.get<{ id: string; email: string; organizationId: string; role: string }>(
+            `${SAME_ORIGIN_URL}/api/auth/me`,
+            {
+              ...axiosConfig,
+              params: { _: typeof window !== 'undefined' ? Date.now() : 0 },
+              headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
+            }
           );
           const u = response.data;
           set({
             user: u
-              ? {
-                  id: u.id,
-                  email: u.email,
-                  organizationId: u.organizationId ?? u.organization_id,
-                  role: u.role ?? '',
-                }
+              ? { id: u.id, email: u.email, organizationId: u.organizationId, role: u.role ?? '' }
               : null,
           });
         } catch {
-          // Token invalid or expired — leave user as is; interceptor may trigger refresh or logout
+          set({ user: null, isAuthenticated: false });
         }
       },
     }),
     {
       name: 'auth-storage',
       storage: createJSONStorage(() => (typeof window !== 'undefined' ? localStorage : undefined as any)),
-      // Restore isAuthenticated when state is rehydrated from storage
+      partialize: (state) => ({ user: state.user, isAuthenticated: !!state.user }),
       onRehydrateStorage: () => (state) => {
-        if (state && state.accessToken && state.user) {
-          state.isAuthenticated = true;
-          if (typeof window !== 'undefined') {
-            axios.defaults.headers.common['Authorization'] = `Bearer ${state.accessToken}`;
-          }
-        }
+        if (state?.user) state.isAuthenticated = true;
       },
     }
   )
 );
 
-// Flag to prevent multiple simultaneous refresh requests
-let isRefreshing = false;
-let failedQueue: Array<{
-  resolve: (value?: any) => void;
-  reject: (reason?: any) => void;
-}> = [];
-
-const processQueue = (error: any, token: string | null = null) => {
-  failedQueue.forEach((prom) => {
-    if (error) {
-      prom.reject(error);
-    } else {
-      prom.resolve(token);
-    }
-  });
-  failedQueue = [];
-};
-
-// Initialize axios interceptor (only on client side)
-if (typeof window !== 'undefined') {
-  // Set initial token if exists and restore authentication state
-  const authStorage = localStorage.getItem('auth-storage');
-  if (authStorage) {
-    try {
-      const auth = JSON.parse(authStorage);
-      if (auth.state?.accessToken && auth.state?.user) {
-        axios.defaults.headers.common['Authorization'] = `Bearer ${auth.state.accessToken}`;
-        // Restore authentication state
-        useAuthStore.setState({
-          isAuthenticated: true,
-          accessToken: auth.state.accessToken,
-          refreshToken: auth.state.refreshToken,
-          user: auth.state.user,
-        });
-      }
-    } catch (error) {
-      console.error('Error parsing auth storage:', error);
-    }
-  }
-
-  // Add response interceptor for token refresh
-  axios.interceptors.response.use(
-    (response) => response,
-    async (error) => {
-      const originalRequest = error.config;
-
-      // Skip refresh for login/signup/refresh endpoints to avoid infinite loops
-      if (
-        originalRequest?.url?.includes('/api/auth/signin') ||
-        originalRequest?.url?.includes('/api/auth/signup') ||
-        originalRequest?.url?.includes('/api/auth/refresh') ||
-        originalRequest?.url?.includes('/api/auth/switch-workspace') ||
-        originalRequest?._retry
-      ) {
-        return Promise.reject(error);
-      }
-
-      if (error.response?.status === 401) {
-        // If already refreshing, queue this request
-        if (isRefreshing) {
-          return new Promise((resolve, reject) => {
-            failedQueue.push({ resolve, reject });
-          })
-            .then((token) => {
-              originalRequest.headers.Authorization = `Bearer ${token}`;
-              return axios(originalRequest);
-            })
-            .catch((err) => {
-              return Promise.reject(err);
-            });
-        }
-
-        originalRequest._retry = true;
-        isRefreshing = true;
-
-        try {
-          await useAuthStore.getState().refreshAccessToken();
-          const newToken = useAuthStore.getState().accessToken;
-          
-          if (newToken) {
-            originalRequest.headers.Authorization = `Bearer ${newToken}`;
-            processQueue(null, newToken);
-            return axios(originalRequest);
-          } else {
-            throw new Error('No token received');
-          }
-        } catch (refreshError) {
-          // Refresh failed - logout and redirect immediately
-          processQueue(refreshError, null);
-          useAuthStore.getState().logout();
-          
-          // Clear any pending requests
-          failedQueue = [];
-          
-          // Redirect to login if not already there
-          if (window.location.pathname !== '/auth/login') {
-            window.location.href = '/auth/login';
-          }
-          
-          return Promise.reject(refreshError);
-        } finally {
-          isRefreshing = false;
-        }
-      }
-      return Promise.reject(error);
-    }
-  );
-}
 

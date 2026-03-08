@@ -22,6 +22,7 @@ export class ServiceHttpClient {
   private retryDelay: number;
   private name: string;
   private log: Logger;
+  private internalAuthSecret: string;
 
   constructor(options: HttpClientOptions, log: Logger) {
     this.baseUrl = options.baseUrl.replace(/\/$/, '');
@@ -30,6 +31,7 @@ export class ServiceHttpClient {
     this.retryDelay = options.retryDelayMs ?? 500;
     this.name = options.name;
     this.log = log;
+    this.internalAuthSecret = process.env.INTERNAL_AUTH_SECRET?.trim() || '';
   }
 
   async request<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -44,12 +46,16 @@ export class ServiceHttpClient {
       const timer = setTimeout(() => controller.abort(), timeout);
 
       try {
+        const hdrs: Record<string, string> = {
+          'Content-Type': 'application/json',
+          ...options.headers,
+        };
+        if (this.internalAuthSecret && !hdrs['x-internal-auth']) {
+          hdrs['x-internal-auth'] = this.internalAuthSecret;
+        }
         const res = await fetch(url, {
           method,
-          headers: {
-            'Content-Type': 'application/json',
-            ...options.headers,
-          },
+          headers: hdrs,
           body: options.body != null ? JSON.stringify(options.body) : undefined,
           signal: controller.signal,
         });

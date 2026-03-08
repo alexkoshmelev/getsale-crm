@@ -33,6 +33,8 @@ interface ChatListProps {
   newLeads: Chat[];
   newLeadsLoading: boolean;
   getChatNameWithOverrides: (chat: Chat) => string;
+  /** Unique display name for list items (disambiguates when multiple chats share the same name). */
+  getChatNameDisplay?: (chat: Chat) => string;
   onSelectChat: (chat: Chat) => void;
   onSelectAccount: (id: string) => void;
   onCollapse: (v: boolean) => void;
@@ -55,7 +57,7 @@ export function ChatList(props: ChatListProps) {
     syncFoldersPushing, displayFolders, displayChats,
     pinnedChatsOrdered, selectedFolderId, dragOverFolderId,
     unreadByFolder, activeSidebarSection, newLeads, newLeadsLoading,
-    getChatNameWithOverrides, onSelectChat, onCollapse,
+    getChatNameWithOverrides, getChatNameDisplay, onSelectChat, onCollapse,
     onSelectFolder, onSetActiveSidebarSection, onShowFolderManageModal,
     onSetBroadcastModalOpen, onSetDragOverFolderId,
     onFolderDrop, onChatContextMenu,
@@ -130,6 +132,8 @@ export function ChatList(props: ChatListProps) {
     </div>
   );
 
+  const chatNameForList = (chat: Chat) => (getChatNameDisplay ?? getChatNameWithOverrides)(chat);
+
   const renderChatItem = (chat: Chat, idx: number) => {
     const isFirstPinned = idx === 0 && pinnedChatsOrdered.length > 0;
     const isFirstUnpinned = pinnedChatsOrdered.length > 0 && idx === pinnedChatsOrdered.length;
@@ -145,13 +149,17 @@ export function ChatList(props: ChatListProps) {
           onContextMenu={(e) => { e.preventDefault(); onChatContextMenu(e, chat); }}
           className={`px-3 py-2 cursor-pointer border-b border-border transition-colors flex gap-2.5 items-center ${selectedChat?.channel_id === chat.channel_id ? 'bg-primary/10 dark:bg-primary/20' : 'hover:bg-accent'}`}
         >
-          <ChatAvatar bdAccountId={selectedAccountId!} chatId={chat.channel_id} chat={chat} className="w-9 h-9 shrink-0" />
+          <ChatAvatar bdAccountId={selectedAccountId ?? ''} chatId={chat.channel_id} chat={chat} className="w-9 h-9 shrink-0" />
           <div className="min-w-0 flex-1">
             <div className="flex items-center justify-between gap-1.5">
               <div className="flex items-center gap-1.5 min-w-0 truncate">
-                <span className="font-medium text-sm truncate">{getChatNameWithOverrides(chat)}</span>
+                <span className="font-medium text-sm truncate" title={getChatNameWithOverrides(chat)}>{chatNameForList(chat)}</span>
                 <span className={`shrink-0 text-[10px] leading-none px-1.5 py-0.5 rounded ${chat.lead_id ? 'bg-primary/15 text-primary' : 'text-muted-foreground/60'}`}>
-                  {chat.lead_id ? t('messaging.badgeLead') : t('messaging.badgeContact')}
+                  {chat.lead_id
+                  ? t('messaging.badgeLead')
+                  : chat.peer_type === 'chat' || chat.peer_type === 'channel'
+                    ? t('messaging.badgeGroup')
+                    : t('messaging.badgeContact')}
                 </span>
               </div>
               <span className="text-[11px] text-muted-foreground shrink-0 tabular-nums">{formatTime(chat.last_message_at)}</span>
@@ -226,9 +234,10 @@ export function ChatList(props: ChatListProps) {
                     onClick={() => onSelectChat(chat)}
                     onContextMenu={(e) => { e.preventDefault(); onChatContextMenu(e, chat); }}
                     title={getChatNameWithOverrides(chat)}
+                    aria-label={chatNameForList(chat)}
                     className={`relative shrink-0 rounded-full p-0.5 transition-colors hover:ring-2 hover:ring-primary/50 ${selectedChat?.channel_id === chat.channel_id ? 'ring-2 ring-primary' : ''}`}
                   >
-                    <ChatAvatar bdAccountId={selectedAccountId} chatId={chat.channel_id} chat={chat} className="w-8 h-8" />
+                    <ChatAvatar bdAccountId={selectedAccountId ?? ''} chatId={chat.channel_id} chat={chat} className="w-8 h-8" />
                     {chat.unread_count > 0 && (
                       <span className="absolute -top-0.5 -right-0.5 min-w-[0.875rem] h-3.5 px-0.5 rounded-full bg-primary text-primary-foreground text-[10px] flex items-center justify-center leading-none">{chat.unread_count}</span>
                     )}

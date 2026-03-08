@@ -50,6 +50,7 @@ export function draftsRouter({ openai, redis, rabbitmq, log, rateLimiter, models
     const draftContent = completion.choices[0].message.content || '';
     const draft = {
       id: crypto.randomUUID(),
+      organizationId,
       contactId,
       content: draftContent,
       status: AIDraftStatus.GENERATED,
@@ -80,8 +81,12 @@ export function draftsRouter({ openai, redis, rabbitmq, log, rateLimiter, models
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {
-    const draft = await redis.get(`draft:${req.params.id}`);
+    const { organizationId } = req.user;
+    const draft = await redis.get<Record<string, unknown>>(`draft:${req.params.id}`);
     if (!draft) throw new AppError(404, 'Draft not found', ErrorCodes.NOT_FOUND);
+    if (draft.organizationId !== organizationId) {
+      throw new AppError(404, 'Draft not found', ErrorCodes.NOT_FOUND);
+    }
     res.json(draft);
   }));
 
@@ -89,6 +94,9 @@ export function draftsRouter({ openai, redis, rabbitmq, log, rateLimiter, models
     const { id: userId, organizationId } = req.user;
     const draft = await redis.get<Record<string, unknown>>(`draft:${req.params.id}`);
     if (!draft) throw new AppError(404, 'Draft not found', ErrorCodes.NOT_FOUND);
+    if (draft.organizationId !== organizationId) {
+      throw new AppError(404, 'Draft not found', ErrorCodes.NOT_FOUND);
+    }
 
     const updatedDraft = { ...draft, status: AIDraftStatus.APPROVED, approvedBy: userId };
     await redis.set(`draft:${req.params.id}`, updatedDraft, 3600);

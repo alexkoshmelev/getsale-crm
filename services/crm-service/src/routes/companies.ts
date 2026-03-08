@@ -136,13 +136,17 @@ export function companiesRouter({ pool, rabbitmq, log }: Deps): Router {
     }
 
     const dealsCount = await pool.query(
-      'SELECT COUNT(*)::int AS c FROM deals WHERE company_id = $1', [id]
+      'SELECT COUNT(*)::int AS c FROM deals WHERE company_id = $1 AND organization_id = $2',
+      [id, organizationId]
     );
     if (dealsCount.rows[0].c > 0) {
       throw new AppError(409, 'Cannot delete company that has deals. Move or delete deals first.', ErrorCodes.CONFLICT);
     }
 
-    await pool.query('UPDATE contacts SET company_id = NULL, updated_at = NOW() WHERE company_id = $1', [id]);
+    await pool.query(
+      'UPDATE contacts SET company_id = NULL, updated_at = NOW() WHERE company_id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
     await pool.query('DELETE FROM companies WHERE id = $1 AND organization_id = $2', [id, organizationId]);
     res.status(204).send();
   }));

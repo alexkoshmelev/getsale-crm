@@ -6,7 +6,7 @@ import { EventType, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, canPermission } from '@getsale/service-core';
 import { TelegramManager } from '../telegram-manager';
-import { getTelegramApiCredentials, requireAccountOwner } from '../helpers';
+import { getTelegramApiCredentials, requireAccountOwner, requireBidiOwnAccount } from '../helpers';
 
 interface Deps {
   pool: Pool;
@@ -280,6 +280,7 @@ export function authRouter({ pool, rabbitmq, log, telegramManager }: Deps): Rout
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, id, user);
     const isOwner = await requireAccountOwner(pool, id, user);
     const canSettings = await checkPermission(user.role, 'bd_accounts', 'settings');
     if (!isOwner && !canSettings) {

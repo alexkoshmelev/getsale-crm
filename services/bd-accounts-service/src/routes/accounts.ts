@@ -4,7 +4,7 @@ import { RabbitMQClient } from '@getsale/utils';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, canPermission } from '@getsale/service-core';
 import { TelegramManager } from '../telegram-manager';
-import { requireAccountOwner } from '../helpers';
+import { requireAccountOwner, requireBidiOwnAccount } from '../helpers';
 
 interface Deps {
   pool: Pool;
@@ -121,6 +121,7 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager }: Deps): 
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, id, user);
     const isOwner = await requireAccountOwner(pool, id, user);
     if (!isOwner) {
       throw new AppError(403, 'Only the account owner can update', ErrorCodes.FORBIDDEN);
@@ -203,6 +204,7 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager }: Deps): 
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, id, user);
     const isOwner = await requireAccountOwner(pool, id, user);
     const canSettings = await checkPermission(user.role, 'bd_accounts', 'settings');
     if (!isOwner && !canSettings) {
@@ -244,6 +246,7 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager }: Deps): 
     if (accountResult.rows.length === 0) {
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
+    await requireBidiOwnAccount(pool, id, user);
     const isOwner = await requireAccountOwner(pool, id, user);
     const canSettings = await checkPermission(user.role, 'bd_accounts', 'settings');
     if (!isOwner && !canSettings) {

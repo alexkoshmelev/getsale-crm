@@ -241,7 +241,10 @@ export function dealsRouter({ pool, rabbitmq, log, dealCreatedTotal, dealStageCh
     const { id } = req.params;
     const existing = await pool.query('SELECT 1 FROM deals WHERE id = $1 AND organization_id = $2', [id, organizationId]);
     if (existing.rows.length === 0) throw new AppError(404, 'Deal not found', ErrorCodes.NOT_FOUND);
-    await pool.query("DELETE FROM stage_history WHERE entity_type = 'deal' AND entity_id = $1", [id]);
+    await pool.query(
+      "DELETE FROM stage_history WHERE entity_type = 'deal' AND entity_id = $1 AND organization_id = $2",
+      [id, organizationId]
+    );
     await pool.query('DELETE FROM deals WHERE id = $1 AND organization_id = $2', [id, organizationId]);
     res.status(204).send();
   }));
@@ -272,7 +275,10 @@ async function createDealFromLead(p: CreateFromLeadParams) {
   if (leadRow.rows.length === 0) throw new AppError(404, 'Lead not found', ErrorCodes.NOT_FOUND);
   const lead = leadRow.rows[0];
 
-  const existingDeal = await pool.query('SELECT 1 FROM deals WHERE lead_id = $1', [p.leadId]);
+  const existingDeal = await pool.query(
+    'SELECT 1 FROM deals WHERE lead_id = $1 AND organization_id = $2',
+    [p.leadId, p.organizationId]
+  );
   if (existingDeal.rows.length > 0) throw new AppError(409, 'This lead is already linked to a deal', ErrorCodes.CONFLICT);
 
   if (p.pipelineId != null && p.pipelineId !== lead.pipeline_id) {

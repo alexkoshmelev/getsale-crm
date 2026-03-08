@@ -12,12 +12,15 @@ import {
   ChevronRight,
   Mail,
   Phone,
+  AtSign,
   Briefcase,
   Filter,
   FileUp,
   StickyNote,
   Bell,
   Check,
+  Crown,
+  FileText,
 } from 'lucide-react';
 import { apiClient } from '@/lib/api/client';
 import {
@@ -385,10 +388,14 @@ export default function CRMPage() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.name')}</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.email')}</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('common.company')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.phone', 'Телефон')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Username</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Telegram ID</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.premium', 'Premium')}</th>
                     <th className="px-6 py-3 w-24" />
                   </tr>
                 </thead>
-                <TableSkeleton rows={5} cols={3} />
+                <TableSkeleton rows={5} cols={7} />
               </table>
             ) : (
               <table className="w-full">
@@ -397,6 +404,10 @@ export default function CRMPage() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.name')}</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.email')}</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('common.company')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.phone', 'Телефон')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Username</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Telegram ID</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.premium', 'Premium')}</th>
                     <th className="px-6 py-3 w-24" />
                   </tr>
                 </thead>
@@ -419,6 +430,16 @@ export default function CRMPage() {
                       </td>
                       <td className="px-6 py-4 text-sm text-muted-foreground">{c.email ?? '—'}</td>
                       <td className="px-6 py-4 text-sm text-muted-foreground">{(c as Contact & { companyName?: string }).companyName ?? (c as Contact & { company_name?: string }).company_name ?? '—'}</td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">{c.phone ?? '—'}</td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">{c.username ? (c.username.startsWith('@') ? c.username : `@${c.username}`) : '—'}</td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">{c.telegram_id ?? '—'}</td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">
+                        {c.premium === true ? (
+                          <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400"><Crown className="w-4 h-4" />{t('crm.yes', 'Да')}</span>
+                        ) : c.premium === false ? (
+                          <span className="text-muted-foreground">{t('crm.no', 'Нет')}</span>
+                        ) : '—'}
+                      </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
@@ -737,6 +758,12 @@ function ContactDetail({
   t: (key: string) => string;
 }) {
   const name = getContactDisplayName(contact);
+  const initials = (() => {
+    const parts = name.replace(/@/g, '').trim().split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase().slice(0, 2);
+    if (name.length >= 2) return name.slice(0, 2).toUpperCase();
+    return name.slice(0, 1).toUpperCase() || '?';
+  })();
   const [notes, setNotes] = useState<Note[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [noteText, setNoteText] = useState('');
@@ -756,12 +783,23 @@ function ContactDetail({
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start gap-4">
-        <div className="p-3 rounded-full bg-primary/10 text-primary">
-          <User className="w-8 h-8" />
+      <div className="flex flex-col sm:flex-row gap-6">
+        <div className="shrink-0">
+          <div className="w-20 h-20 rounded-full bg-primary/15 flex items-center justify-center text-primary font-semibold text-2xl">
+            {initials}
+          </div>
         </div>
-        <div className="flex-1 min-w-0">
-          <h3 className="font-heading text-lg font-semibold text-foreground">{name}</h3>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <h3 className="font-heading text-xl font-semibold text-foreground truncate">
+              {name}
+            </h3>
+            {contact.premium === true && (
+              <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400 text-sm" title="Telegram Premium">
+                <Crown className="w-4 h-4" />
+              </span>
+            )}
+          </div>
           {(contact as Contact & { companyName?: string }).companyName && (
             <p className="text-sm text-muted-foreground flex items-center gap-1 mt-1">
               <Briefcase className="w-4 h-4" />
@@ -770,32 +808,56 @@ function ContactDetail({
           )}
         </div>
       </div>
-      <div className="space-y-3">
+
+      <dl className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
         {contact.email && (
-          <div className="flex items-center gap-2 text-sm">
-            <Mail className="w-4 h-4 text-muted-foreground" />
-            <a href={`mailto:${contact.email}`} className="text-primary hover:underline">{contact.email}</a>
+          <div>
+            <dt className="text-muted-foreground flex items-center gap-2">
+              <Mail className="w-4 h-4" /> {t('crm.email')}
+            </dt>
+            <dd className="font-medium text-foreground mt-0.5">
+              <a href={`mailto:${contact.email}`} className="text-primary hover:underline">{contact.email}</a>
+            </dd>
           </div>
         )}
         {contact.phone && (
-          <div className="flex items-center gap-2 text-sm">
-            <Phone className="w-4 h-4 text-muted-foreground" />
-            <a href={`tel:${contact.phone}`} className="text-primary hover:underline">{contact.phone}</a>
+          <div>
+            <dt className="text-muted-foreground flex items-center gap-2">
+              <Phone className="w-4 h-4" /> {t('crm.phone', 'Телефон')}
+            </dt>
+            <dd className="font-medium text-foreground mt-0.5">
+              <a href={`tel:${contact.phone}`} className="text-primary hover:underline">{contact.phone}</a>
+            </dd>
           </div>
         )}
         {contact.telegram_id && (
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground">Telegram ID:</span>
-            <span className="text-foreground">{contact.telegram_id}</span>
+          <div>
+            <dt className="text-muted-foreground flex items-center gap-2">
+              <User className="w-4 h-4" /> Telegram ID
+            </dt>
+            <dd className="font-medium text-foreground mt-0.5">{contact.telegram_id}</dd>
           </div>
         )}
         {contact.username && (
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground">@</span>
-            <span className="text-foreground">{contact.username.startsWith('@') ? contact.username : `@${contact.username}`}</span>
+          <div>
+            <dt className="text-muted-foreground flex items-center gap-2">
+              <AtSign className="w-4 h-4" /> Username
+            </dt>
+            <dd className="font-medium text-foreground mt-0.5">
+              {contact.username.startsWith('@') ? contact.username : `@${contact.username}`}
+            </dd>
           </div>
         )}
-      </div>
+      </dl>
+
+      {contact.bio?.trim() && (
+        <div className="pt-4 border-t border-border">
+          <dt className="text-muted-foreground flex items-center gap-2 mb-1">
+            <FileText className="w-4 h-4" /> {t('crm.bio', 'О себе')}
+          </dt>
+          <dd className="text-foreground whitespace-pre-wrap">{contact.bio.trim()}</dd>
+        </div>
+      )}
 
       <div className="border-t border-border pt-4 space-y-4">
         <h4 className="text-sm font-medium text-foreground flex items-center gap-2">

@@ -16,9 +16,7 @@ function DownloadLinkInner({ url, className, downloadLabel = 'Download' }: Downl
     if (loading) return;
     setLoading(true);
     try {
-      const authStorage = typeof window !== 'undefined' ? localStorage.getItem('auth-storage') : null;
-      const token = authStorage ? (JSON.parse(authStorage)?.state?.accessToken as string) : null;
-      const res = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      const res = await fetch(url, { credentials: 'include' });
       if (!res.ok) throw new Error('Failed to download');
       const blob = await res.blob();
       const u = URL.createObjectURL(blob);

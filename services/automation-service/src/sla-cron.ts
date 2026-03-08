@@ -156,7 +156,7 @@ async function runSlaCronOnceImpl(
 interface TimeBasedCronDeps {
   pool: Pool;
   log: Logger;
-  executeRule: (rule: any, event: any) => Promise<void>;
+  executeRule: (rule: import('./event-handlers').AutomationRuleRow, event: import('./event-handlers').AutomationEventPayload) => Promise<void>;
 }
 
 export function startCronJobs(
@@ -192,7 +192,8 @@ export function startCronJobs(
         );
 
         for (const client of clients.rows) {
-          await executeRule(rule, {
+          await executeRule(rule as import('./event-handlers').AutomationRuleRow, {
+            id: crypto.randomUUID(),
             type: 'time_elapsed',
             organizationId: client.organization_id,
             data: { clientId: client.client_id, dealId: client.id },

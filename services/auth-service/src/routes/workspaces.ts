@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes } from '@getsale/service-core';
 import { extractBearerToken, signAccessToken } from '../helpers';
+import { AUTH_COOKIE_ACCESS, AUTH_COOKIE_OPTS, ACCESS_MAX_AGE_SEC } from '../cookies';
 
 interface Deps {
   pool: Pool;
@@ -13,7 +14,7 @@ export function workspacesRouter({ pool }: Deps): Router {
   const router = Router();
 
   router.get('/workspaces', asyncHandler(async (req, res) => {
-    const decoded = extractBearerToken(req);
+    const decoded = extractBearerToken(req, req.cookies?.[AUTH_COOKIE_ACCESS]);
     const rows = await pool.query(
       `SELECT om.organization_id AS id, o.name
        FROM organization_members om
@@ -25,7 +26,7 @@ export function workspacesRouter({ pool }: Deps): Router {
   }));
 
   router.post('/switch-workspace', asyncHandler(async (req, res) => {
-    const decoded = extractBearerToken(req);
+    const decoded = extractBearerToken(req, req.cookies?.[AUTH_COOKIE_ACCESS]);
     const { organizationId } = req.body;
     if (!organizationId) throw new AppError(400, 'organizationId required', ErrorCodes.BAD_REQUEST);
 
@@ -42,7 +43,8 @@ export function workspacesRouter({ pool }: Deps): Router {
     const role = member.rows[0].role;
     const accessToken = signAccessToken({ userId: user.id, organizationId, role });
 
-    res.json({ accessToken, user: { id: user.id, email: user.email, organizationId, role } });
+    res.cookie(AUTH_COOKIE_ACCESS, accessToken, { ...AUTH_COOKIE_OPTS, maxAge: ACCESS_MAX_AGE_SEC * 1000 });
+    res.json({ user: { id: user.id, email: user.email, organizationId, role } });
   }));
 
   return router;

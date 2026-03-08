@@ -2,7 +2,7 @@
 # Build context: repo root. Requires .dockerignore so frontend/node_modules and frontend/.next
 # are not sent to the daemon (keeps image smaller).
 # Build: docker build -f docker/frontend/Dockerfile.dev -t getsale-crm-frontend-dev .
-FROM node:18-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 

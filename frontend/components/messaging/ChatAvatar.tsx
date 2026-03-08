@@ -17,28 +17,36 @@ interface ChatAvatarProps {
 function ChatAvatarInner({ bdAccountId, chatId, chat, className = 'w-10 h-10' }: ChatAvatarProps) {
   const [src, setSrc] = useState<string | null>(null);
   const mounted = useRef(true);
-  const key = avatarChatKey(bdAccountId, chatId);
+  const canFetch = typeof bdAccountId === 'string' && bdAccountId.trim() !== '' && typeof chatId === 'string' && chatId.trim() !== '';
+  const key = canFetch ? avatarChatKey(bdAccountId.trim(), chatId.trim()) : '';
 
   useEffect(() => {
-    if (!bdAccountId || !chatId) return;
+    if (!canFetch) {
+      setSrc(null);
+      return;
+    }
     mounted.current = true;
     const cached = blobUrlCache.get(key);
     if (cached) {
       setSrc(cached);
       return () => { mounted.current = false; setSrc(null); };
     }
+    const accountId = bdAccountId.trim();
+    const cId = chatId.trim();
     apiClient
-      .get(`/api/bd-accounts/${bdAccountId}/chats/${chatId}/avatar`, { responseType: 'blob' })
+      .get(`/api/bd-accounts/${accountId}/chats/${cId}/avatar`, { responseType: 'blob' })
       .then((res) => {
-        if (mounted.current && res.data instanceof Blob && res.data.size > 0) {
-          const u = URL.createObjectURL(res.data);
+        if (!mounted.current) return;
+        const blob = res.data;
+        if (blob instanceof Blob && blob.size > 0 && (blob.type.startsWith('image/') || blob.type === 'application/octet-stream')) {
+          const u = URL.createObjectURL(blob);
           blobUrlCache.set(key, u);
           setSrc(u);
         }
       })
       .catch(() => {});
     return () => { mounted.current = false; setSrc(null); };
-  }, [bdAccountId, chatId, key]);
+  }, [canFetch, bdAccountId, chatId, key]);
 
   const initials = getChatInitials(chat);
   const isGroup = chat.peer_type === 'chat' || chat.peer_type === 'channel';

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
+import { useToast } from '@/lib/contexts/toast-context';
 import type { Chat, Message, SyncFolder, LeadContext } from '../types';
 import { MESSAGES_PAGE_SIZE, VIRTUAL_LIST_THRESHOLD, LOAD_OLDER_COOLDOWN_MS } from '../types';
-import { getChatName, getDraftKey, fileToBase64 } from '../utils';
+import { getChatName, getChatNameUniqueInList, getDraftKey, fileToBase64 } from '../utils';
 import type { MessagingState } from './useMessagingState';
 
 export function useMessagingActions(
@@ -12,13 +13,18 @@ export function useMessagingActions(
   fetchMessages: (accountId: string, chat: Chat) => Promise<void>,
 ) {
   const { t } = useTranslation();
+  const toast = useToast();
 
   const hasMoreMessages = s.messagesPage * MESSAGES_PAGE_SIZE < s.messagesTotal || !s.historyExhausted;
   const selectedAccount = s.selectedAccountId ? s.accounts.find((a) => a.id === s.selectedAccountId) : null;
   const isSelectedAccountMine = selectedAccount?.is_owner === true;
 
   const getChatNameWithOverrides = useCallback(
-    (chat: Chat) => getChatName(chat, s.contactDisplayOverrides[chat.channel_id]),
+    (chat: Chat) => {
+      const overrides =
+        chat.peer_type === 'user' ? s.contactDisplayOverrides[chat.channel_id] : undefined;
+      return getChatName(chat, overrides);
+    },
     [s.contactDisplayOverrides],
   );
 
@@ -135,11 +141,11 @@ export function useMessagingActions(
       console.error('Error sending message:', error);
       s.setMessages((prev) => prev.filter((m) => m.id !== tempMessage.id));
       const err = error as { response?: { status?: number; data?: { message?: string; error?: string } } };
-      if (err.response?.status === 413) { alert(err.response.data?.message || 'Файл слишком большой. Максимальный размер 2 ГБ.'); }
-      else { alert(err.response?.data?.message || err.response?.data?.error || 'Ошибка отправки сообщения'); }
+      if (err.response?.status === 413) { toast.error(err.response.data?.message || 'Файл слишком большой. Максимальный размер 2 ГБ.'); }
+      else { toast.error(err.response?.data?.message || err.response?.data?.error || 'Ошибка отправки сообщения'); }
       if (fileToSend) s.setPendingFile(fileToSend);
     } finally { s.setSendingMessage(false); }
-  }, [s.newMessage, s.pendingFile, s.selectedChat, s.selectedAccountId, isSelectedAccountMine, s.replyToMessage, scrollToBottom, fetchChats]);
+  }, [s.newMessage, s.pendingFile, s.selectedChat, s.selectedAccountId, isSelectedAccountMine, s.replyToMessage, scrollToBottom, fetchChats, toast]);
 
   // ─── Reactions & Delete ──────────────────────────────────────────
   const handleReaction = useCallback(async (messageId: string, emoji: string) => {
@@ -149,24 +155,24 @@ export function useMessagingActions(
       s.setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, reactions: res.data.reactions ?? m.reactions } : m));
     } catch (err: unknown) {
       console.error('Error adding reaction:', err);
-      alert((err as { response?: { data?: { error?: string } } })?.response?.data?.error || t('messaging.reactionError'));
+      toast.error((err as { response?: { data?: { error?: string } } })?.response?.data?.error || t('messaging.reactionError'));
     }
-  }, [t]);
+  }, [t, toast]);
 
   const handleDeleteMessage = useCallback(async (messageId: string) => {
     s.setDeletingMessageId(messageId); s.setMessageContextMenu(null);
     try { await apiClient.delete(`/api/messaging/messages/${messageId}`); s.setMessages((prev) => prev.filter((m) => m.id !== messageId)); }
     catch (err: unknown) {
       console.error('Error deleting message:', err);
-      alert((err as { response?: { data?: { message?: string; error?: string } } })?.response?.data?.message || (err as { response?: { data?: { error?: string } } })?.response?.data?.error || 'Не удалось удалить сообщение');
+      toast.error((err as { response?: { data?: { message?: string; error?: string } } })?.response?.data?.message || (err as { response?: { data?: { error?: string } } })?.response?.data?.error || 'Не удалось удалить сообщение');
     } finally { s.setDeletingMessageId(null); }
-  }, []);
+  }, [toast]);
 
   const handleCopyMessageText = useCallback((msg: Message) => {
     s.setMessageContextMenu(null);
     const text = (msg.content ?? '').trim();
-    if (text) navigator.clipboard.writeText(text).then(() => {}, () => alert(t('messaging.copyFailed')));
-  }, [t]);
+    if (text) navigator.clipboard.writeText(text).then(() => toast.success(t('messaging.copySuccess', 'Скопировано')), () => toast.error(t('messaging.copyFailed')));
+  }, [t, toast]);
 
   const handleReplyToMessage = useCallback((msg: Message) => {
     s.setMessageContextMenu(null); s.setReplyToMessage(msg); s.messageInputRef.current?.focus();
@@ -179,7 +185,7 @@ export function useMessagingActions(
   const handleForwardToChat = useCallback(async (toChatId: string) => {
     if (!s.forwardModal || !s.selectedAccountId || !s.selectedChat) return;
     const telegramId = s.forwardModal.telegram_message_id ? Number(s.forwardModal.telegram_message_id) : null;
-    if (telegramId == null) { alert(t('messaging.forwardError')); return; }
+    if (telegramId == null) { toast.error(t('messaging.forwardError')); return; }
     s.setForwardingToChatId(toChatId);
     try {
       await apiClient.post(`/api/bd-accounts/${s.selectedAccountId}/forward`, { fromChatId: s.selectedChat.channel_id, toChatId, telegramMessageId: telegramId });
@@ -187,9 +193,9 @@ export function useMessagingActions(
       if (toChatId === s.selectedChat.channel_id) await fetchMessages(s.selectedAccountId, s.selectedChat);
     } catch (err: unknown) {
       console.error('Error forwarding message:', err);
-      alert((err as { response?: { data?: { message?: string; error?: string } } })?.response?.data?.message || (err as { response?: { data?: { error?: string } } })?.response?.data?.error || t('messaging.forwardError'));
+      toast.error((err as { response?: { data?: { message?: string; error?: string } } })?.response?.data?.message || (err as { response?: { data?: { error?: string } } })?.response?.data?.error || t('messaging.forwardError'));
     } finally { s.setForwardingToChatId(null); }
-  }, [s.forwardModal, s.selectedAccountId, s.selectedChat, fetchMessages, t]);
+  }, [s.forwardModal, s.selectedAccountId, s.selectedChat, fetchMessages, t, toast]);
 
   // ─── Chat actions ────────────────────────────────────────────────
   const handlePinChat = useCallback(async (chat: Chat) => {
@@ -223,9 +229,9 @@ export function useMessagingActions(
       if (s.selectedChat?.channel_id === chat.channel_id) { s.setSelectedChat(null); s.setMessages([]); }
     } catch (err: unknown) {
       console.error('Error removing chat:', err);
-      alert((err as { response?: { data?: { message?: string; error?: string } } })?.response?.data?.message || (err as { response?: { data?: { error?: string } } })?.response?.data?.error || t('messaging.deleteChatError'));
+      toast.error((err as { response?: { data?: { message?: string; error?: string } } })?.response?.data?.message || (err as { response?: { data?: { error?: string } } })?.response?.data?.error || t('messaging.deleteChatError'));
     }
-  }, [s.selectedAccountId, s.selectedChat, t]);
+  }, [s.selectedAccountId, s.selectedChat, t, toast]);
 
   // ─── Folder actions ──────────────────────────────────────────────
   const chatFolderIds = useCallback((c: Chat) => (c.folder_ids && c.folder_ids.length > 0 ? c.folder_ids : (c.folder_id != null ? [Number(c.folder_id)] : [])), []);
@@ -237,16 +243,23 @@ export function useMessagingActions(
     const newIds = hasFolder ? current.filter((id) => id !== folderId) : [...current, folderId];
     try {
       await apiClient.patch(`/api/bd-accounts/${s.selectedAccountId}/chats/${chat.channel_id}/folder`, { folder_ids: newIds });
-      s.setChats((prev) => prev.map((c) => c.channel_id === chat.channel_id ? { ...c, folder_ids: newIds, folder_id: newIds[0] ?? null } : c));
+      const updated = { ...chat, folder_ids: newIds, folder_id: newIds[0] ?? null };
+      s.setChats((prev) => prev.map((c) => c.channel_id === chat.channel_id ? updated : c));
+      s.setChatContextMenu((prev) =>
+        prev?.chat.channel_id === chat.channel_id ? { ...prev, chat: updated } : prev
+      );
     } catch (err: unknown) { console.error('Error updating chat folders:', err); }
   }, [s.selectedAccountId, chatFolderIds]);
 
   const handleChatFoldersClear = useCallback(async (chat: Chat) => {
     if (!s.selectedAccountId) return;
-    s.setChatContextMenu(null);
     try {
       await apiClient.patch(`/api/bd-accounts/${s.selectedAccountId}/chats/${chat.channel_id}/folder`, { folder_ids: [] });
-      s.setChats((prev) => prev.map((c) => c.channel_id === chat.channel_id ? { ...c, folder_ids: [], folder_id: null } : c));
+      const updated = { ...chat, folder_ids: [], folder_id: null };
+      s.setChats((prev) => prev.map((c) => c.channel_id === chat.channel_id ? updated : c));
+      s.setChatContextMenu((prev) =>
+        prev?.chat.channel_id === chat.channel_id ? { ...prev, chat: updated } : prev
+      );
     } catch (err: unknown) { console.error('Error clearing chat folders:', err); }
   }, [s.selectedAccountId]);
 
@@ -304,9 +317,9 @@ export function useMessagingActions(
       s.setShowEditNameModal(false);
     } catch (err: unknown) {
       console.error('Error updating contact name:', err);
-      alert((err as { response?: { data?: { error?: string } } })?.response?.data?.error || 'Не удалось сохранить имя');
+      toast.error((err as { response?: { data?: { error?: string } } })?.response?.data?.error || 'Не удалось сохранить имя');
     } finally { s.setSavingDisplayName(false); }
-  }, [s.selectedChat, s.editDisplayNameValue]);
+  }, [s.selectedChat, s.editDisplayNameValue, toast]);
 
   // ─── Lead panel ──────────────────────────────────────────────────
   const setLeadPanelOpen = useCallback((open: boolean) => {
@@ -329,8 +342,8 @@ export function useMessagingActions(
   // ─── Stub handlers ───────────────────────────────────────────────
   const handleVoiceMessage = useCallback(() => {
     s.setIsRecording(true);
-    setTimeout(() => { s.setIsRecording(false); alert('Голосовое сообщение записано (заглушка)'); }, 2000);
-  }, []);
+    setTimeout(() => { s.setIsRecording(false); toast.info('Голосовое сообщение записано (заглушка)'); }, 2000);
+  }, [toast]);
   const handleAttachFile = useCallback(() => { s.setShowAttachMenu(false); s.fileInputRef.current?.click(); }, []);
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -474,6 +487,11 @@ export function useMessagingActions(
   const unpinnedChats = useMemo(() => filteredChats.filter((c) => !pinnedSet.has(c.channel_id)), [filteredChats, pinnedSet]);
   const displayChats = useMemo(() => [...pinnedChatsOrdered, ...unpinnedChats], [pinnedChatsOrdered, unpinnedChats]);
 
+  const getChatNameDisplay = useCallback(
+    (chat: Chat) => getChatNameUniqueInList(chat, displayChats, getChatNameWithOverrides),
+    [displayChats, getChatNameWithOverrides],
+  );
+
   const filteredAccounts = useMemo(() => {
     const q = s.accountSearch.toLowerCase().trim();
     if (!q) return s.accounts;
@@ -487,7 +505,7 @@ export function useMessagingActions(
   }, [s.accounts, s.accountSearch]);
 
   return {
-    hasMoreMessages, selectedAccount, isSelectedAccountMine, getChatNameWithOverrides,
+    hasMoreMessages, selectedAccount, isSelectedAccountMine, getChatNameWithOverrides, getChatNameDisplay,
     scrollToBottom, scrollToLastMessage, scrollToMessageByTelegramId,
     loadOlderMessages, handleSendMessage,
     handleReaction, handleDeleteMessage, handleCopyMessageText,

@@ -42,6 +42,8 @@ export function chatsRouter({ pool, log }: Deps): Router {
           c.display_name,
           c.username,
           COALESCE(
+            CASE WHEN s.peer_type IN ('chat','channel') AND NULLIF(TRIM(COALESCE(s.title,'')),'') IS NOT NULL THEN NULLIF(TRIM(s.title),'') ELSE NULL END,
+            CASE WHEN s.peer_type IN ('chat','channel') AND NULLIF(TRIM(COALESCE(s.title,'')),'') IS NULL THEN 'Chat ' || s.telegram_chat_id::text ELSE NULL END,
             CASE WHEN c.telegram_id IS DISTINCT FROM a.telegram_id THEN c.display_name ELSE NULL END,
             CASE WHEN c.telegram_id IS DISTINCT FROM a.telegram_id
                  AND NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), '') IS NOT NULL
@@ -93,7 +95,13 @@ export function chatsRouter({ pool, log }: Deps): Router {
         ORDER BY msg.last_message_at DESC NULLS LAST, s.telegram_chat_id
       `;
       const result = await pool.query(query, params);
-      return res.json(result.rows);
+      const rows = result.rows as { name?: string; channel_id?: string; peer_type?: string; account_name?: string }[];
+      for (const r of rows) {
+        if (r.peer_type === 'user' && r.account_name && typeof r.name === 'string' && r.name.trim() === String(r.account_name).trim()) {
+          r.name = r.channel_id ?? r.name;
+        }
+      }
+      return res.json(rows);
     }
 
     if (channel) params.push(channel);
@@ -126,6 +134,8 @@ export function chatsRouter({ pool, log }: Deps): Router {
         c.display_name,
         c.username,
         COALESCE(
+          CASE WHEN s.peer_type IN ('chat','channel') AND NULLIF(TRIM(COALESCE(s.title,'')),'') IS NOT NULL THEN NULLIF(TRIM(s.title),'') ELSE NULL END,
+          CASE WHEN s.peer_type IN ('chat','channel') AND NULLIF(TRIM(COALESCE(s.title,'')),'') IS NULL THEN 'Chat ' || m.channel_id ELSE NULL END,
           CASE WHEN c.telegram_id IS DISTINCT FROM ba.telegram_id THEN c.display_name ELSE NULL END,
           CASE WHEN c.telegram_id IS DISTINCT FROM ba.telegram_id
                AND NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), '') IS NOT NULL
@@ -173,7 +183,13 @@ export function chatsRouter({ pool, log }: Deps): Router {
     `;
 
     const result = await pool.query(query, params);
-    res.json(result.rows);
+    const rows = result.rows as { name?: string; channel_id?: string; peer_type?: string; account_name?: string }[];
+    for (const r of rows) {
+      if (r.peer_type === 'user' && r.account_name && typeof r.name === 'string' && r.name.trim() === String(r.account_name).trim()) {
+        r.name = r.channel_id ?? r.name;
+      }
+    }
+    res.json(rows);
   }));
 
   // GET /search — search chats by name

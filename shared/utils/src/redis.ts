@@ -48,6 +48,20 @@ export class RedisClient {
     await this.client.del(key);
   }
 
+  /** Acquire a distributed lock: SET key value NX EX ttlSeconds. Returns true if lock acquired. */
+  async tryLock(key: string, value: string, ttlSeconds: number): Promise<boolean> {
+    const result = await this.client.set(key, value, 'EX', ttlSeconds, 'NX');
+    return result === 'OK';
+  }
+
+  /** Refresh lock TTL only if we still own it (key value equals expected). Returns true if refreshed. */
+  async refreshLock(key: string, expectedValue: string, ttlSeconds: number): Promise<boolean> {
+    const cur = await this.client.get(key);
+    if (cur !== expectedValue) return false;
+    await this.client.setex(key, ttlSeconds, expectedValue);
+    return true;
+  }
+
   async exists(key: string): Promise<boolean> {
     const result = await this.client.exists(key);
     return result === 1;

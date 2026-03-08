@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 import { randomBytes } from 'crypto';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, canPermission, requireUser, AppError, ErrorCodes } from '@getsale/service-core';
-import { auditLog, getClientIp, normalizeRole } from '../helpers';
+import { auditLog, getClientIp, normalizeRole, getRoleLevel } from '../helpers';
 
 interface Deps {
   pool: Pool;
@@ -65,6 +65,7 @@ export function invitesRouter({ pool }: Deps): Router {
 export function inviteLinksRouter({ pool }: Deps): Router {
   const router = Router();
   router.use(requireUser());
+  const checkPermission = canPermission(pool);
 
   router.get('/', asyncHandler(async (req, res) => {
     const user = req.user;
@@ -85,8 +86,15 @@ export function inviteLinksRouter({ pool }: Deps): Router {
 
   router.post('/', asyncHandler(async (req, res) => {
     const user = req.user;
+    const allowed = await checkPermission(user.role, 'invite_links', 'create');
+    if (!allowed) {
+      throw new AppError(403, 'Only owner or admin can create invite links', ErrorCodes.FORBIDDEN);
+    }
     const { role: linkRole = 'bidi', expiresInDays = 7 } = req.body;
     const role = normalizeRole(linkRole);
+    if (getRoleLevel(role) > getRoleLevel(user.role)) {
+      throw new AppError(403, 'Cannot create invite link with role higher than your own', ErrorCodes.FORBIDDEN);
+    }
     const token = randomBytes(32).toString('hex');
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + Number(expiresInDays) || 7);

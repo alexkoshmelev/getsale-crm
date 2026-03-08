@@ -73,6 +73,7 @@ async function main() {
 
           const draft = {
             id: crypto.randomUUID(),
+            organizationId: orgId,
             contactId: data.contactId,
             content: completion.choices[0].message.content || '',
             status: AIDraftStatus.GENERATED,

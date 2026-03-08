@@ -1,18 +1,43 @@
 import express from 'express';
 import { randomUUID } from 'crypto';
+import jwt from 'jsonwebtoken';
+import cookieParser from 'cookie-parser';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { RedisClient } from '@getsale/utils';
 import { UserRole } from '@getsale/types';
 
 const CORRELATION_HEADER = 'x-correlation-id';
 
-/** Auth service response shape */
-interface AuthUserData {
-  id: string;
-  email: string;
-  organization_id?: string;
-  organizationId?: string;
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value || value.trim() === '') {
+    throw new Error(`Missing required environment variable: ${name}. Set it before starting the API gateway.`);
+  }
+  return value.trim();
+}
+
+const JWT_SECRET = requireEnv('JWT_SECRET');
+const ACCESS_TOKEN_COOKIE = 'access_token';
+const INTERNAL_AUTH_HEADER = 'x-internal-auth';
+const INTERNAL_AUTH_SECRET = process.env.INTERNAL_AUTH_SECRET?.trim() || '';
+
+/** Fallback: parse access_token from Cookie header if cookieParser didn't (e.g. edge cases) */
+function getAccessTokenFromRequest(req: express.Request): string | undefined {
+  const fromCookie = req.cookies?.[ACCESS_TOKEN_COOKIE];
+  if (fromCookie && typeof fromCookie === 'string') return fromCookie;
+  const cookieHeader = req.headers.cookie;
+  if (typeof cookieHeader !== 'string') return undefined;
+  const match = cookieHeader.match(new RegExp(`(?:^|;)\\s*${ACCESS_TOKEN_COOKIE}=([^;]*)`));
+  return match ? decodeURIComponent(match[1].trim()) : undefined;
+}
+
+/** JWT access token payload (must match auth-service signAccessToken shape) */
+interface JwtPayload {
+  userId: string;
+  organizationId: string;
   role: UserRole;
+  iat?: number;
+  exp?: number;
 }
 
 const app = express();
@@ -34,13 +59,59 @@ const ANALYTICS_SERVICE = process.env.ANALYTICS_SERVICE_URL || 'http://localhost
 const TEAM_SERVICE = process.env.TEAM_SERVICE_URL || 'http://localhost:3011';
 const CAMPAIGN_SERVICE = process.env.CAMPAIGN_SERVICE_URL || 'http://localhost:3012';
 
-// CORS middleware for API Gateway
+// CORS: require explicit origin in production to avoid allowing any origin
+const corsOriginEnv = process.env.CORS_ORIGIN;
+if (process.env.NODE_ENV === 'production' && (!corsOriginEnv || corsOriginEnv.trim() === '')) {
+  throw new Error('CORS_ORIGIN must be set in production. Set it before starting the API gateway.');
+}
+const allowedOrigins = corsOriginEnv ? corsOriginEnv.split(',').map(o => o.trim()).filter(Boolean) : [];
+
+const DEFAULT_ORIGIN = process.env.FRONTEND_ORIGIN?.trim() || 'http://localhost:3000';
+
+/** Valid origin: http(s)://hostname with optional port. Rejects malformed values (e.g. typos like localhost:31/3). */
+function isValidOrigin(origin: string): boolean {
+  if (!origin || typeof origin !== 'string') return false;
+  const o = origin.trim();
+  if (!o) return false;
+  try {
+    const u = new URL(o);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    if (!u.hostname) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** With credentials: true we must never use '*'; browser will block. Return concrete origin that matches the request so the browser accepts Set-Cookie. */
+function resolveOrigin(reqOrigin: string | undefined): string {
+  const raw = typeof reqOrigin === 'string' ? reqOrigin.trim() : '';
+  const fromRequest = raw && isValidOrigin(raw) ? raw : '';
+
+  if (allowedOrigins.length > 0) {
+    if (fromRequest && allowedOrigins.includes(fromRequest)) return fromRequest;
+    // Dev: if request is from localhost/127.0.0.1, reflect it so any localhost port works (e.g. frontend on 3000 with CORS_ORIGIN=5173)
+    if (process.env.NODE_ENV !== 'production' && fromRequest) {
+      try {
+        const u = new URL(fromRequest);
+        if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') return fromRequest;
+      } catch {
+        /* fall through */
+      }
+    }
+    return allowedOrigins[0];
+  }
+  if (fromRequest) return fromRequest;
+  return DEFAULT_ORIGIN;
+}
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+  const origin = resolveOrigin(req.headers.origin);
+  res.header('Access-Control-Allow-Origin', origin);
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.header('Access-Control-Allow-Credentials', 'true');
-  
+
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
@@ -68,9 +139,19 @@ function addCorrelationToProxyReq(proxyReq: any, req: express.Request) {
   const id = (req as any).correlationId;
   if (id) proxyReq.setHeader(CORRELATION_HEADER, id);
 }
+
+function addInternalAuthToProxyReq(proxyReq: any) {
+  if (INTERNAL_AUTH_SECRET) proxyReq.setHeader(INTERNAL_AUTH_HEADER, INTERNAL_AUTH_SECRET);
+}
 function addCorrelationToResponse(res: express.Response, req: express.Request) {
   const id = (req as any).correlationId;
   if (id) res.setHeader(CORRELATION_HEADER, id);
+}
+
+function addCorsToProxyRes(proxyRes: { headers: Record<string, string | string[] | undefined> }, req: express.Request) {
+  const origin = resolveOrigin(req.headers.origin);
+  proxyRes.headers['access-control-allow-origin'] = origin;
+  proxyRes.headers['access-control-allow-credentials'] = 'true';
 }
 
 // Health check (PHASE 2.9: include correlation id in response when present)
@@ -79,62 +160,38 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'api-gateway' });
 });
 
-// Auth middleware
-async function authenticate(req: express.Request, res: express.Response, next: express.NextFunction) {
+app.use(cookieParser());
+
+// Auth middleware — local JWT verification; token from httpOnly cookie or Authorization header
+function authenticate(req: express.Request, res: express.Response, next: express.NextFunction) {
   try {
-    const authHeader = req.headers.authorization;
-    console.log(`[API Gateway] Auth check for ${req.method} ${req.url}`);
-    console.log(`[API Gateway] Authorization header: ${authHeader ? 'present' : 'missing'}`);
-    
-    if (!authHeader) {
-      console.log(`[API Gateway] ❌ No authorization header`);
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const token = authHeader.replace('Bearer ', '');
+    const token =
+      getAccessTokenFromRequest(req) ??
+      req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
     if (!token) {
-      console.log(`[API Gateway] ❌ No token in authorization header`);
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    console.log(`[API Gateway] Verifying token with auth service...`);
-    // Verify token with auth service
-    let response;
+    let payload: JwtPayload;
     try {
-      response = await fetch(`${AUTH_SERVICE}/api/auth/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
-      });
-    } catch (fetchError: any) {
-      console.error(`[API Gateway] ❌ Failed to connect to auth service:`, fetchError.message);
-      return res.status(503).json({ error: 'Auth service unavailable' });
+      payload = jwt.verify(token, JWT_SECRET) as JwtPayload;
+    } catch (_err) {
+      return res.status(401).json({ error: 'Invalid or expired token' });
     }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.log(`[API Gateway] ❌ Token verification failed: ${response.status} ${response.statusText}`);
-      console.log(`[API Gateway] Error details: ${errorText}`);
-      return res.status(401).json({ error: 'Invalid token' });
+    if (!payload.userId || !payload.organizationId) {
+      return res.status(401).json({ error: 'Invalid token payload' });
     }
 
-    const userData = (await response.json()) as AuthUserData;
-    console.log(`[API Gateway] ✅ Token verified, user data:`, JSON.stringify(userData));
-    
-    // Map user data to expected format
-    const user = {
-      id: userData.id,
-      email: userData.email,
-      organizationId: userData.organization_id || userData.organizationId,
-      role: userData.role,
+    (req as any).user = {
+      id: payload.userId,
+      organizationId: payload.organizationId,
+      role: (payload.role as UserRole) || UserRole.VIEWER,
     };
-    
-    console.log(`[API Gateway] Mapped user:`, JSON.stringify(user));
-    (req as any).user = user;
     next();
-  } catch (error: any) {
-    console.error(`[API Gateway] ❌ Authentication error:`, error.message);
-    res.status(500).json({ error: 'Authentication failed' });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Authentication failed';
+    res.status(500).json({ error: msg });
   }
 }
 
@@ -167,7 +224,9 @@ async function rateLimit(req: express.Request, res: express.Response, next: expr
   next();
 }
 
-// Proxy configurations
+// Proxy configurations — every proxy MUST use addCorsToProxyRes(proxyRes, req) in onProxyRes so the
+// response forwarded to the browser has valid CORS (concrete origin + credentials). Setting only res.setHeader
+// can be overwritten when the proxy pipes the backend response to the client.
 const authProxy = createProxyMiddleware({
   target: AUTH_SERVICE,
   changeOrigin: true,
@@ -177,12 +236,12 @@ const authProxy = createProxyMiddleware({
   proxyTimeout: 30000,
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
+    addInternalAuthToProxyReq(proxyReq);
     proxyReq.setTimeout(30000, () => {});
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
   onError: (err, req, res) => {
     console.error(`[API Gateway] ❌ Proxy error for ${req.url}:`, err.message);
@@ -195,22 +254,29 @@ const authProxy = createProxyMiddleware({
   },
 });
 
+function addAuthHeadersToProxyReq(proxyReq: any, req: express.Request) {
+  const user = (req as any).user;
+  if (user?.id && user?.organizationId) {
+    proxyReq.setHeader('X-User-Id', user.id);
+    proxyReq.setHeader('X-Organization-Id', user.organizationId);
+    if (user.role) proxyReq.setHeader('X-User-Role', user.role);
+  }
+  const token = getAccessTokenFromRequest(req) ?? req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
+  if (token) proxyReq.setHeader('Authorization', `Bearer ${token}`);
+}
+
 const crmProxy = createProxyMiddleware({
   target: CRM_SERVICE,
   changeOrigin: true,
   pathRewrite: { '^/api/crm': '/api/crm' },
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
-    const user = (req as any).user;
-    if (user && user.id && user.organizationId) {
-      proxyReq.setHeader('X-User-Id', user.id);
-      proxyReq.setHeader('X-Organization-Id', user.organizationId);
-    }
+    addInternalAuthToProxyReq(proxyReq);
+    addAuthHeadersToProxyReq(proxyReq, req);
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
 });
 
@@ -220,17 +286,12 @@ const messagingProxy = createProxyMiddleware({
   pathRewrite: { '^/api/messaging': '/api/messaging' },
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
-    const user = (req as any).user;
-    if (user && user.id && user.organizationId) {
-      proxyReq.setHeader('X-User-Id', user.id);
-      proxyReq.setHeader('X-Organization-Id', user.organizationId);
-      if (user.role) proxyReq.setHeader('X-User-Role', user.role);
-    }
+    addInternalAuthToProxyReq(proxyReq);
+    addAuthHeadersToProxyReq(proxyReq, req);
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
 });
 
@@ -240,16 +301,12 @@ const aiProxy = createProxyMiddleware({
   pathRewrite: { '^/api/ai': '/api/ai' },
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
-    const user = (req as any).user;
-    if (user && user.id && user.organizationId) {
-      proxyReq.setHeader('X-User-Id', user.id);
-      proxyReq.setHeader('X-Organization-Id', user.organizationId);
-    }
+    addInternalAuthToProxyReq(proxyReq);
+    addAuthHeadersToProxyReq(proxyReq, req);
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
 });
 
@@ -260,11 +317,11 @@ const inviteProxy = createProxyMiddleware({
   pathRewrite: { '^/api/invite': '/api/invite' },
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
+    addInternalAuthToProxyReq(proxyReq);
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
 });
 
@@ -286,16 +343,12 @@ const userProxy = createProxyMiddleware({
   pathRewrite: { '^/api/users': '/api/users' },
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
-    const user = (req as any).user;
-    if (user && user.id && user.organizationId) {
-      proxyReq.setHeader('X-User-Id', user.id);
-      proxyReq.setHeader('X-Organization-Id', user.organizationId);
-    }
+    addInternalAuthToProxyReq(proxyReq);
+    addAuthHeadersToProxyReq(proxyReq, req);
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
 });
 
@@ -308,17 +361,12 @@ const bdAccountsProxy = createProxyMiddleware({
   logLevel: 'debug',
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
-    const user = (req as any).user;
-    if (user && user.id && user.organizationId) {
-      proxyReq.setHeader('X-User-Id', user.id);
-      proxyReq.setHeader('X-Organization-Id', user.organizationId);
-      if (user.role) proxyReq.setHeader('X-User-Role', user.role);
-    }
+    addInternalAuthToProxyReq(proxyReq);
+    addAuthHeadersToProxyReq(proxyReq, req);
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
   onError: (err, req, res) => {
     console.error(`[API Gateway] ❌ Proxy error for ${req.url}:`, err.message);
@@ -334,16 +382,12 @@ const pipelineProxy = createProxyMiddleware({
   pathRewrite: { '^/api/pipeline': '/api/pipeline' },
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
-    const user = (req as any).user;
-    if (user && user.id && user.organizationId) {
-      proxyReq.setHeader('X-User-Id', user.id);
-      proxyReq.setHeader('X-Organization-Id', user.organizationId);
-    }
+    addInternalAuthToProxyReq(proxyReq);
+    addAuthHeadersToProxyReq(proxyReq, req);
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
 });
 
@@ -353,16 +397,12 @@ const automationProxy = createProxyMiddleware({
   pathRewrite: { '^/api/automation': '/api/automation' },
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
-    const user = (req as any).user;
-    if (user && user.id && user.organizationId) {
-      proxyReq.setHeader('X-User-Id', user.id);
-      proxyReq.setHeader('X-Organization-Id', user.organizationId);
-    }
+    addInternalAuthToProxyReq(proxyReq);
+    addAuthHeadersToProxyReq(proxyReq, req);
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
 });
 
@@ -372,16 +412,12 @@ const analyticsProxy = createProxyMiddleware({
   pathRewrite: { '^/api/analytics': '/api/analytics' },
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
-    const user = (req as any).user;
-    if (user && user.id && user.organizationId) {
-      proxyReq.setHeader('X-User-Id', user.id);
-      proxyReq.setHeader('X-Organization-Id', user.organizationId);
-    }
+    addInternalAuthToProxyReq(proxyReq);
+    addAuthHeadersToProxyReq(proxyReq, req);
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
 });
 
@@ -391,17 +427,12 @@ const teamProxy = createProxyMiddleware({
   pathRewrite: { '^/api/team': '/api/team' },
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
-    const user = (req as any).user;
-    if (user && user.id && user.organizationId) {
-      proxyReq.setHeader('X-User-Id', user.id);
-      proxyReq.setHeader('X-Organization-Id', user.organizationId);
-      if (user.role) proxyReq.setHeader('X-User-Role', user.role);
-    }
+    addInternalAuthToProxyReq(proxyReq);
+    addAuthHeadersToProxyReq(proxyReq, req);
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
 });
 
@@ -413,16 +444,12 @@ const campaignProxy = createProxyMiddleware({
   pathRewrite: { '^/api/campaigns': '/api/campaigns' },
   onProxyReq: (proxyReq, req) => {
     addCorrelationToProxyReq(proxyReq, req);
-    const user = (req as any).user;
-    if (user && user.id && user.organizationId) {
-      proxyReq.setHeader('X-User-Id', user.id);
-      proxyReq.setHeader('X-Organization-Id', user.organizationId);
-    }
+    addInternalAuthToProxyReq(proxyReq);
+    addAuthHeadersToProxyReq(proxyReq, req);
   },
   onProxyRes: (proxyRes, req, res) => {
     addCorrelationToResponse(res, req);
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    addCorsToProxyRes(proxyRes, req);
   },
 });
 

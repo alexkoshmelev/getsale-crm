@@ -1,3 +1,4 @@
+import cookieParser from 'cookie-parser';
 import { createServiceApp } from '@getsale/service-core';
 import { authRouter } from './routes/auth';
 import { organizationRouter } from './routes/organization';
@@ -11,6 +12,8 @@ async function main() {
     cors: true,
     skipUserExtract: true,
   });
+
+  ctx.app.use(cookieParser());
 
   const { pool, rabbitmq, log } = ctx;
   const deps = { pool, rabbitmq, log };

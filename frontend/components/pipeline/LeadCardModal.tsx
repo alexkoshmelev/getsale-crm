@@ -3,7 +3,8 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
-import { User, MessageSquare, ExternalLink, Loader2, Save } from 'lucide-react';
+import { MessageSquare, ExternalLink, Loader2, Save } from 'lucide-react';
+import { LeadContextAvatar } from '@/components/messaging/LeadContextAvatar';
 import { Modal } from '@/components/ui/Modal';
 import Button from '@/components/ui/Button';
 import { fetchLeadContextByLeadId, type LeadContextByLead } from '@/lib/api/messaging';
@@ -134,9 +135,12 @@ export function LeadCardModal({ leadId, open, onClose, onLeadUpdated }: LeadCard
           <>
             {/* Header */}
             <div className="flex flex-col items-center text-center pb-4 border-b border-border">
-              <div className="p-3 rounded-xl bg-primary/10 text-primary">
-                <User className="w-10 h-10" />
-              </div>
+              <LeadContextAvatar
+                contactName={context.contact_name}
+                telegramId={context.channel_id ?? context.contact_telegram_id}
+                bdAccountId={context.bd_account_id}
+                className="w-14 h-14"
+              />
               <h2 className="mt-3 font-heading text-xl font-semibold text-foreground truncate w-full px-2">
                 {context.contact_name || '—'}
               </h2>

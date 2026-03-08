@@ -1,14 +1,26 @@
 import jwt from 'jsonwebtoken';
+import { createHash } from 'crypto';
 import { Pool } from 'pg';
 import { Request } from 'express';
 import { AppError, ErrorCodes } from '@getsale/service-core';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret';
-const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'dev_refresh_secret';
+/** SHA-256 hash of refresh token for storage (never store plaintext). */
+export function hashRefreshToken(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value || value.trim() === '') {
+    throw new Error(`Missing required environment variable: ${name}. Set it before starting the service.`);
+  }
+  return value.trim();
+}
+
+const JWT_SECRET = requireEnv('JWT_SECRET');
+const JWT_REFRESH_SECRET = requireEnv('JWT_REFRESH_SECRET');
 export const JWT_EXPIRES_IN = '15m';
 export const REFRESH_EXPIRES_IN = '7d';
-
-export { JWT_SECRET, JWT_REFRESH_SECRET };
 
 export interface JwtPayload {
   userId: string;
@@ -32,9 +44,9 @@ export function verifyRefreshToken(token: string): { userId: string } {
   return jwt.verify(token, JWT_REFRESH_SECRET) as { userId: string };
 }
 
-export function extractBearerToken(req: Request): JwtPayload {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.replace('Bearer ', '');
+/** Get payload from cookie (httpOnly) or Authorization header. */
+export function extractBearerToken(req: Request, tokenFromCookie?: string | null): JwtPayload {
+  const token = tokenFromCookie ?? req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
   if (!token) throw new AppError(401, 'Unauthorized', ErrorCodes.UNAUTHORIZED);
   try {
     return verifyAccessToken(token);

@@ -10,6 +10,10 @@ import { Pagination } from '@/components/ui/Pagination';
 import { fetchPipelines, fetchStages, fetchLeads, updateLead, removeLead, type Pipeline, type Stage, type Lead } from '@/lib/api/pipeline';
 import { PipelineManageModal } from '@/components/pipeline/PipelineManageModal';
 import { LeadCardModal } from '@/components/pipeline/LeadCardModal';
+import { LeadCardPreview } from '@/components/pipeline/LeadCardPreview';
+import { LeadAvatar } from '@/components/pipeline/LeadAvatar';
+import { apiClient } from '@/lib/api/client';
+import { formatDealAmount } from '@/lib/format/currency';
 
 function leadContactName(lead: Lead): string {
   const display = (lead.display_name ?? '').trim();
@@ -60,6 +64,14 @@ export default function PipelinePage() {
   const [timelineLaneFilter, setTimelineLaneFilter] = useState<string[]>([]);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   const timelineScrolledToTodayRef = useRef(false);
+  const [firstBdAccountId, setFirstBdAccountId] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiClient.get<{ id: string }[]>('/api/bd-accounts').then((r) => {
+      const list = Array.isArray(r.data) ? r.data : [];
+      setFirstBdAccountId(list.length > 0 ? list[0].id : null);
+    }).catch(() => setFirstBdAccountId(null));
+  }, []);
 
   const loadPipelines = useCallback(async () => {
     try {
@@ -449,6 +461,12 @@ export default function PipelinePage() {
                         {t('pipeline.listColStage', 'Стадия')}
                       </th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider whitespace-nowrap">
+                        {t('pipeline.listColAmount', 'Сумма')}
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider whitespace-nowrap">
+                        {t('pipeline.listColResponsible', 'Ответственный')}
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider whitespace-nowrap">
                         {t('pipeline.listColCreatedAt', 'Дата создания')}
                       </th>
                       <th className="px-6 py-3 w-20" />
@@ -457,7 +475,7 @@ export default function PipelinePage() {
                   <tbody className="divide-y divide-border">
                     {listSlice.length === 0 ? (
                       <tr>
-                        <td colSpan={4} className="px-6 py-12 text-center">
+                        <td colSpan={6} className="px-6 py-12 text-center">
                           <p className="text-muted-foreground text-sm mb-3">{t('pipeline.noLeadsEmptyTitle', 'Нет лидов в воронке')}</p>
                           <Link href="/dashboard/crm" className="text-sm font-medium text-primary hover:underline">
                             {t('pipeline.noLeadsCta')} →
@@ -467,18 +485,28 @@ export default function PipelinePage() {
                     ) : (
                       listSlice.map((lead) => {
                         const stageColor = stages.find((s) => s.id === lead.stage_id)?.color;
+                        const amountStr = lead.revenue_amount != null && lead.revenue_amount > 0 ? formatDealAmount(lead.revenue_amount, 'EUR') : '—';
                         return (
                         <tr key={lead.id} className="hover:bg-muted/30 group" style={stageColor ? { borderLeft: `4px solid ${stageColor}` } : undefined}>
                           <td className="px-6 py-4">
-                            <Link
-                              href={`/dashboard/messaging?contactId=${lead.contact_id}`}
-                              className="font-medium text-foreground hover:underline"
-                            >
-                              {leadContactName(lead)}
-                            </Link>
+                            <div className="flex items-center gap-2 min-w-0">
+                              <LeadAvatar lead={lead} bdAccountId={firstBdAccountId} className="w-8 h-8 shrink-0" />
+                              <Link
+                                href={`/dashboard/messaging?contactId=${lead.contact_id}`}
+                                className="font-medium text-foreground hover:underline truncate"
+                              >
+                                {leadContactName(lead)}
+                              </Link>
+                            </div>
                           </td>
                           <td className="px-6 py-4 text-sm text-muted-foreground">
                             {stages.find((s) => s.id === lead.stage_id)?.name ?? '—'}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-muted-foreground whitespace-nowrap">
+                            {amountStr}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-muted-foreground truncate max-w-[140px]">
+                            {lead.responsible_email ?? '—'}
                           </td>
                           <td className="px-6 py-4 text-sm text-muted-foreground whitespace-nowrap">
                             {new Date(lead.created_at).toLocaleDateString(i18n.language || 'ru', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
@@ -642,59 +670,41 @@ export default function PipelinePage() {
                                     const stageColor = stages.find((s) => s.id === lead.stage_id)?.color;
                                     const createdDate = new Date(lead.created_at);
                                     const inFunnel = formatInFunnel(lead.created_at);
+                                    const primaryMeta = `${createdDate.toLocaleDateString(i18n.language || 'ru', { day: 'numeric', month: 'short', year: 'numeric' })} ${createdDate.toLocaleTimeString(i18n.language || 'ru', { hour: '2-digit', minute: '2-digit' })}`;
+                                    const amountFormatted = lead.revenue_amount != null && lead.revenue_amount > 0 ? formatDealAmount(lead.revenue_amount, 'EUR') : '';
                                     return (
                                       <li key={lead.id}>
-                                        <div
-                                          className="flex items-start gap-1 bg-card rounded-lg p-2.5 border border-border border-l-4 shadow-sm hover:shadow-md hover:border-primary/30 transition-shadow min-w-0"
-                                          style={stageColor ? { borderLeftColor: stageColor } : undefined}
-                                        >
-                                          <Link
-                                            href={`/dashboard/messaging?contactId=${lead.contact_id}`}
-                                            className="flex-1 min-w-0"
-                                          >
-                                            <p className="font-medium text-foreground text-sm truncate">{leadContactName(lead)}</p>
-                                            <div className="flex flex-wrap items-center gap-x-2 text-[10px] text-muted-foreground mt-1">
-                                              <span title={createdDate.toLocaleString(i18n.language || 'ru')}>
-                                                {createdDate.toLocaleDateString(i18n.language || 'ru', { day: 'numeric', month: 'short', year: 'numeric' })} {createdDate.toLocaleTimeString(i18n.language || 'ru', { hour: '2-digit', minute: '2-digit' })}
-                                              </span>
-                                              <span className={inFunnel.isLong ? 'text-amber-600 dark:text-amber-400 font-medium' : undefined} title={t('pipeline.timelineDaysInFunnelHint')}>
-                                                {inFunnel.text}
-                                              </span>
-                                            </div>
-                                          </Link>
-                                          <div className="relative shrink-0">
-                                            <button
-                                              type="button"
-                                              onClick={(e) => { e.preventDefault(); setLeadMenuId(leadMenuId === lead.id ? null : lead.id); }}
-                                              className="p-1 rounded text-muted-foreground hover:bg-accent"
-                                            >
-                                              <MoreVertical className="w-4 h-4" />
-                                            </button>
-                                            {leadMenuId === lead.id && (
-                                              <>
-                                                <div className="fixed inset-0 z-10" aria-hidden onClick={() => setLeadMenuId(null)} />
-                                                <div className="absolute right-0 top-full mt-1 py-1 rounded-lg border border-border bg-card shadow-lg z-20 min-w-[200px]">
-                                                  <button
-                                                    type="button"
-                                                    onClick={() => { setLeadCardModalLeadId(lead.id); setLeadMenuId(null); }}
-                                                    className="w-full text-left px-3 py-2 text-sm text-foreground hover:bg-accent flex items-center gap-2"
-                                                  >
-                                                    <User className="w-3.5 h-3.5" />
-                                                    {t('messaging.openLeadCard', 'Открыть карточку лида')}
-                                                  </button>
-                                                  <button
-                                                    type="button"
-                                                    onClick={() => { handleRemoveLead(lead.id); setLeadMenuId(null); }}
-                                                    className="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10 flex items-center gap-2"
-                                                  >
-                                                    <Trash2 className="w-3.5 h-3.5" />
-                                                    {t('pipeline.removeFromFunnel')}
-                                                  </button>
-                                                </div>
-                                              </>
-                                            )}
-                                          </div>
-                                        </div>
+                                        <LeadCardPreview
+                                          lead={lead}
+                                          stage={stages.find((s) => s.id === lead.stage_id)}
+                                          amountFormatted={amountFormatted}
+                                          primaryMeta={primaryMeta}
+                                          secondaryMeta={inFunnel.text}
+                                          secondaryMetaLong={inFunnel.isLong}
+                                          bdAccountId={firstBdAccountId}
+                                          layout="compact"
+                                          stageColor={stageColor ?? undefined}
+                                          menu={
+                                            <>
+                                              <button type="button" onClick={(e) => { e.preventDefault(); setLeadMenuId(leadMenuId === lead.id ? null : lead.id); }} className="p-1 rounded text-muted-foreground hover:bg-accent">
+                                                <MoreVertical className="w-4 h-4" />
+                                              </button>
+                                              {leadMenuId === lead.id && (
+                                                <>
+                                                  <div className="fixed inset-0 z-10" aria-hidden onClick={() => setLeadMenuId(null)} />
+                                                  <div className="absolute right-0 top-full mt-1 py-1 rounded-lg border border-border bg-card shadow-lg z-20 min-w-[200px]">
+                                                    <button type="button" onClick={() => { setLeadCardModalLeadId(lead.id); setLeadMenuId(null); }} className="w-full text-left px-3 py-2 text-sm text-foreground hover:bg-accent flex items-center gap-2">
+                                                      <User className="w-3.5 h-3.5" />{t('messaging.openLeadCard', 'Открыть карточку лида')}
+                                                    </button>
+                                                    <button type="button" onClick={() => { handleRemoveLead(lead.id); setLeadMenuId(null); }} className="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10 flex items-center gap-2">
+                                                      <Trash2 className="w-3.5 h-3.5" />{t('pipeline.removeFromFunnel')}
+                                                    </button>
+                                                  </div>
+                                                </>
+                                              )}
+                                            </>
+                                          }
+                                        />
                                       </li>
                                     );
                                   })}
@@ -756,9 +766,20 @@ export default function PipelinePage() {
                   {stageItems.map((lead) => {
                     const isMoving = movingLeadId === lead.id;
                     const stageColorLead = stages.find((s) => s.id === lead.stage_id)?.color;
+                    const inFunnel = formatInFunnel(lead.created_at);
+                    const amountFormatted = lead.revenue_amount != null && lead.revenue_amount > 0 ? formatDealAmount(lead.revenue_amount, 'EUR') : '';
                     return (
-                      <div
+                      <LeadCardPreview
                         key={`lead-${lead.id}`}
+                        lead={lead}
+                        stage={stages.find((s) => s.id === lead.stage_id)}
+                        amountFormatted={amountFormatted}
+                        primaryMeta={inFunnel.text}
+                        primaryMetaLong={inFunnel.isLong}
+                        bdAccountId={firstBdAccountId}
+                        leftSlot={<GripVertical className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5 cursor-grab" />}
+                        stageColor={stageColorLead ?? undefined}
+                        className={`cursor-grab active:cursor-grabbing ${draggingLeadId === lead.id ? 'opacity-50' : ''} ${isMoving ? 'animate-pulse' : ''}`}
                         draggable
                         onDragStart={(e) => {
                           setDraggingLeadId(lead.id);
@@ -770,65 +791,31 @@ export default function PipelinePage() {
                           }
                         }}
                         onDragEnd={() => setDraggingLeadId(null)}
-                        className={`bg-card rounded-lg p-3 border border-border shadow-soft cursor-grab active:cursor-grabbing flex flex-col gap-2 border-l-4 ${
-                          draggingLeadId === lead.id ? 'opacity-50' : 'hover:shadow-soft-md hover:border-primary/30'
-                        } ${isMoving ? 'animate-pulse' : ''}`}
-                        style={stageColorLead ? { borderLeftColor: stageColorLead } : { borderLeftColor: 'rgb(16 185 129 / 0.8)' }}
-                      >
-                        <div className="flex items-start gap-2 min-w-0">
-                          <GripVertical className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" />
-                          <div className="min-w-0 flex-1">
-                            <Link
-                              href={`/dashboard/messaging?contactId=${lead.contact_id}`}
-                              className="font-semibold text-foreground hover:underline block truncate text-sm"
-                            >
-                              {leadContactName(lead)}
-                            </Link>
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30 mt-1">
-                              {t('pipeline.leadCard', 'Лид')}
-                            </span>
-                          </div>
-                          <div className="relative shrink-0">
+                        menu={
+                          <>
                             <button
                               type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setLeadMenuId(leadMenuId === lead.id ? null : lead.id);
-                              }}
+                              onClick={(e) => { e.stopPropagation(); setLeadMenuId(leadMenuId === lead.id ? null : lead.id); }}
                               className="p-1 rounded text-muted-foreground hover:bg-accent"
                             >
                               <MoreVertical className="w-4 h-4" />
                             </button>
                             {leadMenuId === lead.id && (
                               <>
-                                <div
-                                  className="fixed inset-0 z-10"
-                                  aria-hidden
-                                  onClick={() => setLeadMenuId(null)}
-                                />
+                                <div className="fixed inset-0 z-10" aria-hidden onClick={() => setLeadMenuId(null)} />
                                 <div className="absolute right-0 top-full mt-1 py-1 rounded-lg border border-border bg-card shadow-lg z-20 min-w-[200px]">
-                                  <button
-                                    type="button"
-                                    onClick={() => { setLeadCardModalLeadId(lead.id); setLeadMenuId(null); }}
-                                    className="w-full text-left px-3 py-2 text-sm text-foreground hover:bg-accent flex items-center gap-2"
-                                  >
-                                    <User className="w-3.5 h-3.5" />
-                                    {t('messaging.openLeadCard', 'Открыть карточку лида')}
+                                  <button type="button" onClick={() => { setLeadCardModalLeadId(lead.id); setLeadMenuId(null); }} className="w-full text-left px-3 py-2 text-sm text-foreground hover:bg-accent flex items-center gap-2">
+                                    <User className="w-3.5 h-3.5" />{t('messaging.openLeadCard', 'Открыть карточку лида')}
                                   </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleRemoveLead(lead.id)}
-                                    className="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10 flex items-center gap-2"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                    {t('pipeline.removeFromFunnel')}
+                                  <button type="button" onClick={() => handleRemoveLead(lead.id)} className="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10 flex items-center gap-2">
+                                    <Trash2 className="w-3.5 h-3.5" />{t('pipeline.removeFromFunnel')}
                                   </button>
                                 </div>
                               </>
                             )}
-                          </div>
-                        </div>
-                      </div>
+                          </>
+                        }
+                      />
                     );
                   })}
                   {stageItems.length === 0 && (

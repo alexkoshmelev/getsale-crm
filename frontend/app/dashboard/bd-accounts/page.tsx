@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
+import { useAuthStore } from '@/lib/stores/auth-store';
 import { useWebSocketContext } from '@/lib/contexts/websocket-context';
 import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Power, PowerOff, Search, FolderOpen, ChevronRight, ChevronDown, User, RefreshCw, ShieldCheck } from 'lucide-react';
 import Button from '@/components/ui/Button';
@@ -118,8 +119,12 @@ export default function BDAccountsPage() {
   const { t } = useTranslation();
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { user: currentUser } = useAuthStore();
   const { subscribe, unsubscribe, on, off, isConnected } = useWebSocketContext();
   const [accounts, setAccounts] = useState<BDAccount[]>([]);
+  // Агент (bidi): управление только своим аккаунтом; остальные — только просмотр
+  const canManageAccount = (account: BDAccount) =>
+    (currentUser?.role?.toLowerCase() !== 'bidi') || account.is_owner === true;
   const [loading, setLoading] = useState(true);
   const [showConnectModal, setShowConnectModal] = useState(false);
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
@@ -187,36 +192,11 @@ export default function BDAccountsPage() {
     setSelectChatsSearch('');
     setLoadingDialogs(true);
     router.replace('/dashboard/bd-accounts'); // убрать query из URL
-    let skipOuterFinally = false;
     Promise.all([
-      apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders`, { timeout: 120000 }).then((res) => (res.data?.folders ?? []) as FolderWithDialogs[]),
+      apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders?refresh=1`, { timeout: 120000 }).then((res) => (res.data?.folders ?? []) as FolderWithDialogs[]),
       apiClient.get(`/api/bd-accounts/${accountId}/sync-chats`).then((res) => (Array.isArray(res.data) ? res.data : []) as SyncChatRow[]),
     ])
       .then(([folders, syncList]) => {
-        const totalDialogs = folders.reduce((sum, f) => sum + (f.dialogs?.length ?? 0), 0);
-        const needInitialLoad = folders.length === 0 || totalDialogs === 0;
-        if (needInitialLoad) {
-          skipOuterFinally = true;
-          apiClient.post(`/api/bd-accounts/${accountId}/folders-refetch`, {}, { timeout: 300000 })
-            .then(() => Promise.all([
-              apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders`, { timeout: 120000 }),
-              apiClient.get(`/api/bd-accounts/${accountId}/sync-chats`),
-            ]))
-            .then(([foldersRes, syncRes]) => {
-              const newFolders = (foldersRes.data?.folders ?? []) as FolderWithDialogs[];
-              const newSyncList = (Array.isArray(syncRes.data) ? syncRes.data : []) as SyncChatRow[];
-              setDialogsByFolders(newFolders);
-              setSyncChatsList(newSyncList);
-              setExpandedFolderId(null);
-              setSelectedChatIds(new Set(newSyncList.map((c) => String(c.telegram_chat_id))));
-            })
-            .catch((e) => {
-              console.error('Initial folders refetch failed:', e);
-              setError(e?.response?.data?.message || e?.response?.data?.error || 'Не удалось загрузить папки и чаты');
-            })
-            .finally(() => setLoadingDialogs(false));
-          return;
-        }
         setDialogsByFolders(folders);
         setSyncChatsList(syncList);
         setExpandedFolderId(null);
@@ -230,7 +210,7 @@ export default function BDAccountsPage() {
         setSelectedChatIds(new Set());
         setError(e?.response?.data?.error || 'Ошибка загрузки');
       })
-      .finally(() => { if (!skipOuterFinally) setLoadingDialogs(false); });
+      .finally(() => setLoadingDialogs(false));
   }, [searchParams, router]);
 
   // Subscribe to bd-account room for sync progress when in select-chats step
@@ -297,9 +277,8 @@ export default function BDAccountsPage() {
   const fetchAccounts = async () => {
     try {
       const response = await apiClient.get('/api/bd-accounts');
-      // На странице BD Аккаунтов показываем только свои (управление своими Telegram-аккаунтами)
-      const myAccounts = Array.isArray(response.data) ? response.data.filter((a: BDAccount) => a.is_owner === true) : [];
-      setAccounts(myAccounts);
+      // Показываем все аккаунты организации; для роли Агент (bidi) управление только своими (см. canManageAccount ниже)
+      setAccounts(Array.isArray(response.data) ? response.data : []);
     } catch (error: any) {
       console.error('Error fetching accounts:', error);
       setError(error.response?.data?.error || 'Ошибка загрузки аккаунтов');
@@ -500,18 +479,8 @@ export default function BDAccountsPage() {
             setLoadingDialogs(true);
             setSelectChatsSearch('');
             const accountId = data.accountId;
-            apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders`, { timeout: 120000 })
-              .then((res) => {
-                const folders = (res.data?.folders ?? []) as FolderWithDialogs[];
-                const totalDialogs = folders.reduce((sum, f) => sum + (f.dialogs?.length ?? 0), 0);
-                const needInitialLoad = folders.length === 0 || totalDialogs === 0;
-                if (needInitialLoad) {
-                  return apiClient.post(`/api/bd-accounts/${accountId}/folders-refetch`, {}, { timeout: 300000 })
-                    .then(() => apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders`, { timeout: 120000 }))
-                    .then((r) => (r.data?.folders ?? []) as FolderWithDialogs[]);
-                }
-                return folders;
-              })
+            apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders?refresh=1`, { timeout: 120000 })
+              .then((res) => (res.data?.folders ?? []) as FolderWithDialogs[])
               .then((folders) => {
                 setDialogsByFolders(folders);
                 setSyncChatsList([]);
@@ -740,34 +709,38 @@ export default function BDAccountsPage() {
               >
                 <Settings className="w-4 h-4" />
               </Button>
-              {account.is_active ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleDisconnect(account.id)}
-                  title="Отключить (временно)"
-                >
-                  <PowerOff className="w-4 h-4" />
-                </Button>
-              ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleEnable(account.id)}
-                  title="Включить"
-                >
-                  <Power className="w-4 h-4" />
-                </Button>
+              {canManageAccount(account) && (
+                <>
+                  {account.is_active ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleDisconnect(account.id)}
+                      title="Отключить (временно)"
+                    >
+                      <PowerOff className="w-4 h-4" />
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleEnable(account.id)}
+                      title="Включить"
+                    >
+                      <Power className="w-4 h-4" />
+                    </Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleDelete(account.id)}
+                    className="text-red-600 hover:text-red-700"
+                    title="Удалить аккаунт"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                </>
               )}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => handleDelete(account.id)}
-                className="text-red-600 hover:text-red-700"
-                title="Удалить аккаунт"
-              >
-                <Trash2 className="w-4 h-4" />
-              </Button>
             </div>
           </Card>
         ))}
@@ -1085,8 +1058,7 @@ export default function BDAccountsPage() {
                             setRefetchFoldersLoading(true);
                             setError(null);
                             try {
-                              await apiClient.post(`/api/bd-accounts/${connectingAccountId}/folders-refetch`);
-                              const res = await apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders`, { timeout: 120000 });
+                              const res = await apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?refresh=1`, { timeout: 120000 });
                               setDialogsByFolders((res.data?.folders ?? []) as FolderWithDialogs[]);
                             } catch (err: any) {
                               setError(err?.response?.data?.message || err?.response?.data?.error || 'Не удалось обновить папки и чаты');

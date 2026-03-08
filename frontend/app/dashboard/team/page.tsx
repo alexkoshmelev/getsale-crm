@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import axios from 'axios';
 import { UserPlus, Users, Link2, Copy, Loader2, Trash2 } from 'lucide-react';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import { canManageTeam } from '@/lib/permissions';
@@ -11,8 +10,7 @@ import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { EmptyState } from '@/components/ui/EmptyState';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+import { apiClient } from '@/lib/api/client';
 
 interface TeamMember {
   id?: string;
@@ -84,7 +82,7 @@ export default function TeamPage() {
   const fetchPendingInvitations = async () => {
     setPendingInvitationsLoading(true);
     try {
-      const response = await axios.get(`${API_URL}/api/team/invitations`);
+      const response = await apiClient.get('/api/team/invitations');
       setPendingInvitations(Array.isArray(response.data) ? response.data : []);
     } catch (error) {
       console.error('Error fetching pending invitations:', error);
@@ -97,7 +95,7 @@ export default function TeamPage() {
   const fetchInviteLinks = async () => {
     setInviteLinksLoading(true);
     try {
-      const response = await axios.get(`${API_URL}/api/team/invite-links`);
+      const response = await apiClient.get('/api/team/invite-links');
       setInviteLinks(Array.isArray(response.data) ? response.data : []);
     } catch (error) {
       console.error('Error fetching invite links:', error);
@@ -109,7 +107,7 @@ export default function TeamPage() {
 
   const fetchMembers = async () => {
     try {
-      const response = await axios.get(`${API_URL}/api/team/members`);
+      const response = await apiClient.get('/api/team/members');
       const list = Array.isArray(response.data) ? response.data : [];
       // Deduplicate by user_id (backend returns one per user; keep as safety if old data)
       const seen = new Set<string>();
@@ -132,7 +130,7 @@ export default function TeamPage() {
     e.preventDefault();
     setInviting(true);
     try {
-      await axios.post(`${API_URL}/api/team/members/invite`, {
+      await apiClient.post('/api/team/members/invite', {
         email: inviteEmail,
         role: inviteRole,
         teamId: 'default',
@@ -152,7 +150,7 @@ export default function TeamPage() {
   const handleCreateInviteLink = async () => {
     setCreatingLink(true);
     try {
-      await axios.post(`${API_URL}/api/team/invite-links`, { expiresInDays: 7 });
+      await apiClient.post('/api/team/invite-links', { expiresInDays: 7 });
       await fetchInviteLinks();
     } catch (error) {
       console.error('Error creating invite link:', error);
@@ -179,7 +177,7 @@ export default function TeamPage() {
   const handleRevokeInviteLink = async (id: string) => {
     setRevokingId(id);
     try {
-      await axios.delete(`${API_URL}/api/team/invite-links/${id}`);
+      await apiClient.delete(`/api/team/invite-links/${id}`);
       setInviteLinks((prev) => prev.filter((l) => l.id !== id));
     } catch (error) {
       console.error('Error revoking invite link:', error);
@@ -191,7 +189,7 @@ export default function TeamPage() {
   const handleRevokeInvitation = async (id: string) => {
     setRevokingInvitationId(id);
     try {
-      await axios.delete(`${API_URL}/api/team/invitations/${id}`);
+      await apiClient.delete(`/api/team/invitations/${id}`);
       setPendingInvitations((prev) => prev.filter((inv) => inv.id !== id));
     } catch (error) {
       console.error('Error revoking invitation:', error);
@@ -205,7 +203,7 @@ export default function TeamPage() {
     if (!id) return;
     setUpdatingRoleId(id);
     try {
-      await axios.put(`${API_URL}/api/team/members/${id}/role`, { role: newRole });
+      await apiClient.put(`/api/team/members/${id}/role`, { role: newRole });
       await fetchMembers();
     } catch (error) {
       console.error('Error updating member role:', error);

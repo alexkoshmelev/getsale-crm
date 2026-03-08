@@ -5,7 +5,7 @@ import { Counter } from 'prom-client';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes, ServiceHttpClient } from '@getsale/service-core';
+import { asyncHandler, AppError, ErrorCodes } from '@getsale/service-core';
 
 interface Deps {
   pool: Pool;
@@ -13,10 +13,9 @@ interface Deps {
   log: Logger;
   eventPublishTotal: Counter;
   eventPublishFailedTotal: Counter;
-  crmClient: ServiceHttpClient;
 }
 
-export function leadsRouter({ pool, rabbitmq, log, eventPublishTotal, eventPublishFailedTotal, crmClient }: Deps): Router {
+export function leadsRouter({ pool, rabbitmq, log, eventPublishTotal, eventPublishFailedTotal }: Deps): Router {
   const router = Router();
 
   // Pipelines that contain a contact
@@ -278,40 +277,6 @@ export function leadsRouter({ pool, rabbitmq, log, eventPublishTotal, eventPubli
     const result = await pool.query('DELETE FROM leads WHERE id = $1 AND organization_id = $2 RETURNING id', [id, organizationId]);
     if (result.rows.length === 0) throw new AppError(404, 'Lead not found', ErrorCodes.NOT_FOUND);
     res.status(204).send();
-  }));
-
-  /**
-   * @deprecated Proxy deal stage changes to CRM. Use PATCH /api/crm/deals/:id/stage directly.
-   */
-  router.put('/clients/:clientId/stage', asyncHandler(async (req, res) => {
-    const { stageId, dealId, reason, autoMoved } = req.body;
-    const { clientId } = req.params;
-
-    const dealIdFromBody = dealId || null;
-    const dealIdFromPath = dealIdFromBody
-      ? null
-      : (await pool.query('SELECT id FROM deals WHERE id = $1', [clientId])).rows[0]?.id || null;
-    const resolvedDealId = dealIdFromBody || dealIdFromPath;
-
-    if (!resolvedDealId || !stageId) {
-      throw new AppError(400, 'Deal stage changes must be done via CRM. Use PATCH /api/crm/deals/:id/stage', ErrorCodes.BAD_REQUEST);
-    }
-
-    const dealRow = await pool.query('SELECT organization_id FROM deals WHERE id = $1', [resolvedDealId]);
-    if (dealRow.rows.length === 0) throw new AppError(404, 'Deal not found', ErrorCodes.NOT_FOUND);
-
-    const organizationId = dealRow.rows[0].organization_id;
-    const userRow = await pool.query('SELECT id FROM users WHERE organization_id = $1 LIMIT 1', [organizationId]);
-    const userId = userRow.rows[0]?.id || '';
-
-    const data = await crmClient.patch(`/api/crm/deals/${resolvedDealId}/stage`, {
-      stageId, reason, autoMoved: !!autoMoved,
-    }, {
-      'X-User-Id': userId,
-      'X-Organization-Id': organizationId,
-    });
-
-    res.json(data);
   }));
 
   return router;

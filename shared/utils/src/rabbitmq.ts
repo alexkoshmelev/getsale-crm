@@ -6,7 +6,10 @@ type Channel = Awaited<ReturnType<Connection['createChannel']>>;
 
 export class RabbitMQClient {
   private connection: Connection | null = null;
-  private channel: Channel | null = null;
+  /** Dedicated channel for publishing (events, DLQ, retries) — avoids head-of-line blocking on consumer. */
+  private publishChannel: Channel | null = null;
+  /** Dedicated channel for consuming only (ack, prefetch). */
+  private consumeChannel: Channel | null = null;
   private url: string;
 
   constructor(url: string) {
@@ -14,7 +17,7 @@ export class RabbitMQClient {
   }
 
   isConnected(): boolean {
-    return this.connection != null && this.channel != null;
+    return this.connection != null && this.publishChannel != null && this.consumeChannel != null;
   }
 
   async connect(retries: number = 10, initialDelay: number = 1000): Promise<void> {
@@ -25,8 +28,9 @@ export class RabbitMQClient {
           connection_timeout: 10000,
         });
         this.connection = conn;
-        this.channel = await conn.createChannel();
-        
+        this.publishChannel = await conn.createChannel();
+        this.consumeChannel = await conn.createChannel();
+
         this.connection.on('error', (err) => {
           console.error('RabbitMQ connection error:', err);
         });
@@ -37,34 +41,34 @@ export class RabbitMQClient {
 
         console.log('Successfully connected to RabbitMQ');
         return;
-      } catch (error: any) {
+      } catch (error: unknown) {
+        const err = error as Error;
         if (attempt === retries) {
-          console.error(`Failed to connect to RabbitMQ after ${retries} attempts:`, error);
+          console.error(`Failed to connect to RabbitMQ after ${retries} attempts:`, err);
           throw error;
         }
-        // Exponential backoff: delay increases with each attempt
         const delay = initialDelay * Math.pow(2, attempt - 1);
         console.log(`RabbitMQ connection attempt ${attempt}/${retries} failed, retrying in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
   }
 
   async publishEvent(event: Event, exchange: string = 'events'): Promise<void> {
-    if (!this.channel) {
-      console.warn('RabbitMQ channel not initialized, event not published:', event.type);
+    if (!this.publishChannel) {
+      console.warn('RabbitMQ publish channel not initialized, event not published:', event.type);
       return;
     }
 
-    await this.channel.assertExchange(exchange, 'topic', { durable: true });
-    
+    await this.publishChannel.assertExchange(exchange, 'topic', { durable: true });
+
     const routingKey = event.type;
     const message = JSON.stringify({
       ...event,
       timestamp: event.timestamp.toISOString(),
     });
 
-    this.channel.publish(exchange, routingKey, Buffer.from(message), {
+    this.publishChannel.publish(exchange, routingKey, Buffer.from(message), {
       persistent: true,
       messageId: event.id,
       timestamp: Date.now(),
@@ -73,21 +77,24 @@ export class RabbitMQClient {
 
   /** Publish event to a DLQ (durable queue). Uses default exchange; queue must exist. */
   async publishToDlq(queueName: string, event: Event): Promise<void> {
-    if (!this.channel) {
-      console.warn('RabbitMQ channel not initialized, DLQ publish skipped:', queueName);
+    if (!this.publishChannel) {
+      console.warn('RabbitMQ publish channel not initialized, DLQ publish skipped:', queueName);
       return;
     }
-    await this.channel.assertQueue(queueName, { durable: true });
+    await this.publishChannel.assertQueue(queueName, { durable: true });
     const message = JSON.stringify({
       ...event,
       timestamp: event.timestamp instanceof Date ? event.timestamp.toISOString() : event.timestamp,
     });
-    this.channel.sendToQueue(queueName, Buffer.from(message), {
+    this.publishChannel.sendToQueue(queueName, Buffer.from(message), {
       persistent: true,
       messageId: event.id,
       timestamp: Date.now(),
     });
   }
+
+  private static readonly MAX_RETRIES = 3;
+  private static readonly RETRY_HEADER = 'x-retry-count';
 
   async subscribeToEvents(
     eventTypes: EventType[],
@@ -95,40 +102,74 @@ export class RabbitMQClient {
     exchange: string = 'events',
     queueName?: string
   ): Promise<void> {
-    if (!this.channel) {
-      throw new Error('RabbitMQ channel not initialized');
+    if (!this.consumeChannel || !this.publishChannel) {
+      throw new Error('RabbitMQ channels not initialized');
     }
 
-    await this.channel.assertExchange(exchange, 'topic', { durable: true });
-    
+    const cons = this.consumeChannel;
+    const pub = this.publishChannel;
+
+    await cons.assertExchange(exchange, 'topic', { durable: true });
+
     const queue = queueName || `queue.${Date.now()}`;
-    await this.channel.assertQueue(queue, { durable: true });
+    await cons.assertQueue(queue, { durable: true });
+
+    cons.prefetch(10);
 
     for (const eventType of eventTypes) {
-      await this.channel.bindQueue(queue, exchange, eventType);
+      await cons.bindQueue(queue, exchange, eventType);
     }
 
-    await this.channel.consume(queue, async (msg) => {
+    const dlqName = `${queue}.dlq`;
+    await cons.assertQueue(dlqName, { durable: true });
+
+    await cons.consume(queue, async (msg) => {
       if (!msg) return;
+
+      const retryCount = (msg.properties?.headers?.[RabbitMQClient.RETRY_HEADER] as number) ?? 0;
 
       try {
         const event = JSON.parse(msg.content.toString());
         event.timestamp = new Date(event.timestamp);
         await handler(event);
-        this.channel!.ack(msg);
+        cons.ack(msg);
       } catch (error) {
         console.error('Error processing event:', error);
-        this.channel!.nack(msg, false, true); // Requeue on error
+        if (retryCount < RabbitMQClient.MAX_RETRIES) {
+          pub.sendToQueue(queue, msg.content, {
+            ...msg.properties,
+            headers: {
+              ...(msg.properties?.headers || {}),
+              [RabbitMQClient.RETRY_HEADER]: retryCount + 1,
+            },
+          });
+          cons.ack(msg);
+        } else {
+          try {
+            const event = JSON.parse(msg.content.toString());
+            event.timestamp = event.timestamp ? new Date(event.timestamp) : new Date();
+            await this.publishToDlq(dlqName, event);
+          } catch (_) {
+            // best effort DLQ
+          }
+          cons.ack(msg);
+        }
       }
     });
   }
 
   async close(): Promise<void> {
-    if (this.channel) {
-      await this.channel.close();
+    if (this.consumeChannel) {
+      await this.consumeChannel.close().catch(() => {});
+      this.consumeChannel = null;
+    }
+    if (this.publishChannel) {
+      await this.publishChannel.close().catch(() => {});
+      this.publishChannel = null;
     }
     if (this.connection) {
       await this.connection.close();
+      this.connection = null;
     }
   }
 }

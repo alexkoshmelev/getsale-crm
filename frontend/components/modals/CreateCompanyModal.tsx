@@ -1,10 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import axios from 'axios';
 import { X } from 'lucide-react';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+import { apiClient } from '@/lib/api/client';
 
 interface CreateCompanyModalProps {
   isOpen: boolean;
@@ -30,7 +28,7 @@ export function CreateCompanyModal({ isOpen, onClose, onSuccess }: CreateCompany
     setLoading(true);
 
     try {
-      await axios.post(`${API_URL}/api/crm/companies`, formData);
+      await apiClient.post('/api/crm/companies', formData);
       onSuccess();
       onClose();
       setFormData({ name: '', industry: '', size: '', description: '' });

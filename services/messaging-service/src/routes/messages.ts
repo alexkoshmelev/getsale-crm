@@ -20,6 +20,7 @@ import {
   UNFURL_TIMEOUT_MS,
   UNFURL_MAX_BODY,
   URL_REGEX,
+  isUrlAllowedForUnfurl,
 } from '../helpers';
 
 interface Deps {
@@ -581,11 +582,14 @@ export function messagesRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
     res.json({ success: true });
   }));
 
-  // GET /unfurl — link preview (Open Graph)
+  // GET /unfurl — link preview (Open Graph). SSRF protection: only public URLs allowed.
   router.get('/unfurl', asyncHandler(async (req, res) => {
     const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
     if (!rawUrl || !URL_REGEX.test(rawUrl)) {
       throw new AppError(400, 'Valid url query parameter is required', ErrorCodes.VALIDATION);
+    }
+    if (!isUrlAllowedForUnfurl(rawUrl)) {
+      throw new AppError(400, 'URL is not allowed for preview', ErrorCodes.VALIDATION);
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), UNFURL_TIMEOUT_MS);

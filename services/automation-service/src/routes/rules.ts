@@ -4,7 +4,7 @@ import { Pool } from 'pg';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, validate, requireUser, AppError, ErrorCodes } from '@getsale/service-core';
+import { asyncHandler, validate, requireUser, requireRole, AppError, ErrorCodes } from '@getsale/service-core';
 import { RuleCreateSchema, RunSlaCronBodySchema } from '../validation';
 
 interface Deps {
@@ -60,15 +60,21 @@ export function rulesRouter({ pool, rabbitmq, log, runSlaCronOnce }: Deps): Rout
     res.status(201).json(result.rows[0]);
   }));
 
-  // Internal endpoint for e2e: single SLA cron run
-  router.post('/internal/run-sla-cron-once', validate(RunSlaCronBodySchema, 'body'), asyncHandler(async (req, res) => {
-    const fromBody = req.body?.organizationId;
-    const fromHeader = typeof req.headers['x-organization-id'] === 'string' ? req.headers['x-organization-id'] : undefined;
-    const filterOrgId = fromBody ?? fromHeader ?? req.user?.organizationId;
-    const filterLeadId = req.body?.leadId;
-    await runSlaCronOnce(filterOrgId || undefined, filterLeadId);
-    res.json({ ok: true });
-  }));
+  // Internal endpoint for e2e: single SLA cron run (admin/owner only)
+  router.post(
+    '/internal/run-sla-cron-once',
+    requireUser(),
+    requireRole('owner', 'admin'),
+    validate(RunSlaCronBodySchema, 'body'),
+    asyncHandler(async (req, res) => {
+      const fromBody = req.body?.organizationId;
+      const fromHeader = typeof req.headers['x-organization-id'] === 'string' ? req.headers['x-organization-id'] : undefined;
+      const filterOrgId = fromBody ?? fromHeader ?? req.user?.organizationId;
+      const filterLeadId = req.body?.leadId;
+      await runSlaCronOnce(filterOrgId || undefined, filterLeadId);
+      res.json({ ok: true });
+    })
+  );
 
   return router;
 }

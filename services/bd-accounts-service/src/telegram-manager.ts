@@ -85,6 +85,8 @@ interface TelegramClientInfo {
   isConnected: boolean;
   lastActivity: Date;
   reconnectAttempts: number;
+  /** Value used for Redis lock (instanceId); used for refresh and release. */
+  lockValue?: string;
 }
 
 /** Состояние QR-логина (см. https://core.telegram.org/api/qr-login) */
@@ -138,10 +140,18 @@ export class TelegramManager {
   private static readonly QR_REDIS_TTL = 300; // 5 min
   private static readonly QR_PASSWORD_TTL = 120; // 2 min for password submit
 
+  /** Distributed lock so only one instance owns a BD account at a time (horizontal scaling). */
+  private static readonly LOCK_KEY_PREFIX = 'bd-account-lock:';
+  private static readonly LOCK_TTL_SEC = 45;
+  private static readonly LOCK_HEARTBEAT_SEC = 20;
+  private readonly instanceId: string;
+  private lockHeartbeatIntervals: Map<string, NodeJS.Timeout> = new Map();
+
   constructor(pool: Pool, rabbitmq: RabbitMQClient, redis?: RedisClient | null, logger?: Logger) {
     this.pool = pool;
     this.rabbitmq = rabbitmq;
     this.redis = redis ?? null;
+    this.instanceId = process.env.INSTANCE_ID || `pid-${process.pid}-${randomUUID().slice(0, 8)}`;
     const svcLog: Logger = logger ?? { info() {}, warn() {}, error() {} } as Logger;
     this.log = {
       info: (...args: unknown[]) => svcLog.info({ message: formatLogArgs(...args) }),
@@ -150,6 +160,55 @@ export class TelegramManager {
     };
     this.startCleanupInterval();
     this.startSessionSaveInterval();
+  }
+
+  private lockKey(accountId: string): string {
+    return TelegramManager.LOCK_KEY_PREFIX + accountId;
+  }
+
+  /** True if redis client supports distributed lock (tryLock/refreshLock). Avoids "tryLock is not a function" when using an older @getsale/utils build. */
+  private get redisHasLockSupport(): boolean {
+    return !!(
+      this.redis &&
+      typeof (this.redis as { tryLock?: unknown }).tryLock === 'function' &&
+      typeof (this.redis as { refreshLock?: unknown }).refreshLock === 'function'
+    );
+  }
+
+  private async acquireLock(accountId: string): Promise<boolean> {
+    if (!this.redisHasLockSupport) return true;
+    const key = this.lockKey(accountId);
+    const ok = await this.redis!.tryLock(key, this.instanceId, TelegramManager.LOCK_TTL_SEC);
+    if (!ok) this.log.warn({ message: `Could not acquire lock for account ${accountId} (owned by another instance)` });
+    return ok;
+  }
+
+  private async releaseLock(accountId: string): Promise<void> {
+    if (!this.redis || !this.redisHasLockSupport) return;
+    await this.redis.del(this.lockKey(accountId));
+  }
+
+  private startLockHeartbeat(accountId: string, lockValue: string): void {
+    this.stopLockHeartbeat(accountId);
+    if (!this.redisHasLockSupport) return;
+    const key = this.lockKey(accountId);
+    const interval = setInterval(async () => {
+      if (!this.redis) return;
+      const refreshed = await this.redis.refreshLock(key, lockValue, TelegramManager.LOCK_TTL_SEC);
+      if (!refreshed) {
+        this.log.warn({ message: `Lock lost for account ${accountId}, stopping heartbeat` });
+        this.stopLockHeartbeat(accountId);
+      }
+    }, TelegramManager.LOCK_HEARTBEAT_SEC * 1000);
+    this.lockHeartbeatIntervals.set(accountId, interval);
+  }
+
+  private stopLockHeartbeat(accountId: string): void {
+    const interval = this.lockHeartbeatIntervals.get(accountId);
+    if (interval) {
+      clearInterval(interval);
+      this.lockHeartbeatIntervals.delete(accountId);
+    }
   }
 
   /**
@@ -654,11 +713,17 @@ export class TelegramManager {
         if (existing.isConnected) {
           return existing.client;
         }
-        // Disconnect old client
+        // Disconnect old client (releases lock)
         await this.disconnectAccount(accountId);
       }
 
+      const acquired = await this.acquireLock(accountId);
+      if (!acquired) {
+        throw new Error('Account is managed by another instance; try again later.');
+      }
+
       if (!sessionString) {
+        await this.releaseLock(accountId);
         throw new Error('Session string is required for existing accounts');
       }
 
@@ -704,7 +769,7 @@ export class TelegramManager {
 
       await this.saveAccountProfile(accountId, client);
 
-      // Store client info
+      // Store client info and start lock heartbeat so we keep ownership across instances
       const clientInfo: TelegramClientInfo = {
         client,
         accountId,
@@ -714,9 +779,11 @@ export class TelegramManager {
         isConnected: true,
         lastActivity: new Date(),
         reconnectAttempts: 0,
+        lockValue: this.instanceId,
       };
 
       this.clients.set(accountId, clientInfo);
+      this.startLockHeartbeat(accountId, this.instanceId);
 
       // Поддержание потока апдейтов: Telegram перестаёт слать updates, если долго нет запросов (см. gramjs client/updates.ts).
       this.startUpdateKeepalive(accountId, client);
@@ -726,6 +793,7 @@ export class TelegramManager {
 
       return client;
     } catch (error: any) {
+      if (!this.clients.has(accountId)) await this.releaseLock(accountId);
       this.log.error({ message: `Error connecting account ${accountId}`, error: error?.message || String(error) });
       await this.updateAccountStatus(accountId, 'error', error.message || 'Connection failed');
       throw error;
@@ -1815,43 +1883,56 @@ export class TelegramManager {
   }
 
   /**
-   * Найти или создать контакт по telegram_id; при наличии userInfo — заполнить/обновить first_name, last_name, username из Telegram.
+   * Найти или создать контакт по telegram_id; при наличии userInfo — заполнить/обновить first_name, last_name, username, phone, bio, premium из Telegram.
    */
   private async upsertContactFromTelegramUser(
     organizationId: string,
     telegramId: string,
-    userInfo?: { firstName: string; lastName: string | null; username: string | null }
+    userInfo?: {
+      firstName: string;
+      lastName: string | null;
+      username: string | null;
+      phone?: string | null;
+      bio?: string | null;
+      premium?: boolean | null;
+    }
   ): Promise<string | null> {
     if (!telegramId?.trim()) return null;
     const existing = await this.pool.query(
-      'SELECT id, first_name, last_name, username FROM contacts WHERE telegram_id = $1 AND organization_id = $2 LIMIT 1',
+      'SELECT id, first_name, last_name, username, phone, bio, premium FROM contacts WHERE telegram_id = $1 AND organization_id = $2 LIMIT 1',
       [telegramId, organizationId]
     );
     const firstName = userInfo?.firstName?.trim() ?? '';
     const lastName = (userInfo?.lastName?.trim() || null) ?? null;
     const username = (userInfo?.username?.trim() || null) ?? null;
+    const phone = userInfo?.phone != null ? (String(userInfo.phone).trim() || null) : null;
+    const bio = userInfo?.bio != null ? (String(userInfo.bio).trim() || null) : null;
+    const premium = userInfo?.premium ?? null;
 
     if (existing.rows.length > 0) {
-      const row = existing.rows[0];
+      const row = existing.rows[0] as { id: string; first_name: string; last_name: string | null; username: string | null; phone: string | null; bio: string | null; premium: boolean | null };
       const id = row.id;
       if (userInfo) {
         const newFirst = firstName || row.first_name || '';
         const newLast = lastName !== null ? lastName : row.last_name;
         const newUsername = username !== null ? username : row.username;
+        const newPhone = phone !== null ? phone : row.phone;
+        const newBio = bio !== null ? bio : row.bio;
+        const newPremium = premium !== null ? premium : row.premium;
         await this.pool.query(
-          `UPDATE contacts SET first_name = $2, last_name = $3, username = $4, updated_at = NOW()
-           WHERE id = $1 AND organization_id = $5`,
-          [id, newFirst, newLast, newUsername, organizationId]
+          `UPDATE contacts SET first_name = $2, last_name = $3, username = $4, phone = $5, bio = $6, premium = $7, updated_at = NOW()
+           WHERE id = $1 AND organization_id = $8`,
+          [id, newFirst, newLast, newUsername, newPhone, newBio, newPremium, organizationId]
         );
       }
       return id;
     }
     try {
       const insert = await this.pool.query(
-        `INSERT INTO contacts (organization_id, telegram_id, first_name, last_name, username)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO contacts (organization_id, telegram_id, first_name, last_name, username, phone, bio, premium)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING id`,
-        [organizationId, telegramId, firstName || '', lastName, username]
+        [organizationId, telegramId, firstName || '', lastName, username, phone, bio, premium]
       );
       if (insert.rows.length > 0) return insert.rows[0].id;
     } catch (_) {}
@@ -1868,35 +1949,75 @@ export class TelegramManager {
   }
 
   /**
-   * Найти или создать контакт по telegram_id; при возможности запрашивает getEntity в Telegram
-   * и обогащает контакт first_name, last_name, username. Используется при синхронизации сообщений.
+   * Найти или создать контакт по telegram_id; при возможности запрашивает getEntity (и опционально GetFullUser).
+   * Если контакт уже есть в БД с заполненным именем — запросов к Telegram не делаем (снижает нагрузку при синхронизации).
+   * skipGetFullUser: true — только getEntity (1 запрос); false — getEntity + GetFullUser (bio, phone из fullUser).
    */
   private async ensureContactEnrichedFromTelegram(
     organizationId: string,
     accountId: string,
-    telegramId: string
+    telegramId: string,
+    opts?: { skipGetFullUser?: boolean }
   ): Promise<string | null> {
+    const existing = await this.pool.query(
+      'SELECT id, first_name, last_name FROM contacts WHERE telegram_id = $1 AND organization_id = $2 LIMIT 1',
+      [telegramId, organizationId]
+    );
+    if (existing.rows.length > 0) {
+      const row = existing.rows[0] as { id: string; first_name: string | null; last_name: string | null };
+      const hasName = (row.first_name != null && String(row.first_name).trim() !== '') ||
+        (row.last_name != null && String(row.last_name).trim() !== '');
+      if (hasName) return row.id;
+    }
+
     const userIdNum = parseInt(telegramId, 10);
     const clientInfo = this.clients.get(accountId);
-    if (clientInfo?.client && Number.isInteger(userIdNum) && userIdNum > 0) {
-      try {
-        const peer = clientInfo.client.getInputEntity(userIdNum);
-        const entity = await clientInfo.client.getEntity(peer);
-        if (entity && (entity as any).className === 'User') {
-          const u = entity as Api.User;
-          return this.upsertContactFromTelegramUser(organizationId, telegramId, {
-            firstName: (u.firstName ?? '').trim(),
-            lastName: (u.lastName ?? '').trim() || null,
-            username: (u.username ?? '').trim() || null,
-          });
-        }
-      } catch (e: any) {
-        if (e?.message !== 'TIMEOUT' && !e?.message?.includes('Could not find')) {
-          this.log.warn({ message: "getEntity for contact enrichment", error: e?.message });
+    if (!clientInfo?.client || !Number.isInteger(userIdNum) || userIdNum <= 0) {
+      return this.ensureContactForTelegramId(organizationId, telegramId);
+    }
+    const skipGetFullUser = opts?.skipGetFullUser !== false;
+    try {
+      const client = clientInfo.client;
+      const peer = await client.getInputEntity(userIdNum);
+      const entity = await client.getEntity(peer);
+      const isUser = entity && ((entity as any).className === 'User' || (entity as any)._ === 'user');
+      if (!isUser) return this.ensureContactForTelegramId(organizationId, telegramId);
+
+      const u = entity as Api.User;
+      let phone: string | null = (u.phone != null ? String(u.phone).trim() : null) || null;
+      let bio: string | null = null;
+      const premiumRaw = (u as any).premium;
+      const premium: boolean | null = typeof premiumRaw === 'boolean' ? premiumRaw : null;
+
+      if (!skipGetFullUser) {
+        try {
+          const fullResult = await client.invoke(
+            new Api.users.GetFullUser({ id: peer })
+          ) as Api.users.UserFull;
+          const fullUser = (fullResult as any).fullUser ?? fullResult?.fullUser;
+          if (fullUser?.about != null) bio = String(fullUser.about).trim() || null;
+          if (fullUser?.phone != null && !phone) phone = String(fullUser.phone).trim() || null;
+        } catch (fullErr: any) {
+          if (fullErr?.message !== 'TIMEOUT' && !fullErr?.message?.includes('Could not find')) {
+            this.log.warn({ message: 'GetFullUser for contact enrichment', error: fullErr?.message });
+          }
         }
       }
+
+      return this.upsertContactFromTelegramUser(organizationId, telegramId, {
+        firstName: (u.firstName ?? '').trim(),
+        lastName: (u.lastName ?? '').trim() || null,
+        username: (u.username ?? '').trim() || null,
+        phone,
+        bio,
+        premium,
+      });
+    } catch (e: any) {
+      if (e?.message !== 'TIMEOUT' && !e?.message?.includes('Could not find')) {
+        this.log.warn({ message: "getEntity for contact enrichment", error: e?.message });
+      }
+      return this.ensureContactForTelegramId(organizationId, telegramId);
     }
-    return this.ensureContactForTelegramId(organizationId, telegramId);
   }
 
   /**
@@ -1957,6 +2078,43 @@ export class TelegramManager {
   }
 
   /**
+   * Обогатить контакты по всем личным чатам из bd_account_sync_chats для аккаунта.
+   * Вызывается после сохранения выбранных чатов (POST sync-chats), чтобы first_name, last_name, username, phone, bio, premium попали в БД.
+   */
+  async enrichContactsForAccountSyncChats(
+    organizationId: string,
+    accountId: string,
+    opts?: { delayMs?: number }
+  ): Promise<{ enriched: number }> {
+    const accountRow = await this.pool.query(
+      'SELECT telegram_id FROM bd_accounts WHERE id = $1 AND organization_id = $2 LIMIT 1',
+      [accountId, organizationId]
+    );
+    if (accountRow.rows.length === 0) return { enriched: 0 };
+    const selfTelegramId = accountRow.rows[0].telegram_id != null ? String(accountRow.rows[0].telegram_id).trim() : null;
+
+    const chats = await this.pool.query(
+      'SELECT telegram_chat_id, peer_type FROM bd_account_sync_chats WHERE bd_account_id = $1 AND peer_type = $2',
+      [accountId, 'user']
+    );
+    const delayMs = typeof opts?.delayMs === 'number' ? Math.max(0, opts.delayMs) : 80;
+    let enriched = 0;
+    for (const row of chats.rows as { telegram_chat_id: string; peer_type: string }[]) {
+      const tid = String(row.telegram_chat_id).trim();
+      if (!tid || (selfTelegramId && tid === selfTelegramId)) continue;
+      if (parseInt(tid, 10) <= 0) continue;
+      try {
+        await this.ensureContactEnrichedFromTelegram(organizationId, accountId, tid, { skipGetFullUser: true });
+        enriched++;
+        if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+      } catch (e: any) {
+        this.log.warn({ message: 'enrichContactsForAccountSyncChats single', telegramId: tid, error: e?.message });
+      }
+    }
+    return { enriched };
+  }
+
+  /**
    * Handle short update (UpdateShortMessage / UpdateShortChatMessage) — входящие и исходящие с другого устройства.
    */
   private async handleShortMessageUpdate(
@@ -1992,7 +2150,8 @@ export class TelegramManager {
         return;
       }
 
-      const contactId = await this.ensureContactForTelegramId(organizationId, senderId || chatId);
+      const contactTelegramId = senderId || chatId;
+      const contactId = await this.ensureContactEnrichedFromTelegram(organizationId, accountId, contactTelegramId);
       const direction = isOut ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
       const telegramDate = date ? (typeof date === 'number' ? new Date(date * 1000) : new Date(date)) : null;
       const serialized: SerializedTelegramMessage = {
@@ -2195,10 +2354,10 @@ export class TelegramManager {
 
     const client = clientInfo.client;
     const rows = await this.pool.query(
-      'SELECT telegram_chat_id, title FROM bd_account_sync_chats WHERE bd_account_id = $1 ORDER BY created_at',
+      'SELECT telegram_chat_id, title, peer_type FROM bd_account_sync_chats WHERE bd_account_id = $1 ORDER BY created_at',
       [accountId]
     );
-    const chats = rows.rows as { telegram_chat_id: string; title: string }[];
+    const chats = rows.rows as { telegram_chat_id: string; title: string; peer_type?: string }[];
     const totalChats = chats.length;
     if (totalChats === 0) {
       return { totalChats: 0, totalMessages: 0 };
@@ -2224,7 +2383,8 @@ export class TelegramManager {
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
     for (let i = 0; i < chats.length; i++) {
-      const { telegram_chat_id: telegramChatId, title } = chats[i];
+      const { telegram_chat_id: telegramChatId, title, peer_type: peerType } = chats[i];
+      const isUserChat = (peerType || 'user').toLowerCase() === 'user';
       let fetched = 0;
       const chatNum = i + 1;
       this.log.info({ message: `Processing chat ${chatNum}/${totalChats}: ${title} (id=${telegramChatId})` });
@@ -2237,6 +2397,11 @@ export class TelegramManager {
         let offsetId = 0;
         const cap = this.SYNC_INITIAL_MESSAGES_PER_CHAT;
         const batchSize = Math.min(100, cap);
+
+        // For user (1-1) chats, pre-enrich contact so first_name/last_name/username are in DB even before first message
+        if (isUserChat && Number(telegramChatId) > 0) {
+          await this.ensureContactEnrichedFromTelegram(organizationId, accountId, telegramChatId);
+        }
 
         while (fetched < cap) {
           try {
@@ -2270,7 +2435,9 @@ export class TelegramManager {
               }
               if (msg.fromId instanceof Api.PeerUser) senderId = String(msg.fromId.userId);
 
-              const contactId = await this.ensureContactEnrichedFromTelegram(organizationId, accountId, senderId || chatId);
+              // For 1-1 chats the contact is the other party (chatId); for groups use message author (senderId)
+              const contactTelegramId = isUserChat ? chatId : (senderId || chatId);
+              const contactId = await this.ensureContactEnrichedFromTelegram(organizationId, accountId, contactTelegramId);
 
               const direction = (msg as any).out === true ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
               const serialized = serializeMessage(msg);
@@ -3400,6 +3567,7 @@ export class TelegramManager {
    */
   async disconnectAccount(accountId: string): Promise<void> {
     this.stopUpdateKeepalive(accountId);
+    this.stopLockHeartbeat(accountId);
     const clientInfo = this.clients.get(accountId);
     if (clientInfo) {
       try {
@@ -3416,6 +3584,7 @@ export class TelegramManager {
         this.reconnectIntervals.delete(accountId);
       }
     }
+    await this.releaseLock(accountId);
   }
 
   /**

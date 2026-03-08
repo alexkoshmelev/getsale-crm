@@ -608,6 +608,9 @@ export function conversationsRouter({ pool, log, bdAccountsClient, aiClient, reg
     });
   }));
 
+  /** Max allowed revenue_amount in API (audit P3: business validation and contract). */
+  const REVENUE_AMOUNT_MAX = 999_999_999.99;
+
   // POST /mark-won — close deal as won (irreversible)
   router.post('/mark-won', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
@@ -618,6 +621,9 @@ export function conversationsRouter({ pool, log, bdAccountsClient, aiClient, reg
     const revenueAmount = revenueAmountRaw != null ? parseFloat(String(revenueAmountRaw)) : null;
     if (revenueAmount != null && (Number.isNaN(revenueAmount) || revenueAmount < 0)) {
       throw new AppError(400, 'revenue_amount must be a non-negative number', ErrorCodes.VALIDATION);
+    }
+    if (revenueAmount != null && revenueAmount > REVENUE_AMOUNT_MAX) {
+      throw new AppError(400, `revenue_amount must not exceed ${REVENUE_AMOUNT_MAX}`, ErrorCodes.VALIDATION);
     }
 
     const check = await pool.query(

@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { apiClient } from '@/lib/api/client';
+import { useAuthStore } from '@/lib/stores/auth-store';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -69,6 +70,7 @@ function getInitials(account: BDAccountDetail): string {
 export default function BDAccountCardPage() {
   const params = useParams();
   const router = useRouter();
+  const { user: currentUser } = useAuthStore();
   const id = typeof params.id === 'string' ? params.id : '';
   const [account, setAccount] = useState<BDAccountDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -308,13 +310,16 @@ export default function BDAccountCardPage() {
         )}
 
         <div className="mt-6 flex flex-wrap gap-2">
-          <Link
-            href={`/dashboard/bd-accounts?accountId=${account.id}&openSelectChats=1`}
-            className="inline-flex items-center justify-center font-medium rounded-lg border border-border hover:bg-accent px-3 py-1.5 text-sm transition-colors"
-          >
-            <MessageSquare className="w-4 h-4 mr-2" />
-            Диалоги
-          </Link>
+          {/* Агент (bidi): ссылка «Диалоги» (настройка синхронизации) только для своего аккаунта */}
+          {((currentUser?.role?.toLowerCase() !== 'bidi') || account.is_owner) && (
+            <Link
+              href={`/dashboard/bd-accounts?accountId=${account.id}&openSelectChats=1`}
+              className="inline-flex items-center justify-center font-medium rounded-lg border border-border hover:bg-accent px-3 py-1.5 text-sm transition-colors"
+            >
+              <MessageSquare className="w-4 h-4 mr-2" />
+              Диалоги
+            </Link>
+          )}
           <Link
             href={`/dashboard/messaging?accountId=${account.id}`}
             className="inline-flex items-center justify-center font-medium rounded-lg border border-border hover:bg-accent px-3 py-1.5 text-sm transition-colors"
