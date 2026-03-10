@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Select, SelectOption } from '@/components/ui/Select';
@@ -16,6 +17,7 @@ interface ContactFormModalProps {
 }
 
 export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselectedCompanyId }: ContactFormModalProps) {
+  const { t } = useTranslation();
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -61,7 +63,7 @@ export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselected
   }, [edit, preselectedCompanyId, isOpen]);
 
   const companyOptions: SelectOption[] = [
-    { value: '', label: 'Без компании' },
+    { value: '', label: t('crm.noCompany') },
     ...companies.map((c) => ({ value: c.id, label: c.name })),
   ];
 
@@ -69,7 +71,7 @@ export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselected
     e.preventDefault();
     setError('');
     if (!firstName.trim() && !displayName.trim() && !edit?.telegram_id) {
-      setError('Укажите имя, отображаемое имя или откройте контакт из Messaging (Telegram)');
+      setError(t('crm.contactValidationError'));
       return;
     }
     setLoading(true);
@@ -98,7 +100,7 @@ export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselected
       onSuccess();
       onClose();
     } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Ошибка сохранения';
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? t('crm.saveError');
       setError(msg);
     } finally {
       setLoading(false);
@@ -106,7 +108,7 @@ export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselected
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={isEdit ? 'Редактировать контакт' : 'Новый контакт'} size="md">
+    <Modal isOpen={isOpen} onClose={onClose} title={isEdit ? t('crm.editContactTitle') : t('crm.newContactTitle')} size="md">
       {error && (
         <div className="mb-4 p-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-sm">
           {error}
@@ -114,57 +116,57 @@ export function ContactFormModal({ isOpen, onClose, onSuccess, edit, preselected
       )}
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input
-          label="Отображаемое имя"
+          label={t('crm.displayName')}
           value={displayName}
           onChange={(e) => setDisplayName(e.target.value)}
-          placeholder="Как показывать в CRM и Messaging"
+          placeholder={t('crm.displayNamePlaceholder')}
         />
         <Input
-          label="Имя"
+          label={t('crm.firstName')}
           value={firstName}
           onChange={(e) => setFirstName(e.target.value)}
-          placeholder="Иван"
+          placeholder={t('crm.firstNamePlaceholder')}
           autoFocus
         />
         <Input
-          label="Фамилия"
+          label={t('crm.lastName')}
           value={lastName}
           onChange={(e) => setLastName(e.target.value)}
-          placeholder="Иванов"
+          placeholder={t('crm.lastNamePlaceholder')}
         />
         <Input
           label="Username (Telegram)"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
-          placeholder="username (без @)"
+          placeholder={t('crm.usernamePlaceholder')}
         />
         <Input
-          label="Email"
+          label={t('crm.email')}
           type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          placeholder="ivan@example.com"
+          placeholder={t('crm.emailPlaceholder')}
         />
         <Input
-          label="Телефон"
+          label={t('crm.phone')}
           value={phone}
           onChange={(e) => setPhone(e.target.value)}
-          placeholder="+7 999 123-45-67"
+          placeholder={t('crm.phonePlaceholder')}
         />
         <Select
-          label="Компания"
+          label={t('common.company')}
           options={companyOptions}
           value={companyId}
           onChange={(e) => setCompanyId(e.target.value)}
           disabled={loadingCompanies}
-          placeholder="Выберите компанию"
+          placeholder={t('crm.selectCompany')}
         />
         <div className="flex gap-3 pt-2">
           <Button type="button" variant="outline" className="flex-1" onClick={onClose}>
-            Отмена
+            {t('common.cancel')}
           </Button>
           <Button type="submit" className="flex-1" disabled={loading}>
-            {loading ? 'Сохранение...' : isEdit ? 'Сохранить' : 'Создать'}
+            {loading ? t('common.saving') : isEdit ? t('common.save') : t('crm.addContact')}
           </Button>
         </div>
       </form>

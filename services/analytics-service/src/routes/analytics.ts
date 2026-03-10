@@ -8,15 +8,91 @@ interface Deps {
   log: Logger;
 }
 
+export type PeriodKey = 'today' | 'week' | 'month' | 'year';
+
+/** Compute start and end (ISO strings) for a period. End is now; start is beginning of period. */
+export function getPeriodBounds(period: PeriodKey): { startDate: string; endDate: string } {
+  const end = new Date();
+  const start = new Date(end);
+  switch (period) {
+    case 'today':
+      start.setUTCHours(0, 0, 0, 0);
+      break;
+    case 'week':
+      start.setUTCDate(start.getUTCDate() - 7);
+      break;
+    case 'month':
+      start.setUTCDate(start.getUTCDate() - 30);
+      break;
+    case 'year':
+      start.setUTCDate(start.getUTCDate() - 365);
+      break;
+    default:
+      start.setUTCDate(start.getUTCDate() - 30);
+  }
+  return {
+    startDate: start.toISOString(),
+    endDate: end.toISOString(),
+  };
+}
+
 export function analyticsRouter({ pool, log }: Deps): Router {
   const router = Router();
 
   router.use(requireUser());
 
+  // Summary for cards (total pipeline value, revenue in period, deals closed in period, participants count)
+  router.get('/summary', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const period = (req.query.period as PeriodKey) || 'month';
+    const { startDate, endDate } = getPeriodBounds(period);
+
+    const closedStageSubquery = `SELECT id FROM stages WHERE name = 'closed' OR name = 'won'`;
+
+    const [totalRes, periodRes] = await Promise.all([
+      pool.query(
+        `SELECT COALESCE(SUM(d.value), 0) as total_pipeline_value
+         FROM deals d
+         WHERE d.organization_id = $1`,
+        [organizationId]
+      ),
+      pool.query(
+        `SELECT
+           COALESCE(SUM(d.value), 0) as revenue_in_period,
+           COUNT(DISTINCT d.id)::int as deals_closed_in_period,
+           COUNT(DISTINCT d.owner_id)::int as participants_count
+         FROM deals d
+         WHERE d.organization_id = $1 AND d.stage_id IN (${closedStageSubquery})
+           AND d.updated_at >= $2 AND d.updated_at <= $3`,
+        [organizationId, startDate, endDate]
+      ),
+    ]);
+
+    const totalPipelineValue = parseFloat(totalRes.rows[0]?.total_pipeline_value ?? 0);
+    const revenueInPeriod = parseFloat(periodRes.rows[0]?.revenue_in_period ?? 0);
+    const dealsClosedInPeriod = Number(periodRes.rows[0]?.deals_closed_in_period ?? 0);
+    const participantsCount = Number(periodRes.rows[0]?.participants_count ?? 0);
+
+    res.json({
+      total_pipeline_value: totalPipelineValue,
+      revenue_in_period: revenueInPeriod,
+      deals_closed_in_period: dealsClosedInPeriod,
+      participants_count: participantsCount,
+      start_date: startDate,
+      end_date: endDate,
+    });
+  }));
+
   // Conversion rates
   router.get('/conversion-rates', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const { fromStage, toStage, startDate, endDate } = req.query;
+    let { fromStage, toStage, startDate, endDate } = req.query;
+    const period = req.query.period as PeriodKey | undefined;
+    if (period) {
+      const bounds = getPeriodBounds(period);
+      startDate = bounds.startDate;
+      endDate = bounds.endDate;
+    }
 
     let query = `
       WITH stage_transitions AS (
@@ -89,19 +165,30 @@ export function analyticsRouter({ pool, log }: Deps): Router {
     res.json(result.rows);
   }));
 
-  // Team performance
+  // Team performance (with display names and avg deal value)
   router.get('/team-performance', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+    const period = req.query.period as PeriodKey | undefined;
+    if (period) {
+      const bounds = getPeriodBounds(period);
+      startDate = bounds.startDate;
+      endDate = bounds.endDate;
+    }
 
     let query = `
       SELECT 
         u.id as user_id,
+        u.email as user_email,
+        up.first_name,
+        up.last_name,
         COUNT(DISTINCT d.id) as deals_closed,
         SUM(d.value) as revenue,
+        AVG(d.value) as avg_deal_value,
         AVG(EXTRACT(EPOCH FROM (d.updated_at - d.created_at)) / 86400) as avg_days_to_close
       FROM deals d
       JOIN users u ON d.owner_id = u.id
+      LEFT JOIN user_profiles up ON up.user_id = u.id AND up.organization_id = d.organization_id
       WHERE d.organization_id = $1 AND d.stage_id IN (
         SELECT id FROM stages WHERE name = 'closed' OR name = 'won'
       )
@@ -118,10 +205,20 @@ export function analyticsRouter({ pool, log }: Deps): Router {
       query += ` AND d.updated_at <= $${params.length}`;
     }
 
-    query += ' GROUP BY u.id';
+    query += ' GROUP BY u.id, u.email, up.first_name, up.last_name';
 
     const result = await pool.query(query, params);
-    res.json(result.rows);
+    const rows = result.rows.map((row: Record<string, unknown>) => {
+      const firstName = (row.first_name as string) ?? '';
+      const lastName = (row.last_name as string) ?? '';
+      const email = (row.user_email as string) ?? '';
+      const displayName = [firstName, lastName].filter(Boolean).join(' ').trim() || email || String(row.user_id);
+      return {
+        ...row,
+        user_display_name: displayName,
+      };
+    });
+    res.json(rows);
   }));
 
   // Export data

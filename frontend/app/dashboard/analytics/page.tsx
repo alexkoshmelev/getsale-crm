@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
 import { BarChart3, TrendingUp, Users, DollarSign } from 'lucide-react';
@@ -9,36 +9,61 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import Button from '@/components/ui/Button';
 import { apiClient } from '@/lib/api/client';
 
+type PeriodKey = 'today' | 'week' | 'month' | 'year';
+
+interface Summary {
+  total_pipeline_value: number;
+  revenue_in_period: number;
+  deals_closed_in_period: number;
+  participants_count: number;
+  start_date: string;
+  end_date: string;
+}
+
+interface TeamMemberRow {
+  user_id: string;
+  user_email: string;
+  user_display_name: string;
+  deals_closed: number;
+  revenue: string;
+  avg_deal_value: string | null;
+  avg_days_to_close: string | null;
+}
+
+const PERIODS: PeriodKey[] = ['today', 'week', 'month', 'year'];
+
 export default function AnalyticsPage() {
   const { t } = useTranslation();
-  const [conversionRates, setConversionRates] = useState<any[]>([]);
+  const [period, setPeriod] = useState<PeriodKey>('month');
+  const [summary, setSummary] = useState<Summary | null>(null);
   const [pipelineValue, setPipelineValue] = useState<any[]>([]);
-  const [teamPerformance, setTeamPerformance] = useState<any[]>([]);
+  const [teamPerformance, setTeamPerformance] = useState<TeamMemberRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [sortBy, setSortBy] = useState<'revenue' | 'deals_closed' | 'avg_deal_value'>('revenue');
 
-  useEffect(() => {
-    fetchAnalytics();
-  }, []);
-
-  const fetchAnalytics = async () => {
+  const fetchAnalytics = useCallback(async () => {
+    setLoading(true);
     try {
-      const [conversionRes, pipelineRes, teamRes] = await Promise.all([
-        apiClient.get('/api/analytics/conversion-rates').catch(() => ({ data: [] })),
+      const [summaryRes, pipelineRes, teamRes] = await Promise.all([
+        apiClient.get<Summary>('/api/analytics/summary', { params: { period } }).catch(() => ({ data: null })),
         apiClient.get('/api/analytics/pipeline-value').catch(() => ({ data: [] })),
-        apiClient.get('/api/analytics/team-performance').catch(() => ({ data: [] })),
+        apiClient.get<TeamMemberRow[]>('/api/analytics/team-performance', { params: { period } }).catch(() => ({ data: [] })),
       ]);
-
-      setConversionRates(conversionRes.data);
-      setPipelineValue(pipelineRes.data);
-      setTeamPerformance(teamRes.data);
+      setSummary(summaryRes.data);
+      setPipelineValue(Array.isArray(pipelineRes.data) ? pipelineRes.data : []);
+      setTeamPerformance(Array.isArray(teamRes.data) ? teamRes.data : []);
     } catch (error) {
       console.error('Error fetching analytics:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, [period]);
 
-  if (loading) {
+  useEffect(() => {
+    fetchAnalytics();
+  }, [fetchAnalytics]);
+
+  if (loading && !summary && pipelineValue.length === 0) {
     return (
       <div className="flex items-center justify-center min-h-[320px]">
         <div className="animate-spin rounded-full h-10 w-10 border-2 border-primary border-t-transparent" aria-hidden />
@@ -47,9 +72,9 @@ export default function AnalyticsPage() {
   }
 
   const totalValue = pipelineValue.reduce((sum, stage) => sum + (parseFloat(stage.total_value) || 0), 0);
-  const hasNoData = pipelineValue.length === 0 && teamPerformance.length === 0 && conversionRates.length === 0;
+  const hasNoData = pipelineValue.length === 0 && (!summary || (summary.revenue_in_period === 0 && summary.deals_closed_in_period === 0));
 
-  if (hasNoData) {
+  if (hasNoData && teamPerformance.length === 0) {
     return (
       <div className="space-y-6">
         <div>
@@ -79,20 +104,55 @@ export default function AnalyticsPage() {
     );
   }
 
+  const totalPipelineValue = summary?.total_pipeline_value ?? totalValue;
+  const revenueInPeriod = summary?.revenue_in_period ?? 0;
+  const dealsClosedInPeriod = summary?.deals_closed_in_period ?? 0;
+  const participantsCount = summary?.participants_count ?? teamPerformance.length;
+
+  const totalRevenue = teamPerformance.reduce((s, m) => s + parseFloat(m.revenue || '0'), 0);
+  const sortedTeam = [...teamPerformance].sort((a, b) => {
+    switch (sortBy) {
+      case 'deals_closed':
+        return (b.deals_closed ?? 0) - (a.deals_closed ?? 0);
+      case 'avg_deal_value':
+        return (parseFloat(b.avg_deal_value || '0') || 0) - (parseFloat(a.avg_deal_value || '0') || 0);
+      default:
+        return parseFloat(b.revenue || '0') - parseFloat(a.revenue || '0');
+    }
+  });
+
   const statCards = [
-    { key: 'totalValue', value: `$${totalValue.toLocaleString()}`, icon: DollarSign, accent: 'success' },
-    { key: 'conversions', value: String(conversionRates.length), icon: TrendingUp, accent: 'primary' },
-    { key: 'stages', value: String(pipelineValue.length), icon: BarChart3, accent: 'primary' },
-    { key: 'participants', value: String(teamPerformance.length), icon: Users, accent: 'primary' },
+    { key: 'totalValue', value: `$${totalPipelineValue.toLocaleString()}`, icon: DollarSign },
+    { key: 'revenueInPeriod', value: `$${revenueInPeriod.toLocaleString()}`, icon: DollarSign },
+    { key: 'dealsClosedInPeriod', value: String(dealsClosedInPeriod), icon: TrendingUp },
+    { key: 'participants', value: String(participantsCount), icon: Users },
   ];
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="font-heading text-2xl font-bold text-foreground tracking-tight mb-1">
-          {t('analytics.title')}
-        </h1>
-        <p className="text-sm text-muted-foreground">{t('analytics.subtitle')}</p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="font-heading text-2xl font-bold text-foreground tracking-tight mb-1">
+            {t('analytics.title')}
+          </h1>
+          <p className="text-sm text-muted-foreground">{t('analytics.subtitle')}</p>
+        </div>
+        <div className="flex rounded-lg border border-border bg-muted/30 p-1">
+          {PERIODS.map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setPeriod(p)}
+              className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                period === p
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {t(`analytics.period${p.charAt(0).toUpperCase() + p.slice(1)}` as const)}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -152,38 +212,65 @@ export default function AnalyticsPage() {
                 <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
                   {t('analytics.member')}
                 </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                <th
+                  className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider cursor-pointer hover:text-foreground"
+                  onClick={() => setSortBy('deals_closed')}
+                >
                   {t('analytics.dealsClosed')}
                 </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                <th
+                  className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider cursor-pointer hover:text-foreground"
+                  onClick={() => setSortBy('revenue')}
+                >
                   {t('analytics.revenue')}
+                </th>
+                <th
+                  className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider cursor-pointer hover:text-foreground"
+                  onClick={() => setSortBy('avg_deal_value')}
+                >
+                  {t('analytics.avgDeal')}
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
                   {t('analytics.avgTime')}
                 </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  {t('analytics.percentOfRevenue')}
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {teamPerformance.map((member) => (
-                <tr key={member.user_id} className="hover:bg-muted/30 transition-colors">
-                  <td className="px-4 py-3 text-sm font-medium text-foreground">
-                    User {member.user_id.slice(0, 8)}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-muted-foreground">{member.deals_closed}</td>
-                  <td className="px-4 py-3 text-sm font-medium text-foreground">
-                    ${(parseFloat(member.revenue) || 0).toLocaleString()}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-muted-foreground">
-                    {member.avg_days_to_close
-                      ? `${Math.round(parseFloat(member.avg_days_to_close))} ${t('analytics.days')}`
-                      : '—'}
-                  </td>
-                </tr>
-              ))}
+              {sortedTeam.map((member) => {
+                const rev = parseFloat(member.revenue || '0');
+                const pct = totalRevenue > 0 ? (rev / totalRevenue) * 100 : 0;
+                return (
+                  <tr key={member.user_id} className="hover:bg-muted/30 transition-colors">
+                    <td className="px-4 py-3 text-sm font-medium text-foreground">
+                      {member.user_display_name || member.user_email || member.user_id}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-muted-foreground">{member.deals_closed}</td>
+                    <td className="px-4 py-3 text-sm font-medium text-foreground">
+                      ${rev.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-muted-foreground">
+                      {member.avg_deal_value != null
+                        ? `$${parseFloat(member.avg_deal_value).toLocaleString()}`
+                        : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-muted-foreground">
+                      {member.avg_days_to_close != null
+                        ? `${Math.round(parseFloat(member.avg_days_to_close))} ${t('analytics.days')}`
+                        : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-muted-foreground">
+                      {totalRevenue > 0 ? `${pct.toFixed(1)}%` : '—'}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
-          {teamPerformance.length === 0 && (
-            <p className="text-muted-foreground text-center py-8 text-sm">{t('analytics.noPerformance')}</p>
+          {sortedTeam.length === 0 && (
+            <p className="text-muted-foreground text-center py-8 text-sm">{t('analytics.noDataForPeriod')}</p>
           )}
         </div>
       </Card>

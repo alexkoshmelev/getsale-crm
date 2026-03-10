@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { clsx } from 'clsx';
 
@@ -11,6 +12,7 @@ interface PaginationProps {
 }
 
 export function Pagination({ page, totalPages, onPageChange, className }: PaginationProps) {
+  const { t } = useTranslation();
   if (totalPages <= 1) return null;
 
   const showPages = 5;
@@ -22,14 +24,14 @@ export function Pagination({ page, totalPages, onPageChange, className }: Pagina
   return (
     <nav
       className={clsx('flex items-center justify-center gap-1', className)}
-      aria-label="Пагинация"
+      aria-label={t('common.paginationAria')}
     >
       <button
         type="button"
         onClick={() => onPageChange(page - 1)}
         disabled={page <= 1}
         className="p-2 rounded-lg border border-border text-foreground hover:bg-accent disabled:opacity-50 disabled:pointer-events-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-        aria-label="Предыдущая страница"
+        aria-label={t('common.prevPage')}
       >
         <ChevronLeft className="w-5 h-5" />
       </button>
@@ -55,7 +57,7 @@ export function Pagination({ page, totalPages, onPageChange, className }: Pagina
         onClick={() => onPageChange(page + 1)}
         disabled={page >= totalPages}
         className="p-2 rounded-lg border border-border text-foreground hover:bg-accent disabled:opacity-50 disabled:pointer-events-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-        aria-label="Следующая страница"
+        aria-label={t('common.nextPage')}
       >
         <ChevronRight className="w-5 h-5" />
       </button>

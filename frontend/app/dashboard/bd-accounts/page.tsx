@@ -7,7 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import { useWebSocketContext } from '@/lib/contexts/websocket-context';
-import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Power, PowerOff, Search, FolderOpen, ChevronRight, ChevronDown, User, RefreshCw, ShieldCheck } from 'lucide-react';
+import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Power, PowerOff, Search, FolderOpen, ChevronRight, ChevronDown, User, RefreshCw, HelpCircle } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
@@ -961,30 +961,19 @@ export default function BDAccountsPage() {
               {connectStep === 'select-chats' && (
                 <div className="flex flex-col min-h-0 flex-1">
                   {connectingAccountId && (
-                    <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl p-4 mb-3 shrink-0">
-                      <p className="text-sm text-green-800 dark:text-green-200 font-medium">{t('bdAccounts.accountConnected')}</p>
-                      <p className="text-xs text-green-700 dark:text-green-300 mt-1">
-                        {t('bdAccounts.accountConnectedHint')}
-                      </p>
-                    </div>
-                  )}
-                  {connectingAccountId && !loadingDialogs && syncProgress === null && (
-                    <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-xl p-4 mb-4 shrink-0">
-                      <div className="flex items-start gap-3">
-                        <div className="p-1.5 rounded-lg bg-blue-100 dark:bg-blue-800/50 shrink-0">
-                          <ShieldCheck className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-sm font-semibold text-blue-900 dark:text-blue-100">{t('bdAccounts.syncSafetyTitle')}</p>
-                          <p className="text-xs text-blue-800 dark:text-blue-200 mt-1">{t('bdAccounts.syncSafetyIntro')}</p>
-                          <ul className="mt-2 space-y-1 text-xs text-blue-700 dark:text-blue-300 list-disc list-inside">
-                            <li>{t('bdAccounts.syncSafetyOnlySelected')}</li>
-                            <li>{t('bdAccounts.syncSafetyNoChangesInTg')}</li>
-                            <li>{t('bdAccounts.syncSafetyDataSecure')}</li>
-                            <li>{t('bdAccounts.syncSafetyChangeAnytime')}</li>
-                          </ul>
-                        </div>
-                      </div>
+                    <div className="flex items-center gap-2 mb-3 shrink-0">
+                      <span
+                        className="flex items-center justify-center w-8 h-8 rounded-full bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 shrink-0"
+                        title={`${t('bdAccounts.accountConnected')}. ${t('bdAccounts.accountConnectedHint')}`}
+                      >
+                        <CheckCircle2 className="w-5 h-5" />
+                      </span>
+                      <span
+                        className="flex items-center justify-center w-8 h-8 rounded-full bg-muted text-muted-foreground hover:bg-muted/80 shrink-0 cursor-help"
+                        title={`${t('bdAccounts.syncSafetyTitle')}. ${t('bdAccounts.syncSafetyIntro')}\n• ${t('bdAccounts.syncSafetyOnlySelected')}\n• ${t('bdAccounts.syncSafetyNoChangesInTg')}\n• ${t('bdAccounts.syncSafetyDataSecure')}\n• ${t('bdAccounts.syncSafetyChangeAnytime')}`}
+                      >
+                        <HelpCircle className="w-5 h-5" />
+                      </span>
                     </div>
                   )}
                   {syncProgress !== null ? (

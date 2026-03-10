@@ -36,7 +36,7 @@ const SIGNUP_RATE_LIMIT = 5;
 const SIGNUP_RATE_WINDOW_MS = 60 * 60 * 1000;
 const signupAttempts = new Map<string, { count: number; resetAt: number }>();
 
-function getClientIp(req: { ip?: string; headers?: { 'x-forwarded-for'?: string } }): string {
+function getClientIp(req: { ip?: string; headers?: Record<string, string | string[] | undefined> }): string {
   const forwarded = req.headers?.['x-forwarded-for'];
   if (typeof forwarded === 'string') return forwarded.split(',')[0]?.trim() || req.ip || 'unknown';
   return req.ip || 'unknown';
@@ -270,7 +270,7 @@ export function authRouter({ pool, rabbitmq, log }: Deps): Router {
     const attempt = refreshAttempts.get(clientId);
     if (attempt && attempt.resetAt > now) {
       if (attempt.count >= REFRESH_RATE_LIMIT) {
-        throw new AppError(429, 'Too many refresh attempts', ErrorCodes.RATE_LIMITEDED);
+        throw new AppError(429, 'Too many refresh attempts', ErrorCodes.RATE_LIMITED);
       }
       attempt.count++;
     } else {

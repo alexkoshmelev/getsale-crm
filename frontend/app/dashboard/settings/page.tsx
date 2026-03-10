@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
 import { useAuthStore } from '@/lib/stores/auth-store';
@@ -16,7 +15,7 @@ type SettingsTab = 'profile' | 'workspace' | 'subscription' | 'security' | 'noti
 
 const tabsConfig: { id: SettingsTab; i18nKey: string; icon: typeof User; ownerAdminOnly?: boolean }[] = [
   { id: 'profile', i18nKey: 'profile', icon: User },
-  { id: 'workspace', i18nKey: 'workspace', icon: Building2 },
+  { id: 'workspace', i18nKey: 'workspace', icon: Building2, ownerAdminOnly: true },
   { id: 'subscription', i18nKey: 'subscription', icon: CreditCard },
   { id: 'security', i18nKey: 'security', icon: Key },
   { id: 'notifications', i18nKey: 'notifications', icon: Bell },
@@ -25,16 +24,14 @@ const tabsConfig: { id: SettingsTab; i18nKey: string; icon: typeof User; ownerAd
 
 export default function SettingsPage() {
   const { t } = useTranslation();
-  const router = useRouter();
   const { user } = useAuthStore();
   const canEditWorkspace = canAccessWorkspaceSettings(user?.role);
 
-  useEffect(() => {
-    if (user != null && !canAccessWorkspaceSettings(user.role)) {
-      router.replace('/dashboard');
-    }
-  }, [user, router]);
   const [profile, setProfile] = useState<any>(null);
+  const [profileFirstName, setProfileFirstName] = useState('');
+  const [profileLastName, setProfileLastName] = useState('');
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [subscription, setSubscription] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<SettingsTab>('profile');
@@ -49,8 +46,21 @@ export default function SettingsPage() {
   const [auditLoading, setAuditLoading] = useState(false);
 
   useEffect(() => {
+    if (!canEditWorkspace && (activeTab === 'workspace' || activeTab === 'audit')) {
+      setActiveTab('profile');
+    }
+  }, [canEditWorkspace, activeTab]);
+
+  useEffect(() => {
     fetchData();
   }, []);
+
+  useEffect(() => {
+    if (profile) {
+      setProfileFirstName(profile.first_name ?? '');
+      setProfileLastName(profile.last_name ?? '');
+    }
+  }, [profile]);
 
   useEffect(() => {
     if (activeTab === 'workspace' && !organization) {
@@ -99,6 +109,27 @@ export default function SettingsPage() {
       console.error('Error fetching settings:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const saveProfile = async () => {
+    if (!profile) return;
+    setProfileError(null);
+    setProfileSaving(true);
+    try {
+      const updated = await apiClient.put('/api/users/profile', {
+        firstName: profileFirstName.trim() || null,
+        lastName: profileLastName.trim() || null,
+        avatarUrl: profile.avatar_url ?? null,
+        timezone: profile.timezone ?? null,
+        preferences: profile.preferences ?? {},
+      });
+      setProfile(updated.data);
+    } catch (err: unknown) {
+      const message = err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) : 'Failed to save profile';
+      setProfileError(message);
+    } finally {
+      setProfileSaving(false);
     }
   };
 
@@ -184,23 +215,31 @@ export default function SettingsPage() {
                 </h2>
                 {profile ? (
                   <div className="space-y-4">
+                    {profileError && (
+                      <p className="text-sm text-destructive rounded-lg bg-destructive/10 px-3 py-2">{profileError}</p>
+                    )}
                     <Input
                       label={t('settings.firstName')}
                       type="text"
-                      defaultValue={profile.first_name || ''}
+                      value={profileFirstName}
+                      onChange={(e) => setProfileFirstName(e.target.value)}
                     />
                     <Input
                       label={t('settings.lastName')}
                       type="text"
-                      defaultValue={profile.last_name || ''}
+                      value={profileLastName}
+                      onChange={(e) => setProfileLastName(e.target.value)}
                     />
                     <Input
                       label={t('settings.email')}
                       type="email"
-                      defaultValue={user?.email || ''}
+                      value={user?.email || ''}
                       disabled
+                      title={t('settings.emailChangeLater')}
                     />
-                    <Button>{t('settings.saveChanges')}</Button>
+                    <Button onClick={saveProfile} disabled={profileSaving}>
+                      {profileSaving ? t('settings.saving') : t('settings.saveChanges')}
+                    </Button>
                   </div>
                 ) : (
                   <p className="text-muted-foreground text-sm">{t('settings.profileNotFound')}</p>

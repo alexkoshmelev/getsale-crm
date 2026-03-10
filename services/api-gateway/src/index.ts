@@ -88,6 +88,7 @@ const BD_ACCOUNTS_SERVICE = process.env.BD_ACCOUNTS_SERVICE_URL || 'http://local
 const PIPELINE_SERVICE = process.env.PIPELINE_SERVICE_URL || 'http://localhost:3008';
 const AUTOMATION_SERVICE = process.env.AUTOMATION_SERVICE_URL || 'http://localhost:3009';
 const ANALYTICS_SERVICE = process.env.ANALYTICS_SERVICE_URL || 'http://localhost:3010';
+const ACTIVITY_SERVICE = process.env.ACTIVITY_SERVICE_URL || 'http://localhost:3013';
 const TEAM_SERVICE = process.env.TEAM_SERVICE_URL || 'http://localhost:3011';
 const CAMPAIGN_SERVICE = process.env.CAMPAIGN_SERVICE_URL || 'http://localhost:3012';
 
@@ -489,6 +490,21 @@ const analyticsProxy = createProxyMiddleware({
   },
 });
 
+const activityProxy = createProxyMiddleware({
+  target: ACTIVITY_SERVICE,
+  changeOrigin: true,
+  pathRewrite: { '^/api/activity': '/api/activity' },
+  onProxyReq: (proxyReq, req) => {
+    addCorrelationToProxyReq(proxyReq, req);
+    addInternalAuthToProxyReq(proxyReq);
+    addAuthHeadersToProxyReq(proxyReq, req);
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    addCorrelationToResponse(res, req);
+    addCorsToProxyRes(proxyRes, req);
+  },
+});
+
 const teamProxy = createProxyMiddleware({
   target: TEAM_SERVICE,
   changeOrigin: true,
@@ -526,6 +542,7 @@ app.use('/api/bd-accounts', authenticate, rateLimit, bdAccountsProxy);
 app.use('/api/pipeline', authenticate, rateLimit, pipelineProxy);
 app.use('/api/automation', authenticate, rateLimit, automationProxy);
 app.use('/api/analytics', authenticate, rateLimit, analyticsProxy);
+app.use('/api/activity', authenticate, rateLimit, activityProxy);
 app.use('/api/team', authenticate, rateLimit, teamProxy);
 app.use('/api/campaigns', authenticate, rateLimit, campaignProxy);
 

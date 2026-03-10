@@ -28,6 +28,7 @@ import ParseResultSummary from '@/components/parsing/ParseResultSummary';
 import type { ParseResult } from '@/lib/api/discovery';
 import Button from '@/components/ui/Button';
 import { SearchInput } from '@/components/ui/SearchInput';
+import { Pagination } from '@/components/ui/Pagination';
 import clsx from 'clsx';
 import { formatDistanceToNow } from 'date-fns';
 import { ru } from 'date-fns/locale';
@@ -35,8 +36,21 @@ import { ru } from 'date-fns/locale';
 interface BdAccount {
   id: string;
   display_name?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  username?: string | null;
   phone_number?: string | null;
   is_active?: boolean;
+}
+
+function getAccountDisplayName(account: BdAccount): string {
+  if (account.display_name?.trim()) return account.display_name.trim();
+  const first = (account.first_name ?? '').trim();
+  const last = (account.last_name ?? '').trim();
+  if (first || last) return [first, last].filter(Boolean).join(' ');
+  if (account.username?.trim()) return account.username.trim();
+  if (account.phone_number?.trim()) return account.phone_number.trim();
+  return '—';
 }
 
 interface Campaign {
@@ -45,6 +59,8 @@ interface Campaign {
 }
 
 type TabType = 'tasks' | 'new_search' | 'new_parse';
+
+const TASKS_PAGE_SIZE = 10;
 
 export default function ContactDiscoveryPage() {
   const { t, i18n } = useTranslation();
@@ -55,6 +71,8 @@ export default function ContactDiscoveryPage() {
 
   // Tasks state
   const [tasks, setTasks] = useState<DiscoveryTask[]>([]);
+  const [taskTotal, setTaskTotal] = useState(0);
+  const [taskPage, setTaskPage] = useState(1);
   const [loadingTasks, setLoadingTasks] = useState(false);
   const [selectedTask, setSelectedTask] = useState<DiscoveryTask | null>(null);
   const [selectedChatsForParse, setSelectedChatsForParse] = useState<(SearchGroupItem & { disabled?: boolean })[]>([]);
@@ -112,32 +130,46 @@ export default function ContactDiscoveryPage() {
     }).catch(() => setCampaigns([]));
   }, []);
 
-  const loadTasks = useCallback(() => {
+  const loadTasks = useCallback((pageOverride?: number) => {
     setLoadingTasks(true);
-    fetchDiscoveryTasks()
-      .then((r) => setTasks(r.tasks))
-      .catch((e) => setError(e?.response?.data?.error ?? e?.message ?? 'Failed to load tasks'))
+    const page = pageOverride ?? taskPage;
+    const offset = (page - 1) * TASKS_PAGE_SIZE;
+    fetchDiscoveryTasks(TASKS_PAGE_SIZE, offset)
+      .then((r) => {
+        setTasks(r.tasks);
+        setTaskTotal(r.total);
+      })
+      .catch((e) => setError(e?.response?.data?.error ?? e?.message ?? t('discovery.errors.loadFailed')))
       .finally(() => setLoadingTasks(false));
-  }, []);
+  }, [taskPage]);
 
   useEffect(() => {
     loadAccounts();
     loadCampaigns();
+  }, [loadAccounts, loadCampaigns]);
+
+  useEffect(() => {
     loadTasks();
-  }, [loadAccounts, loadCampaigns, loadTasks]);
+  }, [loadTasks]);
 
   // Polling for tasks
   useEffect(() => {
     const interval = setInterval(() => {
       if (activeTab === 'tasks') {
-        fetchDiscoveryTasks().then((r) => setTasks(r.tasks)).catch(() => {});
+        const offset = (taskPage - 1) * TASKS_PAGE_SIZE;
+        fetchDiscoveryTasks(TASKS_PAGE_SIZE, offset)
+          .then((r) => {
+            setTasks(r.tasks);
+            setTaskTotal(r.total);
+          })
+          .catch(() => {});
       }
       if (selectedTask) {
         fetchDiscoveryTask(selectedTask.id).then((r) => setSelectedTask(r)).catch(() => {});
       }
     }, 5000);
     return () => clearInterval(interval);
-  }, [activeTab, selectedTask]);
+  }, [activeTab, selectedTask, taskPage]);
 
   const handleGenerateQueries = () => {
     const topic = aiTopic.trim();
@@ -149,15 +181,15 @@ export default function ContactDiscoveryPage() {
          const newQ = (r.queries || []).join('\n');
          setQueriesText((prev) => prev ? prev + '\n' + newQ : newQ);
       })
-      .catch((e) => setError(e?.response?.data?.error ?? e?.message ?? 'AI failed'))
+      .catch((e) => setError(e?.response?.data?.error ?? e?.message ?? t('discovery.errors.aiFailed')))
       .finally(() => setAiLoading(false));
   };
 
   const handleCreateSearchTask = () => {
     const lines = queriesText.split(/\n/).map((s) => s.trim()).filter(Boolean);
-    if (!searchName.trim()) return setError('Enter task name');
-    if (!searchAccountId) return setError('Select BD account');
-    if (lines.length === 0) return setError('Enter at least one query');
+    if (!searchName.trim()) return setError(t('discovery.errors.enterTaskName'));
+    if (!searchAccountId) return setError(t('discovery.errors.selectBdAccount'));
+    if (lines.length === 0) return setError(t('discovery.errors.enterQueries'));
     
     setError(null);
     createDiscoveryTask({
@@ -174,26 +206,27 @@ export default function ContactDiscoveryPage() {
       setQueriesText('');
       setAiTopic('');
       setActiveTab('tasks');
-      loadTasks();
-    }).catch(e => setError(e?.message || 'Failed'));
+      setTaskPage(1);
+      loadTasks(1);
+    }).catch(e => setError(e?.message || t('discovery.errors.createFailed')));
   };
 
   const handleCreateParseTask = () => {
-    if (!parseName.trim()) return setError('Enter task name');
-    if (!parseAccountId) return setError('Select BD account');
+    if (!parseName.trim()) return setError(t('discovery.errors.enterTaskName'));
+    if (!parseAccountId) return setError(t('discovery.errors.selectBdAccount'));
     
     let targetChats: { chatId: string, title?: string, peerType?: string }[] = [];
     if (selectedChatsForParse.length > 0) {
       targetChats = selectedChatsForParse.filter(c => !c.disabled).map(c => ({ chatId: c.chatId, title: c.title, peerType: c.peerType }));
-      if (targetChats.length === 0) return setError('Выберите хотя бы одну группу для парсинга');
+      if (targetChats.length === 0) return setError(t('discovery.errors.selectOneGroup'));
     } else {
       const lines = parseLinksText.split(/\n/).map((s) => s.trim()).filter(Boolean);
-      if (lines.length === 0) return setError('Enter links or select groups from a search task');
+      if (lines.length === 0) return setError(t('discovery.errors.enterLinksOrSelect'));
       targetChats = lines.map(l => ({ chatId: l }));
     }
 
     if (parseMode === 'active' && (!postDepth || postDepth < 1 || postDepth > 2000)) {
-       return setError('Post depth must be between 1 and 2000');
+       return setError(t('discovery.errors.postDepthRange'));
     }
 
     setError(null);
@@ -217,8 +250,9 @@ export default function ContactDiscoveryPage() {
       setNewCampaignName('');
       setExportCampaignId('');
       setActiveTab('tasks');
-      loadTasks();
-    }).catch(e => setError(e?.message || 'Failed'));
+      setTaskPage(1);
+      loadTasks(1);
+    }).catch(e => setError(e?.message || t('discovery.errors.createFailed')));
   };
 
   const handleTaskAction = (id: string, action: 'start'|'pause'|'stop') => {
@@ -227,13 +261,13 @@ export default function ContactDiscoveryPage() {
         if (selectedTask?.id === id) {
            fetchDiscoveryTask(id).then(r => setSelectedTask(r));
         }
-     }).catch(e => setError(e?.response?.data?.message || 'Action failed'));
+     }).catch(e => setError(e?.response?.data?.message || t('discovery.errors.actionFailed')));
   };
 
   const openParseFromSearch = (task: DiscoveryTask) => {
      if (task.type !== 'search') return;
      const groups = task.results?.groups || [];
-     if (groups.length === 0) return setError('В этом задании не найдено групп');
+     if (groups.length === 0) return setError(t('discovery.errors.noGroupsInTask'));
      setSelectedChatsForParse(groups);
      setParseAccountId(task.params.bdAccountId);
      setParseName(`Parse from: ${task.name}`);
@@ -277,7 +311,7 @@ export default function ContactDiscoveryPage() {
       setParseStep(3);
       loadTasks();
     } catch (e: any) {
-      setError(e?.response?.data?.error ?? e?.message ?? 'Ошибка запуска');
+      setError(e?.response?.data?.error ?? e?.message ?? t('discovery.errors.parseStartError'));
     } finally {
       setParseStarting(false);
     }
@@ -314,10 +348,10 @@ export default function ContactDiscoveryPage() {
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-            {t('discovery.title', 'Contact Discovery')}
+            {t('discovery.title')}
           </h1>
           <p className="text-sm text-gray-500 mt-1">
-            Поиск и сбор аудитории из Telegram
+            {t('discovery.subtitle')}
           </p>
         </div>
       </div>
@@ -337,7 +371,7 @@ export default function ContactDiscoveryPage() {
             activeTab === 'tasks' && !selectedTask ? "border-blue-500 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
           )}
         >
-          Задания
+          {t('discovery.tabs.tasks')}
         </button>
         <button
           onClick={() => { setActiveTab('new_search'); setSelectedTask(null); }}
@@ -347,7 +381,7 @@ export default function ContactDiscoveryPage() {
           )}
         >
           <Plus className="w-4 h-4 inline-block mr-1" />
-          Новый поиск
+          {t('discovery.tabs.newSearch')}
         </button>
         <button
           onClick={() => { setActiveTab('new_parse'); setSelectedTask(null); }}
@@ -357,7 +391,7 @@ export default function ContactDiscoveryPage() {
           )}
         >
           <Plus className="w-4 h-4 inline-block mr-1" />
-          Новый парсинг
+          {t('discovery.tabs.newParse')}
         </button>
       </div>
 
@@ -369,10 +403,10 @@ export default function ContactDiscoveryPage() {
              <div className="flex justify-between items-start">
                <div>
                  <button onClick={() => setSelectedTask(null)} className="text-blue-500 text-sm mb-2 hover:underline">
-                   &larr; Назад к списку
+                   &larr; {t('discovery.backToList')}
                  </button>
                  <h2 className="text-xl font-bold">{selectedTask.name}</h2>
-                 <p className="text-sm text-gray-500">Тип: {selectedTask.type === 'search' ? 'Поиск групп' : 'Парсинг аудитории'} | Статус: {selectedTask.status}</p>
+                 <p className="text-sm text-gray-500">{t('discovery.colType')}: {selectedTask.type === 'search' ? t('discovery.typeSearch') : t('discovery.typeParse')} | {t('discovery.colStatus')}: {t(`discovery.status.${selectedTask.status}`)}</p>
                </div>
                <div className="flex gap-2">
                   {['pending', 'paused', 'failed'].includes(selectedTask.status) && (
@@ -386,27 +420,27 @@ export default function ContactDiscoveryPage() {
                   )}
                   {selectedTask.type === 'search' && selectedTask.status === 'completed' && (
                     <Button onClick={() => openParseFromSearch(selectedTask)}>
-                       Собрать аудиторию
+                       {t('discovery.collectAudience')}
                     </Button>
                   )}
                </div>
              </div>
 
              <div className="bg-gray-50 dark:bg-gray-900 p-4 rounded-md">
-               <div className="mb-2 text-sm font-medium">Прогресс: {selectedTask.progress} / {selectedTask.total}</div>
+               <div className="mb-2 text-sm font-medium">{t('discovery.progressLabel')}: {selectedTask.progress} / {selectedTask.total}</div>
                {renderProgressBar(selectedTask.progress, selectedTask.total)}
              </div>
 
              {selectedTask.type === 'search' && (
                <div>
-                 <h3 className="font-medium mb-2">Найдено групп: {selectedTask.results?.groups?.length || 0}</h3>
+                 <h3 className="font-medium mb-2">{t('discovery.groupsFoundCount')}: {selectedTask.results?.groups?.length || 0}</h3>
                  <div className="max-h-96 overflow-y-auto border border-gray-200 dark:border-gray-700 rounded-md">
                    <table className="w-full text-sm text-left">
                      <thead className="bg-gray-50 dark:bg-gray-700">
                        <tr>
-                         <th className="p-2">ID</th>
-                         <th className="p-2">Название</th>
-                         <th className="p-2">Тип</th>
+                         <th className="p-2">{t('discovery.colId')}</th>
+                         <th className="p-2">{t('discovery.colName')}</th>
+                         <th className="p-2">{t('discovery.colType')}</th>
                        </tr>
                      </thead>
                      <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
@@ -425,9 +459,9 @@ export default function ContactDiscoveryPage() {
 
              {selectedTask.type === 'parse' && (
                <div>
-                 <h3 className="font-medium mb-2">Собрано контактов: {selectedTask.results?.parsed || 0}</h3>
+                 <h3 className="font-medium mb-2">{t('discovery.contactsParsedCount')}: {selectedTask.results?.parsed || 0}</h3>
                  <p className="text-sm text-gray-600 dark:text-gray-400">
-                   Контакты автоматически сохраняются в CRM. {selectedTask.params.campaignId && 'Также добавлены в рассылку.'}
+                   {t('discovery.contactsSavedHint')} {selectedTask.params.campaignId && t('discovery.addToCampaignHint')}
                  </p>
                </div>
              )}
@@ -438,122 +472,158 @@ export default function ContactDiscoveryPage() {
              {loadingTasks ? (
                <div className="p-8 flex justify-center"><Loader2 className="w-6 h-6 animate-spin text-gray-400" /></div>
              ) : tasks.length === 0 ? (
-               <div className="p-8 text-center text-gray-500">Нет заданий</div>
+               <div className="p-8 text-center text-gray-500">{t('discovery.noTasks')}</div>
              ) : (
-               <table className="w-full text-sm text-left">
-                 <thead className="bg-gray-50 dark:bg-gray-700">
-                   <tr>
-                     <th className="p-4">Название</th>
-                     <th className="p-4">Тип</th>
-                     <th className="p-4">Статус</th>
-                     <th className="p-4">Прогресс</th>
-                     <th className="p-4">Дата</th>
-                   </tr>
-                 </thead>
-                 <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-                   {tasks.map(t => (
-                     <tr key={t.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer transition-colors" onClick={() => setSelectedTask(t)}>
-                       <td className="p-4 font-medium">{t.name}</td>
-                       <td className="p-4">
-                         <span className={clsx("px-2 py-1 text-xs rounded-full", t.type === 'search' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700')}>
-                           {t.type === 'search' ? 'Поиск' : 'Парсинг'}
-                         </span>
-                       </td>
-                       <td className="p-4">
-                         <span className={clsx("px-2 py-1 text-xs rounded-full", 
-                           t.status === 'completed' ? 'bg-green-100 text-green-700' : 
-                           t.status === 'running' ? 'bg-blue-100 text-blue-700 animate-pulse' :
-                           t.status === 'failed' ? 'bg-red-100 text-red-700' :
-                           'bg-gray-100 text-gray-700'
-                         )}>
-                           {t.status}
-                         </span>
-                       </td>
-                       <td className="p-4 w-48">
-                         <div className="flex items-center gap-2">
-                           <span className="text-xs text-gray-500 w-12">{t.progress}/{t.total}</span>
-                           {renderProgressBar(t.progress, t.total)}
-                         </div>
-                       </td>
-                       <td className="p-4 text-gray-500 whitespace-nowrap">
-                         {formatDistanceToNow(new Date(t.created_at), { addSuffix: true, locale: ru })}
-                       </td>
+               <>
+                 <table className="w-full text-sm text-left">
+                   <thead className="bg-gray-50 dark:bg-gray-700">
+                     <tr>
+                       <th className="p-4">{t('discovery.colName')}</th>
+                       <th className="p-4">{t('discovery.colType')}</th>
+                       <th className="p-4">{t('discovery.colBdAccount')}</th>
+                       <th className="p-4">{t('discovery.colStatus')}</th>
+                       <th className="p-4">{t('discovery.colProgress')}</th>
+                       <th className="p-4">{t('discovery.colResult')}</th>
+                       <th className="p-4">{t('discovery.colDate')}</th>
+                       <th className="p-4 w-28">{t('discovery.colActions')}</th>
                      </tr>
-                   ))}
-                 </tbody>
-               </table>
+                   </thead>
+                   <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                     {tasks.map(task => {
+                       const account = task.params?.bdAccountId ? accounts.find((a) => a.id === task.params.bdAccountId) : null;
+                       const accountLabel = account ? getAccountDisplayName(account) : '—';
+                       const resultLabel = task.type === 'search'
+                         ? (task.results?.groups?.length != null ? t('discovery.resultGroups', { count: task.results.groups.length }) : '—')
+                         : (task.results?.parsed != null ? t('discovery.resultContacts', { count: task.results.parsed }) : '—');
+                       return (
+                         <tr key={task.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer transition-colors" onClick={() => setSelectedTask(task)}>
+                           <td className="p-4 font-medium">{task.name}</td>
+                           <td className="p-4">
+                             <span className={clsx("px-2 py-1 text-xs rounded-full", task.type === 'search' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700')}>
+                               {task.type === 'search' ? t('discovery.search') : t('discovery.parse')}
+                             </span>
+                           </td>
+                           <td className="p-4 text-gray-600 dark:text-gray-400">{accountLabel}</td>
+                           <td className="p-4">
+                             <span className={clsx("px-2 py-1 text-xs rounded-full", 
+                               task.status === 'completed' ? 'bg-green-100 text-green-700' : 
+                               task.status === 'running' ? 'bg-blue-100 text-blue-700 animate-pulse' :
+                               task.status === 'failed' ? 'bg-red-100 text-red-700' :
+                               'bg-gray-100 text-gray-700'
+                             )}>
+                               {t(`discovery.status.${task.status}`)}
+                             </span>
+                           </td>
+                           <td className="p-4 w-48">
+                             <div className="flex items-center gap-2">
+                               <span className="text-xs text-gray-500 w-12">{task.progress}/{task.total}</span>
+                               {renderProgressBar(task.progress, task.total)}
+                             </div>
+                           </td>
+                           <td className="p-4 text-gray-600 dark:text-gray-400">{resultLabel}</td>
+                           <td className="p-4 text-gray-500 whitespace-nowrap">
+                             {formatDistanceToNow(new Date(task.created_at), { addSuffix: true, locale: ru })}
+                           </td>
+                           <td className="p-4" onClick={(e) => e.stopPropagation()}>
+                             <div className="flex items-center gap-1">
+                               {['pending', 'paused', 'failed'].includes(task.status) && (
+                                 <Button variant="outline" size="sm" className="p-1.5" onClick={() => handleTaskAction(task.id, 'start')} title={t('discovery.actionStart')}><Play className="w-3.5 h-3.5" /></Button>
+                               )}
+                               {task.status === 'running' && (
+                                 <Button variant="outline" size="sm" className="p-1.5" onClick={() => handleTaskAction(task.id, 'pause')} title={t('discovery.actionPause')}><Pause className="w-3.5 h-3.5" /></Button>
+                               )}
+                               {['running', 'paused', 'pending'].includes(task.status) && (
+                                 <Button variant="outline" size="sm" className="p-1.5" onClick={() => handleTaskAction(task.id, 'stop')} title={t('discovery.actionStop')}><Square className="w-3.5 h-3.5" /></Button>
+                               )}
+                             </div>
+                           </td>
+                         </tr>
+                       );
+                     })}
+                   </tbody>
+                 </table>
+                 {taskTotal > TASKS_PAGE_SIZE && (
+                   <div className="px-6 py-4 border-t border-border">
+                     <Pagination
+                       page={taskPage}
+                       totalPages={Math.ceil(taskTotal / TASKS_PAGE_SIZE)}
+                       onPageChange={setTaskPage}
+                     />
+                   </div>
+                 )}
+               </>
              )}
            </div>
         ) : activeTab === 'new_search' ? (
            // New Search Task Form
            <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow max-w-2xl space-y-6">
              <div>
-               <label className="block text-sm font-medium mb-1">Название задания</label>
-               <SearchInput value={typeof searchName === 'string' ? searchName : ''} onChange={(e) => setSearchName(e.target.value)} placeholder="Например: Поиск крипто групп" className="w-full" />
+               <label className="block text-sm font-medium mb-1">{t('discovery.taskName')}</label>
+               <SearchInput value={typeof searchName === 'string' ? searchName : ''} onChange={(e) => setSearchName(e.target.value)} placeholder={t('discovery.taskNamePlaceholder')} className="w-full" />
              </div>
              
              <div>
-                <label className="block text-sm font-medium mb-1">BD Аккаунт</label>
+                <label className="block text-sm font-medium mb-1">{t('discovery.bdAccount')}</label>
                 <select
                   value={searchAccountId}
                   onChange={(e) => setSearchAccountId(e.target.value)}
                   className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800"
                 >
-                  <option value="" disabled>Выберите аккаунт</option>
-                  {accounts.map(a => <option key={a.id} value={a.id}>{a.display_name || a.phone_number}</option>)}
+                  <option value="" disabled>{t('discovery.selectAccount')}</option>
+                  {accounts.map(a => <option key={a.id} value={a.id}>{getAccountDisplayName(a)}</option>)}
                 </select>
              </div>
 
              <div>
-                <label className="block text-sm font-medium mb-1">Что ищем?</label>
+                <label className="block text-sm font-medium mb-1">{t('discovery.whatSearch')}</label>
                 <select
                   value={searchType}
                   onChange={(e) => setSearchType(e.target.value as SearchType)}
                   className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800"
                 >
-                  <option value="all">Группы и Каналы</option>
-                  <option value="groups">Только Группы</option>
-                  <option value="channels">Только Каналы</option>
+                  <option value="all">{t('discovery.typeAll')}</option>
+                  <option value="groups">{t('discovery.typeGroups')}</option>
+                  <option value="channels">{t('discovery.typeChannels')}</option>
                 </select>
              </div>
 
              <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-md border border-blue-100 dark:border-blue-800">
                 <label className="block text-sm font-medium text-blue-900 dark:text-blue-100 mb-2">
-                  <Sparkles className="w-4 h-4 inline-block mr-1" /> Генерация запросов ИИ
+                  <Sparkles className="w-4 h-4 inline-block mr-1" /> {t('discovery.aiQueriesLabel')}
                 </label>
                 <div className="flex gap-2">
-                  <SearchInput value={typeof aiTopic === 'string' ? aiTopic : ''} onChange={(e) => setAiTopic(e.target.value)} placeholder="Тема (например, инвестиции)" className="flex-1" />
+                  <SearchInput value={typeof aiTopic === 'string' ? aiTopic : ''} onChange={(e) => setAiTopic(e.target.value)} placeholder={t('discovery.topicPlaceholder')} className="flex-1" />
                   <Button onClick={handleGenerateQueries} disabled={aiLoading || !aiTopic}>
-                    {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Сгенерировать'}
+                    {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : t('discovery.generateQueries')}
                   </Button>
                 </div>
              </div>
 
              <div>
-               <label className="block text-sm font-medium mb-1">Поисковые запросы (каждый с новой строки)</label>
+               <label className="block text-sm font-medium mb-1">{t('discovery.queriesLabel')}</label>
                <textarea
                  value={queriesText}
                  onChange={(e) => setQueriesText(e.target.value)}
-                 placeholder={'крипто инвестиции\nтрейдинг\n#биткоин'}
+                 placeholder={t('discovery.queriesPlaceholder')}
                  className="w-full h-32 p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800"
                />
                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                 Для поиска по хештегу начните запрос с # (например, #крипто). Остальные запросы ищут по тексту.
+                 {t('discovery.queriesHint')}
                </p>
              </div>
 
-             <Button onClick={handleCreateSearchTask} className="w-full justify-center">Запустить поиск</Button>
+             <Button onClick={handleCreateSearchTask} className="w-full justify-center">{t('discovery.startSearch')}</Button>
            </div>
         ) : (
            // New Parse Flow (smart resolve + strategy)
            <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow max-w-2xl space-y-6">
              {parseStep === 1 && (
                <>
-                 <h3 className="font-medium text-gray-900 dark:text-gray-100">Шаг 1 — Ввод источников</h3>
+                 <h3 className="font-medium text-gray-900 dark:text-gray-100">{t('discovery.step1')}</h3>
                  <ParseSourceInput
                    bdAccountId={parseResolveAccountId}
                    onBdAccountIdChange={setParseResolveAccountId}
-                   accountOptions={accounts.map((a) => ({ id: a.id, label: a.display_name || a.phone_number || a.id }))}
+                   accountOptions={accounts.map((a) => ({ id: a.id, label: getAccountDisplayName(a) || a.id }))}
                    onResolve={handleParseResolve}
                  />
                </>
@@ -561,8 +631,8 @@ export default function ContactDiscoveryPage() {
              {parseStep === 2 && (
                <>
                  <div className="flex items-center justify-between">
-                   <h3 className="font-medium text-gray-900 dark:text-gray-100">Шаг 2 — Проверенные источники и настройки</h3>
-                   <button type="button" className="text-sm text-blue-600 hover:underline" onClick={() => { setParseStep(1); setResolvedSources([]); }}>Изменить источники</button>
+                   <h3 className="font-medium text-gray-900 dark:text-gray-100">{t('discovery.step2')}</h3>
+                   <button type="button" className="text-sm text-blue-600 hover:underline" onClick={() => { setParseStep(1); setResolvedSources([]); }}>{t('discovery.changeSources')}</button>
                  </div>
                  <div className="space-y-2 max-h-48 overflow-y-auto">
                    {resolvedSources.map((s, i) => (
@@ -571,7 +641,7 @@ export default function ContactDiscoveryPage() {
                  </div>
                  <ParseSettingsForm
                    sources={resolvedSources}
-                   accountOptions={accounts.map((a) => ({ id: a.id, label: a.display_name || a.phone_number || a.id }))}
+                   accountOptions={accounts.map((a) => ({ id: a.id, label: getAccountDisplayName(a) || a.id }))}
                    selectedAccountIds={parseAccountIds}
                    onAccountIdsChange={setParseAccountIds}
                    depth={parseDepth}
@@ -587,7 +657,7 @@ export default function ContactDiscoveryPage() {
              )}
              {parseStep === 3 && parseTaskId && (
                <>
-                 <h3 className="font-medium text-gray-900 dark:text-gray-100">Прогресс парсинга</h3>
+                 <h3 className="font-medium text-gray-900 dark:text-gray-100">{t('discovery.step3Progress')}</h3>
                  <ParseProgressPanel taskId={parseTaskId} onStopped={handleParseProgressStopped} />
                </>
              )}

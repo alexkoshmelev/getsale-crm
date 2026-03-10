@@ -7,7 +7,7 @@ import { MessageSquare, ExternalLink, Loader2, Save } from 'lucide-react';
 import { LeadContextAvatar } from '@/components/messaging/LeadContextAvatar';
 import { Modal } from '@/components/ui/Modal';
 import Button from '@/components/ui/Button';
-import { fetchLeadContextByLeadId, type LeadContextByLead } from '@/lib/api/messaging';
+import { fetchLeadContextByLeadId, resolveContact, type LeadContextByLead } from '@/lib/api/messaging';
 import { updateLead } from '@/lib/api/pipeline';
 import { apiClient } from '@/lib/api/client';
 
@@ -22,6 +22,7 @@ function formatLeadPanelDate(iso: string): string {
 
 interface TeamMember {
   id: string;
+  user_id?: string;
   email: string;
   role: string;
 }
@@ -46,28 +47,40 @@ export function LeadCardModal({ leadId, open, onClose, onLeadUpdated }: LeadCard
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** Resolved bd_account_id + channel_id for avatar when lead has no conversation */
+  const [avatarResolution, setAvatarResolution] = useState<{ bd_account_id: string; channel_id: string } | null>(null);
 
   useEffect(() => {
     if (!open || !leadId) {
       setContext(null);
       setError(null);
       setSaveError(null);
+      setAvatarResolution(null);
       return;
     }
     setLoading(true);
     setError(null);
     setSaveError(null);
+    setAvatarResolution(null);
 
     Promise.all([
       fetchLeadContextByLeadId(leadId),
-      apiClient.get<TeamMember[]>('/api/team/members').then((r) => r.data).catch(() => [] as TeamMember[]),
+      apiClient.get<{ id?: string; user_id?: string; email?: string; role?: string }[]>('/api/team/members').then((r) => r.data).catch(() => []),
     ])
       .then(([ctx, members]) => {
         setContext(ctx);
         setEditStageId(ctx?.stage?.id ?? '');
         setEditResponsibleId(ctx?.responsible_id ?? null);
         setEditAmount(ctx?.revenue_amount != null ? String(ctx.revenue_amount) : '');
-        setTeamMembers(Array.isArray(members) ? members : []);
+        const normalized = Array.isArray(members)
+          ? members.map((m) => ({ ...m, id: m.id ?? m.user_id })).filter((m): m is TeamMember => typeof m.id === 'string')
+          : [];
+        setTeamMembers(normalized);
+        if (ctx?.contact_id && ctx?.contact_telegram_id && !ctx.bd_account_id) {
+          resolveContact(ctx.contact_id)
+            .then((r) => setAvatarResolution(r))
+            .catch(() => {});
+        }
       })
       .catch(() => setError(t('common.error', 'Error')))
       .finally(() => setLoading(false));
@@ -137,8 +150,8 @@ export function LeadCardModal({ leadId, open, onClose, onLeadUpdated }: LeadCard
             <div className="flex flex-col items-center text-center pb-4 border-b border-border">
               <LeadContextAvatar
                 contactName={context.contact_name}
-                telegramId={context.channel_id ?? context.contact_telegram_id}
-                bdAccountId={context.bd_account_id}
+                telegramId={context.channel_id ?? context.contact_telegram_id ?? avatarResolution?.channel_id}
+                bdAccountId={context.bd_account_id ?? avatarResolution?.bd_account_id}
                 className="w-14 h-14"
               />
               <h2 className="mt-3 font-heading text-xl font-semibold text-foreground truncate w-full px-2">

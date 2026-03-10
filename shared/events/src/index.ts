@@ -92,6 +92,9 @@ export enum EventType {
   
   // Analytics
   METRIC_RECORDED = 'metric.recorded',
+
+  // Discovery (Contact discovery / parsing)
+  DISCOVERY_TASK_STARTED = 'discovery.task.started',
 }
 
 export interface BaseEvent {
@@ -584,6 +587,12 @@ export interface MetricRecordedEvent extends BaseEvent {
   };
 }
 
+// Discovery (contact discovery / parsing)
+export interface DiscoveryTaskStartedEvent extends BaseEvent {
+  type: EventType.DISCOVERY_TASK_STARTED;
+  data: { taskId: string; name?: string };
+}
+
 export type Event = 
   | UserCreatedEvent
   | MessageReceivedEvent
@@ -626,5 +635,6 @@ export type Event =
   | DealSlaBreachEvent
   | AutomationRuleCreatedEvent
   | AutomationRuleTriggeredEvent
-  | MetricRecordedEvent;
+  | MetricRecordedEvent
+  | DiscoveryTaskStartedEvent;
 

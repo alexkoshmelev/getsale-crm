@@ -46,7 +46,7 @@ async function main() {
   ctx.mount('/api/crm/companies', companiesRouter(deps));
   ctx.mount('/api/crm/contacts', contactsRouter(contactsDeps));
   ctx.mount('/api/crm/deals', dealsRouter({ ...deps, dealCreatedTotal, dealStageChangedTotal }));
-  ctx.mount('/api/crm/discovery-tasks', discoveryTasksRouter({ pool, log, campaignServiceClient }));
+  ctx.mount('/api/crm/discovery-tasks', discoveryTasksRouter({ pool, rabbitmq, log, campaignServiceClient }));
   ctx.mount('/api/crm/parse', parseRouter({ pool, log, bdAccountsClient, redis }));
   ctx.mount('/api/crm', notesRouter(deps));
   ctx.mount('/api/crm', remindersRouter(deps));

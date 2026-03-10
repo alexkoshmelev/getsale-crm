@@ -164,7 +164,7 @@ function MessageBubbleInner({
               const readMax = selectedChat ? readOutboxMaxIdByChannel[selectedChat.channel_id] : undefined;
               const tgId = msg.telegram_message_id != null ? Number(msg.telegram_message_id) : null;
               const isReadByReceipt = readMax != null && tgId != null && tgId <= readMax;
-              const isRead = msg.status === 'read' || msg.status === 'delivered' || isReadByReceipt;
+              const isRead = msg.status === 'read' || isReadByReceipt;
               return isRead ? (
                 <CheckCheck className="w-3.5 h-3.5 text-primary-foreground ml-1" />
               ) : msg.status === 'sent' || msg.status === 'delivered' || (msg.status === 'pending' && tgId != null) ? (

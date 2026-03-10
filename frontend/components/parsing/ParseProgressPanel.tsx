@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Loader2, Pause, Square } from 'lucide-react';
 import Button from '@/components/ui/Button';
 import { useEventsStream } from '@/lib/contexts/events-stream-context';
@@ -25,6 +26,7 @@ interface ProgressEvent {
 }
 
 export default function ParseProgressPanel({ taskId, onStopped }: ParseProgressPanelProps) {
+  const { t } = useTranslation();
   const [event, setEvent] = useState<ProgressEvent | null>(null);
   const [pausing, setPausing] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -73,14 +75,14 @@ export default function ParseProgressPanel({ taskId, onStopped }: ParseProgressP
         {status === 'running' || status === 'paused' ? (
           <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
         ) : null}
-        {status === 'failed' ? 'Завершено с ошибкой' : status === 'completed' || status === 'stopped' ? 'Завершено' : 'Парсинг в процессе'}
+        {status === 'failed' ? t('parsing.progressCompletedError') : status === 'completed' || status === 'stopped' ? t('parsing.progressCompleted') : t('parsing.progressRunning')}
       </div>
       <div className="text-sm text-gray-600 dark:text-gray-400">
-        {event?.stageLabel ?? 'Загрузка...'}
+        {event?.stageLabel ?? t('parsing.progressLoading')}
       </div>
       {status === 'failed' && event?.error && (
         <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-2 rounded">
-          Ошибка: {event.error}
+          {t('parsing.progressErrorLabel')}: {event.error}
         </div>
       )}
       <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
@@ -90,16 +92,16 @@ export default function ParseProgressPanel({ taskId, onStopped }: ParseProgressP
         />
       </div>
       <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400">
-        <span>Участников собрано: {found}{total > 0 ? ` / ${total}` : ''}</span>
+        <span>{t('parsing.participantsCollected')}: {found}{total > 0 ? ` / ${total}` : ''}</span>
         <span>{percent}%</span>
       </div>
       {(status === 'running' || status === 'paused') && (
         <div className="flex gap-2 pt-2">
           <Button variant="outline" size="sm" onClick={handlePause} disabled={pausing || status !== 'running'}>
-            <Pause className="w-4 h-4" /> Приостановить
+            <Pause className="w-4 h-4" /> {t('parsing.pauseButton')}
           </Button>
           <Button variant="outline" size="sm" onClick={handleStop} disabled={stopping}>
-            <Square className="w-4 h-4" /> Остановить и сохранить
+            <Square className="w-4 h-4" /> {t('parsing.stopButton')}
           </Button>
         </div>
       )}

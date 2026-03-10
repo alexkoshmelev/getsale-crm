@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import Button from '@/components/ui/Button';
 import type { ResolvedSource } from '@/lib/api/discovery';
 import type { ParseSettings } from '@/lib/api/discovery';
@@ -35,6 +36,7 @@ export default function ParseSettingsForm({
   starting,
   disabled,
 }: ParseSettingsFormProps) {
+  const { t } = useTranslation();
   const validSources = sources.filter((s) => !s.error && s.chatId);
 
   const toggleAccount = (id: string) => {
@@ -48,7 +50,7 @@ export default function ParseSettingsForm({
   return (
     <div className="space-y-6">
       <div>
-        <label className="block text-sm font-medium mb-2">Глубина парсинга</label>
+        <label className="block text-sm font-medium mb-2">{t('parsing.depthLabel')}</label>
         <div className="flex flex-wrap gap-3">
           {(['fast', 'standard', 'deep'] as const).map((d) => (
             <label key={d} className="flex items-center gap-2 cursor-pointer">
@@ -61,9 +63,9 @@ export default function ParseSettingsForm({
                 className="w-4 h-4"
               />
               <span className="text-sm">
-                {d === 'fast' && 'Быстро (~500 уч., 3 дня)'}
-                {d === 'standard' && 'Стандарт (~2000 уч., 7 дней)'}
-                {d === 'deep' && 'Глубокий (~5000 уч., 30 дней)'}
+                {d === 'fast' && t('parsing.depthFast')}
+                {d === 'standard' && t('parsing.depthStandard')}
+                {d === 'deep' && t('parsing.depthDeep')}
               </span>
             </label>
           ))}
@@ -71,8 +73,8 @@ export default function ParseSettingsForm({
       </div>
 
       <div>
-        <label className="block text-sm font-medium mb-2">Аккаунты для парсинга</label>
-        <p className="text-xs text-gray-500 mb-2">Рекомендуем 2–3 аккаунта для больших групп</p>
+        <label className="block text-sm font-medium mb-2">{t('parsing.accountsLabel')}</label>
+        <p className="text-xs text-gray-500 mb-2">{t('parsing.accountsHint')}</p>
         <div className="flex flex-wrap gap-2">
           {accountOptions.map((a) => (
             <label key={a.id} className="flex items-center gap-2 cursor-pointer">
@@ -98,17 +100,17 @@ export default function ParseSettingsForm({
             disabled={disabled}
             className="w-4 h-4 rounded text-blue-600"
           />
-          <span className="text-sm">Исключить администраторов</span>
+          <span className="text-sm">{t('parsing.excludeAdminsLabel')}</span>
         </label>
       </div>
 
       <div>
-        <label className="block text-sm font-medium mb-1">Название списка для сохранения</label>
+        <label className="block text-sm font-medium mb-1">{t('parsing.listNameLabel')}</label>
         <input
           type="text"
           value={listName}
           onChange={(e) => onListNameChange(e.target.value)}
-          placeholder="Например: Крипто-аудитория"
+          placeholder={t('parsing.listNamePlaceholder')}
           className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-sm"
           disabled={disabled}
         />
@@ -119,7 +121,7 @@ export default function ParseSettingsForm({
         disabled={disabled || starting || validSources.length === 0 || selectedAccountIds.length === 0}
         className="w-full justify-center bg-green-600 hover:bg-green-700 text-white"
       >
-        {starting ? 'Запуск...' : 'Запустить парсинг'}
+        {starting ? t('parsing.startingButton') : t('parsing.startButton')}
       </Button>
     </div>
   );

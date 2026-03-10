@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import Button from '@/components/ui/Button';
 import { Loader2 } from 'lucide-react';
 
@@ -19,6 +20,7 @@ export default function ParseSourceInput({
   accountOptions,
   disabled,
 }: ParseSourceInputProps) {
+  const { t } = useTranslation();
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,11 +31,11 @@ export default function ParseSourceInput({
       .map((s) => s.trim())
       .filter(Boolean);
     if (lines.length === 0) {
-      setError('Введите хотя бы одну ссылку или @username');
+      setError(t('parsing.errorEnterLink'));
       return;
     }
     if (!bdAccountId) {
-      setError('Выберите аккаунт для проверки');
+      setError(t('parsing.errorSelectAccount'));
       return;
     }
     setError(null);
@@ -41,7 +43,7 @@ export default function ParseSourceInput({
     try {
       await onResolve(lines, bdAccountId);
     } catch (e: unknown) {
-      const msg = e && typeof e === 'object' && 'message' in e ? String((e as { message: string }).message) : 'Ошибка проверки';
+      const msg = e && typeof e === 'object' && 'message' in e ? String((e as { message: string }).message) : t('parsing.errorResolve');
       setError(msg);
     } finally {
       setLoading(false);
@@ -52,28 +54,28 @@ export default function ParseSourceInput({
     <div className="space-y-4">
       <div>
         <label className="block text-sm font-medium mb-1">
-          Ссылки или @username (каждая с новой строки или через запятую)
+          {t('parsing.sourceLabel')}
         </label>
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="@channel&#10;https://t.me/group&#10;t.me/username"
+          placeholder={t('parsing.sourcePlaceholder')}
           className="w-full h-32 p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-sm"
           disabled={disabled}
         />
         <p className="text-xs text-gray-500 mt-1">
-          Поддерживаются: @username, t.me/username, https://t.me/..., числовой chat_id
+          {t('parsing.sourceHint')}
         </p>
       </div>
       <div>
-        <label className="block text-sm font-medium mb-1">Аккаунт для проверки</label>
+        <label className="block text-sm font-medium mb-1">{t('parsing.accountForResolve')}</label>
         <select
           value={bdAccountId}
           onChange={(e) => { setError(null); onBdAccountIdChange(e.target.value); }}
           className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800"
           disabled={disabled}
         >
-          <option value="">Выберите аккаунт</option>
+          <option value="">{t('parsing.selectAccount')}</option>
           {accountOptions.map((a) => (
             <option key={a.id} value={a.id}>{a.label}</option>
           ))}
@@ -85,7 +87,7 @@ export default function ParseSourceInput({
         </div>
       )}
       <Button onClick={handleSubmit} disabled={loading || disabled} className="w-full justify-center">
-        {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Проверить и продолжить'}
+        {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : t('parsing.checkAndContinue')}
       </Button>
     </div>
   );

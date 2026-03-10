@@ -5,14 +5,17 @@ import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-c
 import { DiscoveryTaskCreateSchema, DiscoveryTaskActionSchema } from '../validation';
 import { ServiceHttpClient } from '@getsale/service-core';
 import { randomUUID } from 'crypto';
+import { EventType } from '@getsale/events';
+import type { RabbitMQClient } from '@getsale/utils';
 
 interface Deps {
   pool: Pool;
+  rabbitmq: RabbitMQClient;
   log: Logger;
   campaignServiceClient: ServiceHttpClient;
 }
 
-export function discoveryTasksRouter({ pool, log, campaignServiceClient }: Deps): Router {
+export function discoveryTasksRouter({ pool, rabbitmq, log, campaignServiceClient }: Deps): Router {
   const router = Router();
 
   // GET /api/crm/discovery-tasks
@@ -105,7 +108,7 @@ export function discoveryTasksRouter({ pool, log, campaignServiceClient }: Deps)
     const { action } = req.body;
 
     const task = await pool.query(
-      'SELECT id, status FROM contact_discovery_tasks WHERE id = $1 AND organization_id = $2',
+      'SELECT id, name, status FROM contact_discovery_tasks WHERE id = $1 AND organization_id = $2',
       [id, organizationId]
     );
 
@@ -140,6 +143,22 @@ export function discoveryTasksRouter({ pool, log, campaignServiceClient }: Deps)
       'UPDATE contact_discovery_tasks SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING id, status, updated_at',
       [newStatus, id]
     );
+
+    if (action === 'start' && updated.rows.length > 0) {
+      const taskName = (task.rows[0] as { name?: string }).name;
+      try {
+        await rabbitmq.publishEvent({
+          id: randomUUID(),
+          type: EventType.DISCOVERY_TASK_STARTED,
+          timestamp: new Date(),
+          organizationId,
+          userId: (req as any).user?.id,
+          data: { taskId: id, name: taskName },
+        } as any);
+      } catch (err) {
+        log.warn({ message: 'Failed to publish DISCOVERY_TASK_STARTED', taskId: id, error: (err as Error)?.message });
+      }
+    }
 
     res.json(updated.rows[0]);
   }));

@@ -4,7 +4,6 @@ import { ReactNode, useState, useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/lib/stores/auth-store';
-import { canAccessWorkspaceSettings } from '@/lib/permissions';
 import { useLayoutStore } from '@/lib/stores/layout-store';
 import { useThemeStore, type ThemeMode } from '@/lib/stores/theme-store';
 import { useLocaleStore } from '@/lib/stores/locale-store';
@@ -108,7 +107,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
 
   const sidebarWidth = sidebarCollapsed ? 'w-16' : 'w-64';
   const mainMargin = sidebarCollapsed ? 'ml-16' : 'ml-64';
-  const visibleAccountItems = accountItems.filter(() => canAccessWorkspaceSettings(user?.role));
+  const visibleAccountItems = user ? accountItems : [];
   const allItems = [...productItems, ...visibleAccountItems];
   const currentItem = allItems.find((m) => m.href === pathname);
   const pageTitle = currentItem ? t(`nav.${currentItem.i18nKey}`) : t('dashboard.title');

@@ -101,6 +101,7 @@ services:
       - PIPELINE_SERVICE_URL=http://pipeline-service:3008
       - AUTOMATION_SERVICE_URL=http://automation-service:3009
       - ANALYTICS_SERVICE_URL=http://analytics-service:3010
+      - ACTIVITY_SERVICE_URL=http://activity-service:3013
       - TEAM_SERVICE_URL=http://team-service:3011
       - CAMPAIGN_SERVICE_URL=http://campaign-service:3012
     depends_on:
@@ -489,6 +490,38 @@ services:
     networks:
       - getsale-network
 
+  activity-service:
+    build:
+      context: .
+      dockerfile: docker/services/Dockerfile.dev
+      args:
+        SERVICE_PATH: services/activity-service
+    container_name: getsale-activity-service
+    ports:
+      - "3013:3013"
+    environment:
+      - NODE_ENV=development
+      - PORT=3013
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres_dev}@pgbouncer:5432/postgres
+      - RABBITMQ_URL=amqp://getsale:getsale_dev@rabbitmq:5672
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - nm_activity_root:/app/node_modules
+      - nm_activity_svc:/app/services/activity-service/node_modules
+      - nm_shared_types:/app/shared/types/node_modules
+      - nm_shared_utils:/app/shared/utils/node_modules
+      - nm_shared_events:/app/shared/events/node_modules
+      - nm_shared_logger:/app/shared/logger/node_modules
+      - nm_shared_core:/app/shared/service-core/node_modules
+    networks:
+      - getsale-network
+
   team-service:
     build:
       context: .
@@ -642,6 +675,8 @@ volumes:
   nm_automation_svc:
   nm_analytics_root:
   nm_analytics_svc:
+  nm_activity_root:
+  nm_activity_svc:
   nm_team_root:
   nm_team_svc:
   nm_campaign_root:

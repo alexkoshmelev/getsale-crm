@@ -29,6 +29,7 @@ jobs:
           - pipeline-service
           - automation-service
           - analytics-service
+          - activity-service
           - team-service
           - campaign-service
     steps:

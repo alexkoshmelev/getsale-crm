@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '@/components/ui/Modal';
 import Button from '@/components/ui/Button';
@@ -34,17 +34,20 @@ export function AddToFunnelModal({
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fetchForContactIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (isOpen && contactId) {
       setError(null);
       setContactPipelineIds([]);
       setLoading(true);
+      fetchForContactIdRef.current = contactId;
       Promise.all([
         fetchPipelines(),
         fetchContactPipelineIds(contactId),
       ])
         .then(([pls, ids]) => {
+          if (fetchForContactIdRef.current !== contactId) return;
           setPipelines(pls);
           setContactPipelineIds(ids);
           const defaultId = defaultPipelineId && pls.some((p) => p.id === defaultPipelineId)
@@ -52,8 +55,13 @@ export function AddToFunnelModal({
             : (pls.find((p) => p.is_default)?.id ?? pls[0]?.id ?? '');
           setSelectedPipelineId(defaultId);
         })
-        .catch(() => setPipelines([]))
-        .finally(() => setLoading(false));
+        .catch(() => {
+          if (fetchForContactIdRef.current !== contactId) return;
+          setPipelines([]);
+        })
+        .finally(() => {
+          if (fetchForContactIdRef.current === contactId) setLoading(false);
+        });
     }
   }, [isOpen, contactId, defaultPipelineId]);
 

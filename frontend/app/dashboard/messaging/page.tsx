@@ -19,6 +19,7 @@ import { Modal } from '@/components/ui/Modal';
 import { MediaViewer } from '@/components/messaging/MediaViewer';
 import { FolderManageModal } from '@/components/messaging/FolderManageModal';
 import { AddToFunnelModal } from '@/components/crm/AddToFunnelModal';
+import { LeadCardModal } from '@/components/pipeline/LeadCardModal';
 import { RightWorkspacePanel } from '@/components/messaging/RightWorkspacePanel';
 import { AccountList } from '@/components/messaging/AccountList';
 import { ChatList } from '@/components/messaging/ChatList';
@@ -33,6 +34,7 @@ import { AddReminderModal } from '@/components/messaging/AddReminderModal';
 import dynamic from 'next/dynamic';
 import { clsx } from 'clsx';
 import { apiClient } from '@/lib/api/client';
+import { fetchLeadContextByLeadId } from '@/lib/api/messaging';
 import {
   fetchContactNotes, deleteNote,
   fetchContactReminders, updateReminder, deleteReminder,
@@ -328,6 +330,13 @@ export default function MessagingPage() {
                     <button type="button" onClick={() => { s.setPendingFile(null); if (s.fileInputRef.current) s.fileInputRef.current.value = ''; }} className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground" title={t('messaging.removeFile')}><X className="w-4 h-4" /></button>
                   </div>
                 )}
+                {s.replyToMessage && (
+                  <div className="flex items-center gap-2 mb-2 py-1.5 px-3 rounded-lg bg-muted/60 border-l-2 border-primary text-sm min-h-0">
+                    <Reply className="w-4 h-4 text-primary shrink-0" />
+                    <span className="text-muted-foreground truncate flex-1 min-w-0 break-words">{(s.replyToMessage.content ?? '').trim().slice(0, 50) || t('messaging.replyPreviewMedia')}{(s.replyToMessage.content ?? '').trim().length > 50 ? '…' : ''}</span>
+                    <button type="button" onClick={() => s.setReplyToMessage(null)} className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground shrink-0" title={t('common.close')}><X className="w-4 h-4" /></button>
+                  </div>
+                )}
                 <div className="flex items-end gap-2">
                   <div className="relative attach-menu">
                     <button onClick={() => canWriteFromSelectedAccount && s.setShowAttachMenu(!s.showAttachMenu)} disabled={!canWriteFromSelectedAccount} className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed" title={t('messaging.attachFile')}><Paperclip className="w-5 h-5" /></button>
@@ -341,13 +350,6 @@ export default function MessagingPage() {
                     <input ref={s.fileInputRef} type="file" className="hidden" accept="image/*,video/*,.pdf,.doc,.docx,.txt,*/*" onChange={actions.handleFileSelect} />
                   </div>
                   <button onClick={actions.handleVoiceMessage} disabled={!canWriteFromSelectedAccount} className={`p-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${s.isRecording ? 'bg-red-100 text-red-600 animate-pulse' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}`} title={t('messaging.voiceMessage')}><Mic className="w-5 h-5" /></button>
-                  {s.replyToMessage && (
-                    <div className="flex items-center gap-2 mb-2 py-1.5 px-3 rounded-lg bg-muted/60 border-l-2 border-primary text-sm">
-                      <Reply className="w-4 h-4 text-primary shrink-0" />
-                      <span className="text-muted-foreground truncate flex-1 min-w-0">{(s.replyToMessage.content ?? '').trim().slice(0, 80) || t('messaging.replyPreviewMedia')}{(s.replyToMessage.content ?? '').trim().length > 80 ? '…' : ''}</span>
-                      <button type="button" onClick={() => s.setReplyToMessage(null)} className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground shrink-0" title={t('common.close')}><X className="w-4 h-4" /></button>
-                    </div>
-                  )}
                   <div className="flex-1 relative flex items-end min-h-[40px]">
                     <textarea
                       ref={s.messageInputRef}
@@ -466,57 +468,16 @@ export default function MessagingPage() {
           aiAssistantContent={<AIAssistantTabContent conversationId={convId} bdAccountId={s.selectedAccountId} onInsertDraft={(text) => s.setNewMessage(text)} isLead={isLead} />}
         />
 
-        {/* Lead Card Modal */}
-        {s.leadContext && (
-          <Modal isOpen={s.leadCardModalOpen} onClose={() => s.setLeadCardModalOpen(false)} title={t('messaging.leadCardTitle', 'Карточка лида')} size="lg">
-            <div className="space-y-5">
-              <div className="flex flex-col items-center text-center pb-4 border-b border-border">
-                <LeadContextAvatarFromContext leadContext={s.leadContext} bdAccountId={s.selectedAccountId} className="w-14 h-14" />
-                <h2 className="mt-3 font-heading text-xl font-semibold text-foreground truncate w-full px-2">{s.leadContext.contact_name || (s.selectedChat && actions.getChatNameWithOverrides(s.selectedChat)) || '—'}</h2>
-                <p className="text-sm text-muted-foreground mt-1">{s.leadContext.company_name || (s.leadContext.contact_username ? `@${String(s.leadContext.contact_username).replace(/^@/, '')}` : null) || '—'}</p>
-              </div>
-              <div className="grid grid-cols-1 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-foreground mb-1.5">{t('crm.pipelineStage', 'Воронка / Стадия')}</label>
-                  <span className="text-sm text-muted-foreground">{s.leadContext.pipeline.name}</span>
-                  <select value={s.leadContext.stage.id} onChange={(e) => actions.handleLeadStageChange(e.target.value)} disabled={s.leadStagePatching} className="w-full px-4 py-2.5 rounded-xl border border-border bg-background text-foreground text-sm focus:ring-2 focus:ring-ring outline-none mt-1.5">
-                    {s.leadContext.stages.map((st) => <option key={st.id} value={st.id}>{st.name}</option>)}
-                  </select>
-                  {s.leadStagePatching && <span className="flex items-center gap-1 text-xs text-muted-foreground"><Loader2 className="w-3 h-3 animate-spin" /> …</span>}
-                </div>
-                <div><label className="block text-sm font-medium text-foreground mb-1.5">{t('crm.amount', 'Сумма')}</label><p className="text-sm font-medium text-foreground">{s.leadContext.won_at && s.leadContext.revenue_amount != null && s.leadContext.revenue_amount > 0 ? formatDealAmount(s.leadContext.revenue_amount, 'EUR') : '—'}</p></div>
-                {(s.leadContext.campaign != null || s.leadContext.became_lead_at) && (
-                  <div><label className="block text-sm font-medium text-foreground mb-1.5">{t('messaging.leadPanelCampaign', 'Кампания')}</label><p className="text-sm text-foreground">{s.leadContext.campaign != null ? s.leadContext.campaign.name : '—'}</p>{s.leadContext.became_lead_at && <p className="text-xs text-muted-foreground mt-0.5">{formatLeadPanelDate(s.leadContext.became_lead_at)}</p>}</div>
-                )}
-              </div>
-              {s.leadContext.contact_id && (
-                <div className="border-t border-border pt-4 space-y-3">
-                  <h4 className="text-sm font-medium text-foreground flex items-center gap-2"><StickyNote className="w-4 h-4" />{t('crm.notes', 'Заметки')}</h4>
-                  <ul className="space-y-2 max-h-28 overflow-y-auto">{s.leadNotes.map((n) => (
-                    <li key={n.id} className="flex items-start justify-between gap-2 text-sm bg-muted/40 rounded-lg p-2"><span className="text-foreground flex-1 break-words">{n.content}</span><button type="button" onClick={() => deleteNote(n.id).then(() => fetchContactNotes(s.leadContext!.contact_id!).then(s.setLeadNotes))} className="text-muted-foreground hover:text-destructive shrink-0">×</button></li>
-                  ))}</ul>
-                  <Button variant="outline" size="sm" className="w-full justify-center gap-2" onClick={() => s.setLeadNoteModalOpen(true)}><StickyNote className="w-4 h-4" />{t('pipeline.dealFormAddNote', 'Добавить заметку')}</Button>
-                </div>
-              )}
-              {s.leadContext.contact_id && (
-                <div className="border-t border-border pt-4 space-y-3">
-                  <h4 className="text-sm font-medium text-foreground flex items-center gap-2"><Bell className="w-4 h-4" />{t('crm.reminders', 'Напоминания')}</h4>
-                  <ul className="space-y-2 max-h-24 overflow-y-auto">{s.leadReminders.map((r) => (
-                    <li key={r.id} className={clsx('flex items-center justify-between gap-2 text-sm rounded-lg p-2', r.done ? 'bg-muted/30 text-muted-foreground' : 'bg-muted/40')}><span className="flex-1 truncate">{r.title || new Date(r.remind_at).toLocaleString()}</span><div className="flex items-center gap-1 shrink-0">{!r.done && <button type="button" onClick={() => updateReminder(r.id, { done: true }).then(() => { if (s.leadContext?.contact_id) fetchContactReminders(s.leadContext.contact_id).then(s.setLeadReminders); })} className="p-1 rounded text-green-600 hover:bg-green-500/20" title={t('crm.markDone', 'Выполнено')}><Check className="w-4 h-4" /></button>}<button type="button" onClick={() => deleteReminder(r.id).then(() => { if (s.leadContext?.contact_id) fetchContactReminders(s.leadContext.contact_id).then(s.setLeadReminders); })} className="p-1 rounded text-muted-foreground hover:text-destructive">×</button></div></li>
-                  ))}</ul>
-                  <Button variant="outline" size="sm" className="w-full justify-center gap-2" onClick={() => s.setLeadReminderModalOpen(true)}><Bell className="w-4 h-4" />{t('pipeline.dealFormAddReminder', 'Добавить напоминание')}</Button>
-                </div>
-              )}
-              <div className="border-t border-border pt-4 space-y-2">
-                <h4 className="text-sm font-medium text-foreground">{t('messaging.timelineTitle', 'История')}</h4>
-                {s.leadContext.timeline.length === 0 ? <div className="text-xs text-muted-foreground">—</div> : s.leadContext.timeline.map((ev, i) => (
-                  <div key={i} className="text-xs text-muted-foreground"><span className="tabular-nums">{formatLeadPanelDate(ev.created_at)}</span>{' — '}{ev.type === 'lead_created' && t('messaging.timelineLeadCreated')}{ev.type === 'stage_changed' && t('messaging.timelineStageChanged', { name: ev.stage_name ?? '' })}{ev.type === 'deal_created' && t('messaging.timelineDealCreated')}</div>
-                ))}
-              </div>
-              <div className="flex gap-3 pt-2 border-t border-border"><Button type="button" variant="outline" className="flex-1" onClick={() => s.setLeadCardModalOpen(false)}>{t('pipeline.dealFormCancel', 'Закрыть')}</Button></div>
-            </div>
-          </Modal>
-        )}
+        {/* Lead Card Modal — same as on Pipeline */}
+        <LeadCardModal
+          leadId={s.leadContext?.lead_id ?? null}
+          open={s.leadCardModalOpen}
+          onClose={() => s.setLeadCardModalOpen(false)}
+          onLeadUpdated={() => {
+            const leadId = s.leadContext?.lead_id;
+            if (leadId) fetchLeadContextByLeadId(leadId).then((data) => s.setLeadContext(data as LeadContext)).catch(() => {});
+          }}
+        />
       </div>
 
       {/* ─── Shared Chat Modal ─── */}
