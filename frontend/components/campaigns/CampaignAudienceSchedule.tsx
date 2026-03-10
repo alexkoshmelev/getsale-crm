@@ -11,10 +11,13 @@ import {
   uploadAudienceFromCsv,
   fetchGroupSources,
   fetchGroupSourceContacts,
+  fetchTelegramSourceKeywords,
+  fetchTelegramSourceGroups,
   type Campaign,
   type CampaignAgent,
   type ContactForPicker,
   type GroupSource,
+  type TelegramSourceGroup,
 } from '@/lib/api/campaigns';
 import { clsx } from 'clsx';
 import { fetchCompanies, type Company } from '@/lib/api/crm';
@@ -249,7 +252,7 @@ export function CampaignAudienceSchedule({
             </div>
             <label className="flex items-center gap-2 cursor-pointer mt-2">
               <input type="checkbox" checked={enrichContactsBeforeStart} onChange={(e) => setEnrichContactsBeforeStart(e.target.checked)} disabled={!isDraft} className="rounded border-border" />
-              <span className="text-sm text-foreground">{t('campaigns.enrichContactsBeforeStart', 'Перед запуском обогащать контакты из Telegram (имя, username)')}</span>
+              <span className="text-sm text-foreground">{t('campaigns.enrichContactsBeforeStart')}</span>
             </label>
           </div>
         )}
@@ -390,7 +393,7 @@ export function CampaignAudienceSchedule({
                   <div>
                     <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationPipeline')}</label>
                     <select value={leadPipelineId} onChange={(e) => { setLeadPipelineId(e.target.value); setLeadStageId(''); }} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
-                      <option value="">{t('campaigns.leadCreationSelectPipeline', 'Выберите воронку')}</option>
+                      <option value="">{t('campaigns.leadCreationSelectPipeline')}</option>
                       {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
                   </div>
@@ -405,7 +408,7 @@ export function CampaignAudienceSchedule({
                   )}
                   {teamMembers.length > 0 && (
                     <div className="sm:col-span-2">
-                      <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationResponsible', 'Ответственный за лида')}</label>
+                      <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationResponsible')}</label>
                       <select value={leadResponsibleId} onChange={(e) => setLeadResponsibleId(e.target.value)} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
                         <option value="">{t('common.optional')}</option>
                         {teamMembers.map((m) => (
@@ -461,6 +464,15 @@ function ContactPickerModal({
   const [search, setSearch] = useState('');
   const [outreachFilter, setOutreachFilter] = useState<'all' | 'new' | 'in_outreach'>('all');
   const [selected, setSelected] = useState<Set<string>>(new Set(initialSelectedIds));
+  const [keywords, setKeywords] = useState<string[]>([]);
+  const [groups, setGroups] = useState<TelegramSourceGroup[]>([]);
+  const [sourceKeyword, setSourceKeyword] = useState<string>('');
+  const [sourceGroup, setSourceGroup] = useState<TelegramSourceGroup | null>(null);
+
+  useEffect(() => {
+    fetchTelegramSourceKeywords().then(setKeywords).catch(() => setKeywords([]));
+    fetchTelegramSourceGroups().then(setGroups).catch(() => setGroups([]));
+  }, []);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -468,11 +480,14 @@ function ContactPickerModal({
       limit: 500,
       outreachStatus: outreachFilter === 'all' ? undefined : outreachFilter,
       search: search.trim() || undefined,
+      sourceKeyword: sourceKeyword || undefined,
+      sourceTelegramChatId: sourceGroup?.telegramChatId,
+      sourceBdAccountId: sourceGroup?.bdAccountId,
     })
       .then(setContacts)
       .catch(() => setContacts([]))
       .finally(() => setLoading(false));
-  }, [outreachFilter, search]);
+  }, [outreachFilter, search, sourceKeyword, sourceGroup]);
 
   useEffect(() => {
     load();
@@ -518,6 +533,39 @@ function ContactPickerModal({
             placeholder={t('campaigns.searchContacts')}
             className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
           />
+          <div className="flex flex-wrap gap-2 items-center">
+            <span className="text-sm text-muted-foreground">{t('campaigns.filterByKeyword')}:</span>
+            <select
+              value={sourceKeyword}
+              onChange={(e) => setSourceKeyword(e.target.value)}
+              className="rounded-lg border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+            >
+              <option value="">—</option>
+              {keywords.map((k) => (
+                <option key={k} value={k}>{k}</option>
+              ))}
+            </select>
+            <span className="text-sm text-muted-foreground ml-2">{t('campaigns.filterByGroup')}:</span>
+            <select
+              value={sourceGroup ? `${sourceGroup.bdAccountId}:${sourceGroup.telegramChatId}` : ''}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (!v) setSourceGroup(null);
+                else {
+                  const g = groups.find((x) => `${x.bdAccountId}:${x.telegramChatId}` === v);
+                  setSourceGroup(g ?? null);
+                }
+              }}
+              className="rounded-lg border border-border bg-background px-2 py-1.5 text-sm text-foreground max-w-[200px]"
+            >
+              <option value="">—</option>
+              {groups.map((g) => (
+                <option key={`${g.bdAccountId}:${g.telegramChatId}`} value={`${g.bdAccountId}:${g.telegramChatId}`}>
+                  {g.telegramChatTitle || g.telegramChatId}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="flex flex-wrap gap-2">
             {(['all', 'new', 'in_outreach'] as const).map((f) => (
               <button

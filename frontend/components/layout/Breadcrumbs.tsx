@@ -13,6 +13,7 @@ const PATH_LABELS: Record<string, string> = {
   campaigns: 'nav.campaigns',
   messaging: 'nav.messaging',
   'bd-accounts': 'nav.bdAccounts',
+  discovery: 'nav.contactDiscovery',
   analytics: 'nav.analytics',
   team: 'nav.team',
   settings: 'nav.settings',

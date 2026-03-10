@@ -141,7 +141,9 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
         userId,
         data: { campaignId: id },
       } as any);
-    } catch (_) {}
+    } catch (err) {
+      log.warn({ message: 'CAMPAIGN_STARTED publish failed', campaignId: id, error: err instanceof Error ? err.message : String(err) });
+    }
     const updated = await pool.query('SELECT * FROM campaigns WHERE id = $1', [id]);
     res.json(updated.rows[0]);
   }));
@@ -165,7 +167,9 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
         userId,
         data: { campaignId: id },
       } as any);
-    } catch (_) {}
+    } catch (err) {
+      log.warn({ message: 'CAMPAIGN_PAUSED publish failed', campaignId: id, error: err instanceof Error ? err.message : String(err) });
+    }
     res.json(r.rows[0]);
   }));
 

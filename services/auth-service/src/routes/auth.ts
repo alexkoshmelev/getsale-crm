@@ -28,10 +28,59 @@ const REFRESH_RATE_LIMIT = 5;
 const REFRESH_RATE_WINDOW = 60_000;
 const refreshAttempts = new Map<string, { count: number; resetAt: number }>();
 
+const SIGNIN_RATE_LIMIT = 10;
+const SIGNIN_RATE_WINDOW_MS = 15 * 60 * 1000;
+const signinAttempts = new Map<string, { count: number; resetAt: number }>();
+
+const SIGNUP_RATE_LIMIT = 5;
+const SIGNUP_RATE_WINDOW_MS = 60 * 60 * 1000;
+const signupAttempts = new Map<string, { count: number; resetAt: number }>();
+
+function getClientIp(req: { ip?: string; headers?: { 'x-forwarded-for'?: string } }): string {
+  const forwarded = req.headers?.['x-forwarded-for'];
+  if (typeof forwarded === 'string') return forwarded.split(',')[0]?.trim() || req.ip || 'unknown';
+  return req.ip || 'unknown';
+}
+
+function checkSigninRateLimit(ip: string): void {
+  const now = Date.now();
+  const entry = signinAttempts.get(ip);
+  if (!entry) {
+    signinAttempts.set(ip, { count: 1, resetAt: now + SIGNIN_RATE_WINDOW_MS });
+    return;
+  }
+  if (now > entry.resetAt) {
+    signinAttempts.set(ip, { count: 1, resetAt: now + SIGNIN_RATE_WINDOW_MS });
+    return;
+  }
+  entry.count++;
+  if (entry.count > SIGNIN_RATE_LIMIT) {
+    throw new AppError(429, 'Too many sign-in attempts. Try again later.', ErrorCodes.RATE_LIMITED);
+  }
+}
+
+function checkSignupRateLimit(ip: string): void {
+  const now = Date.now();
+  const entry = signupAttempts.get(ip);
+  if (!entry) {
+    signupAttempts.set(ip, { count: 1, resetAt: now + SIGNUP_RATE_WINDOW_MS });
+    return;
+  }
+  if (now > entry.resetAt) {
+    signupAttempts.set(ip, { count: 1, resetAt: now + SIGNUP_RATE_WINDOW_MS });
+    return;
+  }
+  entry.count++;
+  if (entry.count > SIGNUP_RATE_LIMIT) {
+    throw new AppError(429, 'Too many sign-up attempts. Try again later.', ErrorCodes.RATE_LIMITED);
+  }
+}
+
 export function authRouter({ pool, rabbitmq, log }: Deps): Router {
   const router = Router();
 
   router.post('/signup', asyncHandler(async (req, res) => {
+    checkSignupRateLimit(getClientIp(req));
     const { email, password, organizationName, inviteToken } = req.body;
 
     if (!email || !password) throw new AppError(400, 'Email and password required', ErrorCodes.BAD_REQUEST);
@@ -138,6 +187,7 @@ export function authRouter({ pool, rabbitmq, log }: Deps): Router {
   }));
 
   router.post('/signin', asyncHandler(async (req, res) => {
+    checkSigninRateLimit(getClientIp(req));
     const { email, password } = req.body;
     if (!email || !password) throw new AppError(400, 'Email and password required', ErrorCodes.BAD_REQUEST);
 
@@ -220,7 +270,7 @@ export function authRouter({ pool, rabbitmq, log }: Deps): Router {
     const attempt = refreshAttempts.get(clientId);
     if (attempt && attempt.resetAt > now) {
       if (attempt.count >= REFRESH_RATE_LIMIT) {
-        throw new AppError(429, 'Too many refresh attempts', ErrorCodes.RATE_LIMITED);
+        throw new AppError(429, 'Too many refresh attempts', ErrorCodes.RATE_LIMITEDED);
       }
       attempt.count++;
     } else {

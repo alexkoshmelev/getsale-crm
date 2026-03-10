@@ -1,141 +1,99 @@
-# Архитектура AI CRM SaaS
+# Архитектура CRM
 
 ## Обзор
 
-Система построена на принципах микросервисной архитектуры с event-driven подходом для обеспечения масштабируемости, отказоустойчивости и гибкости.
+Система построена на микросервисной архитектуре с event-driven подходом. Единая реляционная БД (PostgreSQL); сообщения и бизнес-данные хранятся в PostgreSQL. Стек приведён в соответствие с фактической реализацией.
 
-## Компоненты
+## Инфраструктура (фактический стек)
 
-### Микросервисы
+- **PostgreSQL** — основная БД для всех сервисов: пользователи, организации, CRM, воронки, лиды, сообщения, чаты, кампании, команды, автоматизация. Схема и миграции: Knex ([MIGRATIONS.md](MIGRATIONS.md)).
+- **Redis** — кеш, сессии, pub/sub для WebSocket, rate limiting (API Gateway, AI rate limit).
+- **RabbitMQ** — очереди событий для event-driven коммуникации между сервисами.
+- **Prometheus** — метрики (prom-client, endpoint `/metrics` на сервисах).
+- **Grafana / Jaeger** — визуализация метрик и distributed tracing (конфигурация окружения).
 
-1. **API Gateway** - Единая точка входа, маршрутизация, аутентификация, rate limiting
-2. **Auth Service** - Управление пользователями, организациями, JWT, MFA, OAuth
-3. **User Service** - Управление профилями, подписки, биллинг (Stripe), команды
-4. **BD Accounts Service** - Управление BD аккаунтами (Telegram GramJS), подключение, покупка/аренда
-5. **CRM Service** - Управление контактами, компаниями, сделками
-6. **Pipeline Service** - Управление воронкой продаж, стадиями, история переходов
-7. **Messaging Service** - Unified messaging (Telegram GramJS, Email, LinkedIn, Twitter)
-8. **Automation Service** - Автоматизация переходов по стадиям, триггеры, правила
-9. **Analytics Service** - Метрики конверсии, аналитика воронки, отчеты по командам
-10. **Team Service** - Управление командами, распределение клиентов, права доступа
-11. **WebSocket Service** - Real-time обновления через WebSocket
-12. **AI Service** - Генерация AI drafts, предложения
-13. **Campaign Service** - Cold outreach campaigns (TODO)
+MongoDB и Elasticsearch в текущей реализации **не используются**.
 
-### Инфраструктура
+## Микросервисы
 
-- **PostgreSQL** - Основная БД для всех сервисов (пользователи, клиенты, сделки, команды)
-- **MongoDB** - Документное хранилище для сообщений и логов
-- **Redis** - Кеш, сессии, pub/sub для WebSocket, rate limiting
-- **RabbitMQ** - Message queue для event-driven коммуникации
-- **Elasticsearch** - Поиск и логирование
-- **Prometheus** - Метрики
-- **Grafana** - Визуализация метрик
-- **Jaeger** - Distributed tracing
+| Сервис | Назначение |
+|--------|------------|
+| **API Gateway** | Единая точка входа, JWT, rate limiting, проксирование на бэкенды |
+| **Auth Service** | Регистрация, вход, JWT (access + refresh), организации, MFA/OAuth — TODO |
+| **User Service** | Профили, подписки (Stripe), команды |
+| **BD Accounts Service** | BD/Telegram аккаунты (GramJS): подключение, синхронизация чатов, отправка |
+| **CRM Service** | Компании, контакты, сделки, заметки, напоминания |
+| **Pipeline Service** | Воронки, стадии, лиды, история переходов (stage_history) |
+| **Messaging Service** | Чаты, сообщения, conversations, lead-context, отправка через BD Accounts |
+| **Automation Service** | Правила автоматизации, триггеры (в т.ч. lead.stage.changed → создание сделки) |
+| **Analytics Service** | Метрики конверсии, аналитика воронки, отчёты по командам |
+| **Team Service** | Команды, участники, назначения клиентов |
+| **WebSocket Service** | Real-time обновления (Socket.io, Redis adapter) |
+| **AI Service** | Summarize, analyze, генерация черновиков (OpenAI) |
+| **Campaign Service** | Cold outreach: кампании, последовательности, участники |
 
-## Event-Driven Architecture
+Детальное описание API — в [CRM_API.md](CRM_API.md) и в коде маршрутов `services/<name>/src/routes/`.
 
-Все сервисы общаются через события в RabbitMQ:
+## Event-Driven архитектура
 
-### Основные события:
+Сервисы обмениваются событиями через RabbitMQ. Примеры событий:
 
-**User & Auth:**
-- `user.created`, `user.updated`, `user.logged_in`
-- `subscription.created`, `subscription.updated`, `subscription.cancelled`
+- **User & Auth:** `user.created`, `user.updated`, `subscription.created`
+- **BD Accounts:** `bd_account.connected`, `bd_account.disconnected`
+- **CRM & Pipeline:** `contact.created`, `contact.updated`, `deal.created`, `deal.stage.changed`, `lead.stage.changed`
+- **Messaging:** `message.received`, `message.sent`
+- **Automation:** `automation.rule.triggered`
+- **AI:** `ai.draft.generated`, `ai.draft.approved`
 
-**BD Accounts:**
-- `bd_account.connected`, `bd_account.disconnected`, `bd_account.purchased`
-- `bidi.assigned`, `bidi.unassigned`
-
-**CRM & Pipeline:**
-- `contact.created`, `contact.updated`
-- `deal.created`, `deal.updated`, `deal.stage.changed`, `deal.closed`
-- `stage.created`, `stage.updated`
-
-**Messaging:**
-- `message.received`, `message.sent`, `message.read`
-
-**Automation:**
-- `automation.rule.created`, `automation.rule.triggered`
-- `trigger.executed`
-
-**Team:**
-- `team.created`, `team.member.added`, `team.member.removed`
-
-**AI:**
-- `ai.draft.generated`, `ai.draft.approved`, `ai.draft.rejected`, `ai.draft.sent`
-
-**Analytics:**
-- `metric.recorded`
-
-### Паттерны:
-
-1. **Event Sourcing** - Все важные действия сохраняются как события
-2. **CQRS** - Разделение чтения и записи (опционально)
-3. **Saga Pattern** - Для распределенных транзакций
+Используются: публикация доменных событий, consumer’ы с идемпотентной обработкой (например создание сделки по lead_id с 409 при дубле). Correlation ID прокидывается для трассировки.
 
 ## Масштабирование
 
-### Горизонтальное масштабирование:
-
-- Все сервисы stateless (кроме БД)
-- WebSocket использует Redis adapter для горизонтального масштабирования
-- API Gateway с load balancing
-- RabbitMQ с кластеризацией (опционально)
-
-### Вертикальное масштабирование:
-
-- Ресурсы настраиваются через Kubernetes limits/requests
-- Автомасштабирование через HPA (Horizontal Pod Autoscaler)
+- Сервисы stateless; состояние в PostgreSQL и Redis.
+- WebSocket: Redis adapter для горизонтального масштабирования.
+- API Gateway: единая точка входа; в проде — load balancing.
+- Пул БД: в коде ограничен (рекомендация PgBouncer в проде). См. [FULL_SYSTEM_AUDIT_2026.md](FULL_SYSTEM_AUDIT_2026.md) по рискам роста.
 
 ## Безопасность
 
-1. **Multi-tenant isolation** - На уровне БД через `organization_id`
-2. **JWT authentication** - С refresh tokens
-3. **RBAC** - Role-based access control
-4. **Rate limiting** - На уровне API Gateway
-5. **Secrets management** - Kubernetes Secrets (в продакшене использовать Vault/Sealed Secrets)
+- Изоляция по `organization_id` во всех доменных таблицах.
+- JWT (access + refresh), проверка на API Gateway и в сервисах.
+- RBAC: роли (owner, admin, supervisor, bidi, viewer), `role_permissions` для ресурсов (в т.ч. messaging, bd_accounts).
+- Rate limiting на API Gateway (Redis).
+- Секреты: переменные окружения; в проде — Kubernetes Secrets / Vault по необходимости.
 
-## Мониторинг
+## Владение таблицами (Data / table ownership)
 
-### Метрики:
+При общей БД важно явно зафиксировать, какой сервис **пишет** в какие таблицы, чтобы избежать конфликтов миграций и дублирования логики.
 
-- Prometheus собирает метрики со всех сервисов
-- Grafana дашборды для визуализации
-- Custom metrics для бизнес-логики
+| Таблица / область | Владелец (запись) | Читают |
+|-------------------|-------------------|--------|
+| **contacts** | CRM Service | Campaign Service (только чтение: фильтры аудитории, пикер контактов) |
+| **contact_telegram_sources** | CRM Service | Campaign Service (только чтение: фильтры по ключевому слову и группе) |
 
-### Логирование:
+- **CRM Service** создаёт и обновляет контакты; импорт из Telegram-группы (`POST /api/crm/contacts/import-from-telegram-group`) — в зоне ответственности CRM: вызов bd-accounts (participants), upsert контактов, запись в `contact_telegram_sources`.
+- **Campaign Service** не создаёт контакты и не пишет в `contact_telegram_sources`; использует эти таблицы только для выборки аудитории (ключевые слова, группы, пикер контактов).
+- Карточка контакта с полем «Участник групп» (`telegramGroups`) отдаётся CRM Service (GET `/api/crm/contacts/:id`).
 
-- Centralized logging (ELK stack или Loki)
-- Structured logging (JSON)
-- Log levels: ERROR, WARN, INFO, DEBUG
+## Contact Discovery
 
-### Трейсинг:
+Модуль поиска и импорта контактов из Telegram-групп и каналов. Поиск — **глобальный** (по всему Telegram, не только «мои» чаты). Два способа добавления чатов: **поиск по ключевым словам** (с фильтром тип: группы / каналы / оба) и **по ссылкам** (t.me/…, @username, инвайты; по инвайту аккаунт вступает в чат). Участники импортируются в CRM; опции: исключить админов, выйти из чата после импорта. Эндпоинты: bd-accounts — GET `/:id/search-groups` (query `q`, `type`, `limit`), GET `/:id/chats/:chatId/participants` (`excludeAdmins`), POST `/:id/chats/:chatId/leave`, POST `/:id/resolve-chats` (body `{ inputs }`); AI — POST `/api/ai/generate-search-queries` (body `{ topic }` → `{ queries }`). См. [CRM_API.md](CRM_API.md) и UI «Contact discovery».
 
-- Jaeger для distributed tracing
-- Correlation IDs для отслеживания запросов
+## Наблюдаемость
 
-## Развертывание
+- **Логи:** @getsale/logger, структурированные логи, correlation ID в запросах.
+- **Метрики:** Prometheus, `/metrics`, нормализация путей; при необходимости — кастомные метрики в сервисах.
+- **Health:** `/health` на gateway и сервисах (проверка БД, RabbitMQ где применимо).
+- Алерты и DLQ — в плане развития (см. STATE_AND_ROADMAP, STAGES).
 
-### Локальная разработка:
+## Развёртывание
 
-```bash
-docker-compose up -d
-```
+- **Локальная разработка:** `docker-compose up -d` ([GETTING_STARTED.md](GETTING_STARTED.md)).
+- **Продакшен:** манифесты в `k8s/`; `kubectl apply -f k8s/`.
 
-### Продакшн (Kubernetes):
+## Best practices
 
-```bash
-kubectl apply -f k8s/
-```
-
-## Best Practices
-
-1. **Idempotency** - Все операции идемпотентны
-2. **Retry logic** - С exponential backoff
-3. **Circuit breaker** - Для внешних зависимостей
-4. **Health checks** - Liveness и readiness probes
-5. **Graceful shutdown** - Корректное завершение работы
-6. **Feature flags** - Для постепенного rollout
-7. **Database migrations** - Версионирование схемы БД
-
+- Идемпотентность критичных операций (сделка по lead_id, automation_executions).
+- Транзакции (BEGIN/COMMIT/ROLLBACK) для многозначных операций в сервисах.
+- Миграции БД через Knex, без ручного изменения схемы в проде.
+- Retry/circuit breaker для внешних вызовов — в приоритете доработок (см. STATE_AND_ROADMAP).

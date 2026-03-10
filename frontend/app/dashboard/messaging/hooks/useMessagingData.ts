@@ -35,7 +35,7 @@ export function useMessagingData(s: MessagingState) {
   }, [s.selectedAccountId]);
 
   // ─── Fetch Chats ─────────────────────────────────────────────────
-  const fetchChats = useCallback(async (): Promise<Chat[]> => {
+  const fetchChatsImpl = useCallback(async (): Promise<Chat[]> => {
     if (!s.selectedAccountId) return [];
     s.setLoadingChats(true);
     try {
@@ -59,6 +59,11 @@ export function useMessagingData(s: MessagingState) {
       s.setLoadingChats(false);
     }
   }, [s.selectedAccountId]);
+
+  const fetchChats = useCallback(async (): Promise<void> => {
+    await fetchChatsImpl();
+  }, [fetchChatsImpl]);
+
   s.fetchChatsRef.current = fetchChats;
 
   // ─── Fetch Messages ──────────────────────────────────────────────
@@ -204,7 +209,7 @@ export function useMessagingData(s: MessagingState) {
         const total = Number(res.data?.sync_progress_total ?? 0);
         const done = Number(res.data?.sync_progress_done ?? 0);
         if (status === 'completed') {
-          s.setAccountSyncReady(true); s.setAccountSyncProgress(null); await fetchChats();
+          s.setAccountSyncReady(true); s.setAccountSyncProgress(null); await fetchChatsImpl();
         } else if (status === 'syncing') {
           s.setAccountSyncReady(false); s.setAccountSyncProgress({ done, total: total || 1 });
           try {
@@ -234,7 +239,7 @@ export function useMessagingData(s: MessagingState) {
         const status = res.data?.sync_status;
         if (status === 'completed') {
           s.setAccountSyncReady(true); s.setAccountSyncProgress(null); s.setAccountSyncError(null);
-          await fetchChats(); await fetchAccounts(); return;
+          await fetchChatsImpl(); await fetchAccounts(); return;
         }
         if (status === 'syncing') s.setAccountSyncProgress({ done: Number(res.data?.sync_progress_done ?? 0), total: Number(res.data?.sync_progress_total) || 1 });
       } catch { /* ignore */ }
@@ -351,6 +356,6 @@ export function useMessagingData(s: MessagingState) {
 
   return {
     convId, isLead, isLeadPanelOpen,
-    fetchAccounts, fetchChats, fetchMessages, fetchNewLeads, markAsRead,
+    fetchAccounts, fetchChats, getChats: fetchChatsImpl, fetchMessages, fetchNewLeads, markAsRead,
   };
 }

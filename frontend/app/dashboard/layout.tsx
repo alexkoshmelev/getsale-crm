@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import DashboardLayout from '@/components/layout/DashboardLayout';
 import { WebSocketProvider } from '@/lib/contexts/websocket-context';
+import { EventsStreamProvider } from '@/lib/contexts/events-stream-context';
 import { apiClient } from '@/lib/api/client';
 
 export default function DashboardLayoutWrapper({
@@ -67,7 +68,9 @@ export default function DashboardLayoutWrapper({
 
   return (
     <WebSocketProvider>
-      <DashboardLayout>{children}</DashboardLayout>
+      <EventsStreamProvider>
+        <DashboardLayout>{children}</DashboardLayout>
+      </EventsStreamProvider>
     </WebSocketProvider>
   );
 }

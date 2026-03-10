@@ -243,7 +243,7 @@ telegram_id,first_name,last_name,email
    Либо реализовать вычисление entry_rules при добавлении в воронку/стадию (pipeline-service), либо убрать поле из схемы и явно описать в документации, что правила входа = только явное добавление + настройки кампании.
 
 7. **Документация и типы**  
-   В shared/types добавить тип Lead (сейчас есть Contact, Deal). В CRM_API и CAMPAIGN_COLD_OUTREACH явно описать: Contact vs Lead vs Deal, кто кого создаёт и когда создаётся сделка.
+   В shared/types добавить тип Lead (сейчас есть Contact, Deal). В [CRM_API.md](CRM_API.md) и [CAMPAIGNS.md](CAMPAIGNS.md) явно описать: Contact vs Lead vs Deal, кто кого создаёт и когда создаётся сделка.
 
 ---
 

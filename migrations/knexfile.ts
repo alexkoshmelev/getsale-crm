@@ -13,7 +13,6 @@ const config: { [key: string]: Knex.Config } = {
       directory: './migrations',
       extension: 'ts',
       loadExtensions: ['.ts'],
-      pattern: /^\d{14}_[\w-]+\.ts$/,
     },
     seeds: {
       directory: './seeds',
@@ -32,7 +31,6 @@ const config: { [key: string]: Knex.Config } = {
       directory: './migrations',
       extension: 'ts',
       loadExtensions: ['.ts'],
-      pattern: /^\d{14}_[\w-]+\.ts$/,
     },
     seeds: {
       directory: './seeds',

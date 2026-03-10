@@ -61,16 +61,32 @@
 
 ## 2. Что не сделано или неполно
 
-(По сервисам и доменам; детали — в [CURRENT_STATE_ANALYSIS.md](./CURRENT_STATE_ANALYSIS.md) и [NEXT_STEPS_PRIORITY.md](./NEXT_STEPS_PRIORITY.md).)
-
 - **Auth:** MFA, восстановление пароля по email, верификация email, OAuth (Google/GitHub/Telegram), account lockout, детальный audit по входам.
 - **CRM:** массовые операции (bulk delete/update), импорт/экспорт (CSV), мягкое удаление (soft delete) при необходимости.
 - **Pipeline:** история переходов по стадии, валидация правил entry/exit, авто-переходы по правилам (управление воронками/стадиями PUT/DELETE + UI уже сделано).
-- **Campaign Service:** отдельный микросервис (кампании, шаблоны, sequences, расписание, базовая статистика) — не реализован.
+- **Campaign Service:** реализован (CRUD, sequences, расписание, worker отправки, аудитория из CRM/CSV/группы TG); см. [CAMPAIGNS.md](CAMPAIGNS.md). В бэклоге: rate limit по каналу, AI-персонализация.
 - **AI:** автосоздание сделки/лида из чата (правила или AI по намерению), виджеты в карточке сделки (следующий шаг, вероятность закрытия).
 - **Омниканал:** модель channels/conversations, единый timeline по контакту, каналы помимо Telegram.
 - **Права:** при необходимости — расширение canPermission в CRM и других сервисах (messaging и bd-accounts уже используют role_permissions).
 - **Инфра:** детальные rate limits по типу операции, мониторинг (метрики, алерты), E2E-тесты ключевых сценариев.
+
+### Чеклист к продакшену (критичное)
+
+- Полные CRUD (GET by id, PUT, DELETE) по CRM, Pipeline и остальным сервисам; пагинация и поиск.
+- Валидация: Zod на бэкенде, React Hook Form + Zod на фронте; бизнес-правила (стадии воронки и т.д.).
+- Централизованная обработка ошибок: AppError, единый формат ответа, логирование (уже частично в service-core).
+- Безопасность: rate limiting (есть в gateway), Helmet, CORS, санитизация входных данных.
+- Campaign Service: CRUD кампаний, шаблоны, sequences, интеграция с Messaging.
+- Надёжность: retry/circuit breaker для вызовов AI и BD Accounts; алерты по метрикам и очередям; DLQ (см. [STAGES.md](STAGES.md), [FULL_SYSTEM_AUDIT_2026.md](FULL_SYSTEM_AUDIT_2026.md)).
+
+### Приоритетные технические задачи (по полному аудиту 2026)
+
+См. [FULL_SYSTEM_AUDIT_2026.md](FULL_SYSTEM_AUDIT_2026.md). Рекомендуемый порядок:
+
+1. **Reliability:** Retry и circuit breaker при вызовах AI-service и bd-accounts из messaging-service (и других сервисов) — при падении внешних API UX не должен ломаться.
+2. **Observability:** Алерты по метрикам (latency, error rate) и по здоровью очередей RabbitMQ (глубина, DLQ). Реализация DLQ после этапа Observability (STAGES.md).
+3. **Scale:** Стратегия партиционирования и/или архивации для таблицы `messages` при росте объёма; проверка нагрузки на 10k conversations.
+4. **Контракты схемы:** Зафиксировать ownership таблиц между сервисами (кто какие таблицы меняет), чтобы избежать конфликтов миграций при росте.
 
 ---
 
@@ -109,11 +125,14 @@
 
 | Документ | Назначение |
 |----------|------------|
-| [CURRENT_STATE_ANALYSIS.md](./CURRENT_STATE_ANALYSIS.md) | Детальный анализ по доменам (auth, CRM, BD, pipeline, messaging и т.д.). |
-| [NEXT_STEPS_PRIORITY.md](./NEXT_STEPS_PRIORITY.md) | Критичные и важные задачи (CRUD, валидация, безопасность, Campaign). |
-| [MASTER_PLAN_MESSAGING_FIRST_CRM.md](./MASTER_PLAN_MESSAGING_FIRST_CRM.md) | Общий план и бэклог «Telegram-like CRM», фазы, таблицы требований. |
-| [ACTION_PLAN.md](./ACTION_PLAN.md) | Чеклисты и порядок работ по этапам. |
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Архитектура системы, сервисы, события. |
-| [UX_MESSAGING_ARCHITECTURE.md](./UX_MESSAGING_ARCHITECTURE.md) | UX мессенджера, папки, воркспейс. |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | Стек, сервисы, события, безопасность. |
+| [GETTING_STARTED.md](./GETTING_STARTED.md) | Запуск, порты, первый пользователь, решение проблем. |
+| [TESTING.md](./TESTING.md) | Сценарии проверки и тестирования. |
+| [STAGES.md](./STAGES.md) | Этапы разработки (Stage 1–7), цели и статус. |
+| [MESSAGING_ARCHITECTURE.md](./MESSAGING_ARCHITECTURE.md) | Модель клиент/чат, папки, UX мессенджера. |
+| [CAMPAIGNS.md](./CAMPAIGNS.md) | Кампании холодного охвата: цели и статус. |
+| [MASTER_PLAN_MESSAGING_FIRST_CRM.md](./MASTER_PLAN_MESSAGING_FIRST_CRM.md) | Архитектурные решения и роли (сокращённый мастер-план). |
+| [PROJECT_AUDIT_REPORT.md](./PROJECT_AUDIT_REPORT.md) | Аудит документации и кода. |
+| [FULL_SYSTEM_AUDIT_2026.md](./FULL_SYSTEM_AUDIT_2026.md) | Полный системный аудит (архитектура, масштаб, AI, риски). |
 
-После реализации задач обновлять этот файл (разделы 1–3) и при необходимости чеклисты в ACTION_PLAN и таблицы в MASTER_PLAN.
+**Единый источник правды по состоянию и приоритетам — этот файл (STATE_AND_ROADMAP).** После реализации задач обновлять разделы 1–3.

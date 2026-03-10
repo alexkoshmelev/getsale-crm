@@ -27,15 +27,13 @@ apiClient.interceptors.request.use((config) => {
 });
 
 let apiClientRefreshing = false;
-const apiClientQueue: Array<{ request: import('axios').InternalAxiosRequestConfig; resolve: (v: unknown) => void; reject: (e: unknown) => void }> = [];
+const apiClientQueue: Array<{ request: AxiosConfigWithRetry; resolve: (v: unknown) => void; reject: (e: unknown) => void }> = [];
+
+type AxiosConfigWithRetry = import('axios').InternalAxiosRequestConfig & { _retry?: boolean };
 
 /** Build a fresh config for retry so the browser sends the latest cookies (avoids stale config). */
-function retryConfig(original: import('axios').InternalAxiosRequestConfig): import('axios').InternalAxiosRequestConfig {
-  return {
-    ...original,
-    withCredentials: true,
-    _retry: true,
-  };
+function retryConfig(original: AxiosConfigWithRetry): import('axios').InternalAxiosRequestConfig {
+  return { ...original, withCredentials: true, _retry: true } as import('axios').InternalAxiosRequestConfig;
 }
 
 apiClient.interceptors.response.use(
@@ -45,7 +43,7 @@ apiClient.interceptors.response.use(
     if (
       !originalRequest ||
       error.response?.status !== 401 ||
-      originalRequest._retry === true ||
+      (originalRequest as AxiosConfigWithRetry)._retry === true ||
       originalRequest?.url?.includes('/api/auth/signin') ||
       originalRequest?.url?.includes('/api/auth/signup') ||
       originalRequest?.url?.includes('/api/auth/refresh') ||
@@ -56,11 +54,11 @@ apiClient.interceptors.response.use(
 
     if (apiClientRefreshing) {
       return new Promise((resolve, reject) => {
-        apiClientQueue.push({ request: originalRequest, resolve, reject });
+        apiClientQueue.push({ request: originalRequest as AxiosConfigWithRetry, resolve, reject });
       });
     }
 
-    originalRequest._retry = true;
+    (originalRequest as AxiosConfigWithRetry)._retry = true;
     apiClientRefreshing = true;
 
     try {

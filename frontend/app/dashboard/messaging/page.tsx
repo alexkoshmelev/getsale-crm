@@ -562,7 +562,7 @@ export default function MessagingPage() {
         defaultPipelineId={typeof window !== 'undefined' ? window.localStorage.getItem('pipeline.selectedPipelineId') : null}
         onSuccess={() => {
           const channelId = s.addToFunnelFromChat?.channelId;
-          data.fetchChats().then((chats) => {
+          data.getChats().then((chats) => {
             if (!chats?.length || !channelId) return;
             const updated = chats.find((c) => c.channel_id === channelId);
             if (updated) {

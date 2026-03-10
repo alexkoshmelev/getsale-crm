@@ -6,6 +6,7 @@ import { createServiceApp } from '@getsale/service-core';
 import { draftsRouter } from './routes/drafts';
 import { analyzeRouter } from './routes/analyze';
 import { usageRouter } from './routes/usage';
+import { searchQueriesRouter } from './routes/search-queries';
 import { AIRateLimiter } from './rate-limiter';
 import { DRAFT_SYSTEM, PROMPT_VERSION } from './prompts';
 
@@ -105,6 +106,7 @@ async function main() {
   ctx.mount('/api/ai/drafts', draftsRouter(deps));
   ctx.mount('/api/ai', analyzeRouter(deps));
   ctx.mount('/api/ai', usageRouter(deps));
+  ctx.mount('/api/ai', searchQueriesRouter(deps));
 
   ctx.start();
 }

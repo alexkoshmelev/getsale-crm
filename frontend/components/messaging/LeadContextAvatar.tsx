@@ -36,6 +36,15 @@ export function LeadContextAvatar({ contactName, telegramId: telegramIdProp, bdA
           peer_type: 'user',
           name: contactName ?? null,
           display_name: contactName ?? null,
+          contact_id: null,
+          first_name: null,
+          last_name: null,
+          email: null,
+          telegram_id: null,
+          username: null,
+          unread_count: 0,
+          last_message_at: '',
+          last_message: null,
         }}
         className={className}
       />

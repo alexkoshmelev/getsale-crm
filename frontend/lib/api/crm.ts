@@ -89,6 +89,8 @@ export interface Contact {
   updated_at: string;
   company_name?: string | null;
   companyName?: string | null;
+  /** Contact Discovery: groups this contact was imported from */
+  telegramGroups?: { telegram_chat_id: string; telegram_chat_title?: string }[];
 }
 
 export interface ContactsListParams extends PaginationParams {
@@ -139,6 +141,25 @@ export async function importContactsFromCsv(body: {
   mapping?: Record<string, number>;
 }): Promise<ContactImportResult> {
   const { data } = await apiClient.post<ContactImportResult>('/api/crm/contacts/import', body);
+  return data;
+}
+
+export interface ImportFromTelegramGroupResult {
+  contactIds: string[];
+  created: number;
+  matched: number;
+}
+
+export async function importFromTelegramGroup(body: {
+  bdAccountId: string;
+  telegramChatId: string;
+  telegramChatTitle?: string | null;
+  searchKeyword?: string | null;
+  excludeAdmins?: boolean;
+  leaveAfter?: boolean;
+  postDepth?: number;
+}): Promise<ImportFromTelegramGroupResult> {
+  const { data } = await apiClient.post<ImportFromTelegramGroupResult>('/api/crm/contacts/import-from-telegram-group', body);
   return data;
 }
 

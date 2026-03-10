@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
 import cookieParser from 'cookie-parser';
 import { createProxyMiddleware } from 'http-proxy-middleware';
+import Redis from 'ioredis';
 import { RedisClient } from '@getsale/utils';
 import { UserRole } from '@getsale/types';
 
@@ -45,6 +46,37 @@ const PORT = process.env.PORT || 8000;
 
 // Redis for rate limiting and caching
 const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6379');
+
+// Redis subscriber for SSE (dedicated connection; subscribe() puts connection in subscriber mode)
+const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+let redisSub: Redis | null = null;
+try {
+  const url = new URL(redisUrl);
+  redisSub = new Redis({
+    host: url.hostname,
+    port: parseInt(url.port || '6379'),
+    password: url.password || undefined,
+    retryStrategy: (times: number) => Math.min(times * 50, 2000),
+    maxRetriesPerRequest: 3,
+  });
+  redisSub.on('error', (err: Error) => console.error('[API Gateway] Redis subscriber error:', err));
+  redisSub.on('message', (channel: string, message: string) => {
+    const res = sseClients.get(channel);
+    if (!res || res.writableEnded) return;
+    try {
+      const parsed = JSON.parse(message) as { event?: string; data?: unknown };
+      const event = parsed.event || 'message';
+      const data = parsed.data !== undefined ? JSON.stringify(parsed.data) : message;
+      res.write(`event: ${event}\ndata: ${data}\n\n`);
+    } catch (_) {
+      res.write(`data: ${message}\n\n`);
+    }
+  });
+} catch (e) {
+  console.warn('[API Gateway] Redis subscriber not started:', (e as Error).message);
+}
+const sseClients = new Map<string, express.Response>();
+const SSE_HEARTBEAT_MS = 28000;
 
 // Service URLs
 const AUTH_SERVICE = process.env.AUTH_SERVICE_URL || 'http://localhost:3001';
@@ -224,6 +256,42 @@ async function rateLimit(req: express.Request, res: express.Response, next: expr
   next();
 }
 
+// GET /api/events/stream — SSE stream for progress + notifications (parse_progress, sync_progress, notification)
+app.get('/api/events/stream', authenticate, (req, res) => {
+  addCorrelationToResponse(res, req);
+  const user = (req as any).user as { id: string };
+  if (!user?.id || !redisSub) {
+    return res.status(503).json({ error: 'Events stream unavailable' });
+  }
+  const channel = `events:${user.id}`;
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  sseClients.set(channel, res);
+  redisSub!.subscribe(channel).catch((err: Error) => {
+    console.error('[API Gateway] SSE subscribe error:', err);
+  });
+
+  const heartbeat = setInterval(() => {
+    if (res.writableEnded) return;
+    try {
+      res.write(': heartbeat\n\n');
+    } catch (_) {}
+  }, SSE_HEARTBEAT_MS);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    sseClients.delete(channel);
+    redisSub!.unsubscribe(channel).catch(() => {});
+    try {
+      if (!res.writableEnded) res.end();
+    } catch (_) {}
+  });
+});
+
 // Proxy configurations — every proxy MUST use addCorsToProxyRes(proxyRes, req) in onProxyRes so the
 // response forwarded to the browser has valid CORS (concrete origin + credentials). Setting only res.setHeader
 // can be overwritten when the proxy pipes the backend response to the client.
@@ -247,7 +315,7 @@ const authProxy = createProxyMiddleware({
     console.error(`[API Gateway] ❌ Proxy error for ${req.url}:`, err.message);
     console.error(`[API Gateway] Error details:`, err);
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Service unavailable', details: err.message });
+      res.status(500).json({ error: 'Service unavailable' });
     } else {
       console.error(`[API Gateway] Response already sent, cannot send error response`);
     }
@@ -371,7 +439,7 @@ const bdAccountsProxy = createProxyMiddleware({
   onError: (err, req, res) => {
     console.error(`[API Gateway] ❌ Proxy error for ${req.url}:`, err.message);
     if (!res.headersSent) {
-      res.status(504).json({ error: 'Service unavailable', details: err.message });
+      res.status(504).json({ error: 'Service unavailable' });
     }
   },
 });

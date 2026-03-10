@@ -48,6 +48,11 @@ export class RedisClient {
     await this.client.del(key);
   }
 
+  /** Publish message to a channel (for server-sent events / push to user). */
+  async publish(channel: string, message: string): Promise<void> {
+    await this.client.publish(channel, message);
+  }
+
   /** Acquire a distributed lock: SET key value NX EX ttlSeconds. Returns true if lock acquired. */
   async tryLock(key: string, value: string, ttlSeconds: number): Promise<boolean> {
     const result = await this.client.set(key, value, 'EX', ttlSeconds, 'NX');

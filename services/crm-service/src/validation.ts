@@ -100,4 +100,77 @@ export type ContactCreateInput = z.infer<typeof ContactCreateSchema>;
 export type ContactUpdateInput = z.infer<typeof ContactUpdateSchema>;
 export type DealCreateInput = z.infer<typeof DealCreateSchema>;
 export type DealUpdateInput = z.infer<typeof DealUpdateSchema>;
+export const ContactImportSchema = z.object({
+  content: z.string().min(1, 'content (CSV string) is required').max(5_000_000),
+  hasHeader: z.boolean().optional().default(true),
+  mapping: z
+    .record(z.number().int().min(0))
+    .optional()
+    .default({ firstName: 0, lastName: 1, email: 2, phone: 3, telegramId: 4 }),
+});
+
 export type DealStageUpdateInput = z.infer<typeof DealStageUpdateSchema>;
+export const ImportFromTelegramGroupSchema = z.object({
+  bdAccountId: z.string().uuid(),
+  telegramChatId: z.string().min(1).max(128),
+  telegramChatTitle: z.string().max(512).optional().nullable(),
+  searchKeyword: z.string().max(256).optional().nullable(),
+  excludeAdmins: z.boolean().optional(),
+  leaveAfter: z.boolean().optional(),
+  postDepth: z.number().min(1).max(500).optional(),
+});
+
+export type ContactImportInput = z.infer<typeof ContactImportSchema>;
+export type ImportFromTelegramGroupInput = z.infer<typeof ImportFromTelegramGroupSchema>;
+
+export const DiscoveryTaskCreateSchema = z.object({
+  name: z.string().min(1).max(255).trim(),
+  type: z.enum(['search', 'parse']),
+  params: z.record(z.unknown()), // Depending on type, could be refined further
+});
+
+export const DiscoveryTaskActionSchema = z.object({
+  action: z.enum(['start', 'pause', 'stop']),
+});
+
+export type DiscoveryTaskCreateInput = z.infer<typeof DiscoveryTaskCreateSchema>;
+export type DiscoveryTaskActionInput = z.infer<typeof DiscoveryTaskActionSchema>;
+
+// ─── Parse flow (Contact Discovery) ───────────────────────────────────────
+
+export const TelegramSourceTypeSchema = z.enum(['channel', 'public_group', 'private_group', 'comment_group', 'unknown']);
+export type TelegramSourceType = z.infer<typeof TelegramSourceTypeSchema>;
+
+export const ResolvedSourceSchema = z.object({
+  input: z.string(),
+  type: TelegramSourceTypeSchema,
+  title: z.string(),
+  username: z.string().optional(),
+  chatId: z.string(),
+  membersCount: z.number().optional(),
+  linkedChatId: z.number().optional(),
+  canGetMembers: z.boolean(),
+  canGetMessages: z.boolean(),
+});
+export type ResolvedSourceInput = z.infer<typeof ResolvedSourceSchema>;
+
+export const ParseSettingsSchema = z.object({
+  depth: z.enum(['fast', 'standard', 'deep']).default('standard'),
+  excludeAdmins: z.boolean().default(true),
+  maxMessages: z.number().optional(),
+  maxMembers: z.number().optional(),
+});
+export type ParseSettingsInput = z.infer<typeof ParseSettingsSchema>;
+
+export const ParseResolveSchema = z.object({
+  sources: z.array(z.string().min(1)).min(1).max(20),
+  bdAccountId: z.string().uuid(),
+});
+export const ParseStartSchema = z.object({
+  sources: z.array(ResolvedSourceSchema).min(1).max(50),
+  settings: ParseSettingsSchema.optional(),
+  accountIds: z.array(z.string().uuid()).min(1).max(10),
+  listName: z.string().max(255).optional(),
+});
+export type ParseResolveInput = z.infer<typeof ParseResolveSchema>;
+export type ParseStartInput = z.infer<typeof ParseStartSchema>;

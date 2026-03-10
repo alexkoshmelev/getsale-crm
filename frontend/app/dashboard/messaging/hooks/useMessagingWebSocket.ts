@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { useWebSocketContext } from '@/lib/contexts/websocket-context';
+import { useEventsStream } from '@/lib/contexts/events-stream-context';
 import type { BDAccount } from '../types';
 import type { MessagingState } from './useMessagingState';
 
@@ -9,8 +10,29 @@ export function useMessagingWebSocket(
   fetchAccounts: () => Promise<void>,
 ) {
   const { on, off, subscribe, unsubscribe, isConnected } = useWebSocketContext();
+  const { subscribe: subscribeEvents } = useEventsStream();
 
-  // ─── Sync events for selected account ────────────────────────────
+  // ─── Sync progress via SSE (unified events stream) ─────────────────
+  useEffect(() => {
+    const unsub = subscribeEvents('sync_progress', (data: Record<string, unknown>) => {
+      const bdAccountId = data.bdAccountId as string | undefined;
+      if (!bdAccountId || bdAccountId !== s.selectedAccountId) return;
+      const done = Number(data.done ?? 0);
+      const total = Number(data.total ?? 0);
+      s.setAccountSyncReady(false);
+      s.setAccountSyncProgress({ done, total: total || 1 });
+      if (data.completed === true || (total > 0 && done >= total)) {
+        s.setAccountSyncReady(true);
+        s.setAccountSyncProgress(null);
+        s.setAccountSyncError(null);
+        fetchChats();
+        fetchAccounts();
+      }
+    });
+    return unsub;
+  }, [s.selectedAccountId, subscribeEvents, fetchChats, fetchAccounts]);
+
+  // ─── Sync events for selected account (WebSocket fallback) ────────────────────────────
   useEffect(() => {
     if (!s.selectedAccountId || !isConnected) return;
     subscribe(`bd-account:${s.selectedAccountId}`);

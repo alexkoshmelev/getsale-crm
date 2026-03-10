@@ -1,8 +1,10 @@
 # Полный аудит документации и кода проекта
 
-**Дата:** 2026-02  
+**Дата:** 2026-02 (обновлено 2026-03)  
 **Область:** документация (§3–§15, PHASE 2.x), messaging-service, campaign-service, bd-accounts-service, migrations, frontend.  
 **Цель:** выявить устаревшую документацию, расхождения между сервисами, технический долг и архитектурные риски. Код не изменялся — только анализ.
+
+**Связанный отчёт:** [FULL_SYSTEM_AUDIT_2026.md](FULL_SYSTEM_AUDIT_2026.md) — полный системный аудит (архитектура, фронт/UX, AI, масштабируемость, governance, конкуренты, вердикт). Ключевые выводы: зрелость 5.5–6/10; критичные риски — общая БД без контрактов, отсутствие retry/circuit breaker при вызовах AI и bd-accounts, рост таблицы messages без партиционирования, отсутствие алертов и DLQ; приоритет — Reliability (retry/circuit breaker, алерты, DLQ), затем Scale и AI expansion. В марте 2026 выполнена очистка документации (единый источник — STATE_AND_ROADMAP, объединённые ARCHITECTURE, GETTING_STARTED, TESTING, STAGES, MESSAGING_ARCHITECTURE, CAMPAIGNS).
 
 ---
 
@@ -79,7 +81,7 @@ campaign-service
 
 ## 2. Документация — актуальность
 
-*Источник: `docs/STAGE_7_CONVERSATION_DRIVEN_CRM_UX.md`.*
+*Источник: ранее STAGE_7; сводка этапов — [STAGES.md](STAGES.md).*
 
 | Раздел | Статус | Комментарий |
 |--------|--------|-------------|
@@ -234,7 +236,7 @@ campaign-service
 
 | Приоритет | Задача | Где |
 |-----------|--------|-----|
-| P1 | Обновить §15 чеклист: отметить PHASE 2.4, 2.5, 2.6, 2.7 как выполненные | docs/STAGE_7_CONVERSATION_DRIVEN_CRM_UX.md |
+| P1 | Обновить §15 чеклист: отметить PHASE 2.4, 2.5, 2.6, 2.7 как выполненные | docs/STAGES.md (ЭТАП 7) |
 | P1 | Обернуть в транзакцию: UPDATE conversations + INSERT system message в create-shared-chat, mark-won, mark-lost | messaging-service |
 | P2 | Решить и при необходимости добавить RBAC для mark-won, mark-lost, create-shared-chat (или явно зафиксировать «любой пользователь организации») | messaging-service + doc |
 | P2 | Добавить составной индекс для GET new-leads при росте данных: (organization_id, lead_id) WHERE first_manager_reply_at IS NULL или аналог | migrations |

@@ -36,6 +36,10 @@ docker-compose down -v
 Создайте `.env` файл в корне проекта:
 
 ```env
+# Обязательно для работы gateway и бэкендов: один и тот же секрет для внутренней аутентификации запросов gateway → backend.
+# Если не задан, бэкенды отвечают 503 (см. аудит S1).
+INTERNAL_AUTH_SECRET=your_internal_auth_secret
+
 OPENAI_API_KEY=your_openai_key
 TELEGRAM_BOT_TOKEN=your_telegram_token
 # Для BD Accounts (подключение Telegram аккаунтов) — получить на https://my.telegram.org/apps

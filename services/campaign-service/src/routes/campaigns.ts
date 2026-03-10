@@ -5,8 +5,9 @@ import { RabbitMQClient } from '@getsale/utils';
 import { EventType } from '@getsale/events';
 import { CampaignStatus } from '@getsale/types';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes } from '@getsale/service-core';
+import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { parseCsv } from '../helpers';
+import { CampaignCreateSchema, CampaignPatchSchema, FromCsvBodySchema, ParticipantsBulkSchema } from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -173,9 +174,34 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     res.json({ contactIds });
   }));
 
+  router.get('/telegram-source-keywords', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const r = await pool.query(
+      `SELECT DISTINCT search_keyword AS keyword FROM contact_telegram_sources
+       WHERE organization_id = $1 AND search_keyword IS NOT NULL AND search_keyword != ''
+       ORDER BY search_keyword`,
+      [organizationId]
+    );
+    res.json((r.rows as { keyword: string }[]).map((x) => x.keyword));
+  }));
+
+  router.get('/telegram-source-groups', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const r = await pool.query(
+      `SELECT DISTINCT bd_account_id, telegram_chat_id, telegram_chat_title FROM contact_telegram_sources
+       WHERE organization_id = $1 ORDER BY telegram_chat_title NULLS LAST, telegram_chat_id`,
+      [organizationId]
+    );
+    res.json(r.rows.map((row: { bd_account_id: string; telegram_chat_id: string; telegram_chat_title: string | null }) => ({
+      bdAccountId: row.bd_account_id,
+      telegramChatId: row.telegram_chat_id,
+      telegramChatTitle: row.telegram_chat_title ?? undefined,
+    })));
+  }));
+
   router.get('/contacts-for-picker', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const { limit = 500, outreachStatus, search } = req.query;
+    const { limit = 500, outreachStatus, search, sourceKeyword, sourceTelegramChatId, sourceBdAccountId } = req.query;
     const limitNum = Math.min(1000, Math.max(1, parseInt(String(limit), 10)));
     let query = `
       SELECT c.id, c.first_name, c.last_name, c.display_name, c.username, c.telegram_id, c.email, c.phone,
@@ -189,6 +215,22 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     `;
     const params: any[] = [organizationId];
     let idx = 2;
+    if (sourceKeyword && typeof sourceKeyword === 'string' && sourceKeyword.trim()) {
+      query += ` AND EXISTS (SELECT 1 FROM contact_telegram_sources cts WHERE cts.contact_id = c.id AND cts.organization_id = c.organization_id AND cts.search_keyword = $${idx})`;
+      params.push(sourceKeyword.trim());
+      idx++;
+    }
+    if (sourceTelegramChatId && typeof sourceTelegramChatId === 'string' && sourceTelegramChatId.trim()) {
+      query += ` AND EXISTS (SELECT 1 FROM contact_telegram_sources cts WHERE cts.contact_id = c.id AND cts.organization_id = c.organization_id AND cts.telegram_chat_id = $${idx}`;
+      params.push(sourceTelegramChatId.trim());
+      idx++;
+      if (sourceBdAccountId && typeof sourceBdAccountId === 'string' && sourceBdAccountId.trim()) {
+        query += ` AND cts.bd_account_id = $${idx}`;
+        params.push(sourceBdAccountId.trim());
+        idx++;
+      }
+      query += ')';
+    }
     if (outreachStatus === 'new') {
       query += ` AND NOT EXISTS (SELECT 1 FROM campaign_participants cp JOIN campaigns c2 ON c2.id = cp.campaign_id WHERE cp.contact_id = c.id AND c2.organization_id = c.organization_id)`;
     } else if (outreachStatus === 'in_outreach') {
@@ -245,12 +287,9 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     });
   }));
 
-  router.post('/', asyncHandler(async (req, res) => {
+  router.post('/', validate(CampaignCreateSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
     const { name, companyId, pipelineId, targetAudience, schedule } = req.body;
-    if (!name || typeof name !== 'string') {
-      throw new AppError(400, 'Name is required', ErrorCodes.VALIDATION);
-    }
     const id = randomUUID();
     await pool.query(
       `INSERT INTO campaigns (id, organization_id, company_id, pipeline_id, name, status, target_audience, schedule)
@@ -277,11 +316,13 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
         userId,
         data: { campaignId: id },
       } as any);
-    } catch (_) {}
+    } catch (err) {
+      log.warn({ message: 'CAMPAIGN_CREATED publish failed', campaignId: id, error: err instanceof Error ? err.message : String(err) });
+    }
     res.status(201).json(campaign);
   }));
 
-  router.patch('/:id', asyncHandler(async (req, res) => {
+  router.patch('/:id', validate(CampaignPatchSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const { name, companyId, pipelineId, targetAudience, schedule, status, leadCreationSettings } = req.body;
@@ -368,13 +409,10 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     res.status(204).send();
   }));
 
-  router.post('/:id/audience/from-csv', asyncHandler(async (req, res) => {
+  router.post('/:id/audience/from-csv', validate(FromCsvBodySchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
-    const { content, hasHeader = true } = req.body as { content?: string; hasHeader?: boolean };
-    if (!content || typeof content !== 'string') {
-      throw new AppError(400, 'content (CSV text) is required', ErrorCodes.VALIDATION);
-    }
+    const { content, hasHeader } = req.body;
     const campaign = await pool.query(
       'SELECT id, organization_id FROM campaigns WHERE id = $1 AND organization_id = $2',
       [id, organizationId]
@@ -435,6 +473,53 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       }
     }
     res.json({ contactIds, created, matched });
+  }));
+
+  router.post('/:id/participants-bulk', validate(ParticipantsBulkSchema), asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    const { contactIds, bdAccountId } = req.body as { contactIds: string[], bdAccountId?: string };
+
+    const campaign = await pool.query(
+      'SELECT id FROM campaigns WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
+    if (campaign.rows.length === 0) {
+      throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+    }
+
+    const assignedBdAccountId = bdAccountId;
+
+    if (contactIds.length === 0) {
+      return res.json({ added: 0 });
+    }
+
+    let added = 0;
+    const batchSize = 1000;
+    for (let i = 0; i < contactIds.length; i += batchSize) {
+      const batch = contactIds.slice(i, i + batchSize);
+      
+      const values: string[] = [];
+      const params: any[] = [id];
+      let pIdx = 2;
+
+      for (const cid of batch) {
+         values.push(`($1, $${pIdx}, $${pIdx + 1}, 'pending', NOW(), NOW())`);
+         params.push(cid, assignedBdAccountId || null);
+         pIdx += 2;
+      }
+      
+      const insertQuery = `
+        INSERT INTO campaign_participants (campaign_id, contact_id, bd_account_id, status, created_at, updated_at)
+        VALUES ${values.join(', ')}
+        ON CONFLICT (campaign_id, contact_id) DO NOTHING
+      `;
+      
+      const result = await pool.query(insertQuery, params);
+      added += result.rowCount || 0;
+    }
+
+    res.json({ added });
   }));
 
   return router;

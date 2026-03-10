@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 import { RabbitMQClient } from '@getsale/utils';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, canPermission } from '@getsale/service-core';
-import { TelegramManager } from '../telegram-manager';
+import { TelegramManager, type ResolvedSource } from '../telegram-manager';
 import {
   requireAccountOwner,
   requireBidiOwnAccount,
@@ -568,6 +568,257 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     res.json(rows);
   }));
 
+  // GET /:id/search-groups — search groups/channels by keyword (Contact Discovery)
+  router.get('/:id/search-groups', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit), 10) || 50));
+    const typeParam = typeof req.query.type === 'string' ? req.query.type.toLowerCase() : 'all';
+    const type = typeParam === 'groups' || typeParam === 'channels' ? typeParam : 'all';
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
+    }
+    if (q.length < 2) {
+      throw new AppError(400, 'Query must be at least 2 characters', ErrorCodes.VALIDATION);
+    }
+    const MAX_QUERY_LENGTH = 200;
+    if (q.length > MAX_QUERY_LENGTH) {
+      throw new AppError(400, `Query must be at most ${MAX_QUERY_LENGTH} characters`, ErrorCodes.VALIDATION);
+    }
+    const searchMode = (q.startsWith('#') || req.query.searchMode === 'hashtag') ? 'hashtag' as const : 'query' as const;
+    const SEARCH_SOURCE_DELAY_MS = 400;
+
+    try {
+      type SearchItem = { chatId: string; title: string; peerType: string; membersCount?: number; username?: string };
+      let groups: SearchItem[];
+      if (type === 'groups') {
+        groups = await telegramManager.searchGroupsByKeyword(id, q, limit, type);
+        try {
+          await new Promise((r) => setTimeout(r, SEARCH_SOURCE_DELAY_MS));
+          const fromContacts = await telegramManager.searchByContacts(id, q, limit);
+          const onlyGroups = fromContacts.filter((item) => item.peerType === 'chat');
+          const seenIds = new Set(groups.map((g) => g.chatId));
+          for (const item of onlyGroups) {
+            if (!seenIds.has(item.chatId)) {
+              seenIds.add(item.chatId);
+              groups.push(item);
+            }
+          }
+        } catch (contactsErr: any) {
+          log.warn({ message: 'contacts.search failed for type=groups', accountId: id, query: q, error: contactsErr?.message });
+        }
+        groups = groups.slice(0, limit);
+      } else if (type === 'channels') {
+        groups = await telegramManager.searchPublicChannelsByKeyword(id, q, limit, 10, searchMode);
+        groups = groups.slice(0, limit);
+      } else {
+        groups = await telegramManager.searchPublicChannelsByKeyword(id, q, limit, 10, searchMode);
+        try {
+          await new Promise((r) => setTimeout(r, SEARCH_SOURCE_DELAY_MS));
+          const fromContacts = await telegramManager.searchByContacts(id, q, limit);
+          const seenIds = new Set(groups.map((g) => g.chatId));
+          for (const item of fromContacts) {
+            if (!seenIds.has(item.chatId)) {
+              seenIds.add(item.chatId);
+              groups.push(item);
+            }
+          }
+        } catch (contactsErr: any) {
+          log.warn({ message: 'contacts.search failed, returning SearchPosts only', accountId: id, query: q, error: contactsErr?.message });
+        }
+        groups = groups.slice(0, limit);
+      }
+      res.json(groups);
+    } catch (e: any) {
+      if ((e as any).code === 'QUERY_TOO_SHORT') {
+        throw new AppError(400, 'Query too short', ErrorCodes.VALIDATION);
+      }
+      throw e;
+    }
+  }));
+
+  // GET /:id/admined-public-channels — channels/supergroups the user administers (Contact Discovery)
+  router.get('/:id/admined-public-channels', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id } = req.params;
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
+    }
+    const channels = await telegramManager.getAdminedPublicChannels(id);
+    res.json(channels);
+  }));
+
+  // GET /:id/chats/:chatId/participants — get channel/supergroup participants (Contact Discovery)
+  router.get('/:id/chats/:chatId/participants', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id, chatId } = req.params;
+    const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit), 10) || 200));
+    const offset = Math.max(0, parseInt(String(req.query.offset), 10) || 0);
+    const excludeAdmins = req.query.excludeAdmins === 'true' || req.query.excludeAdmins === '1';
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
+    }
+    if (!chatId || chatId.length > 128) {
+      throw new AppError(400, 'Invalid chatId', ErrorCodes.VALIDATION);
+    }
+    try {
+      const result = await telegramManager.getChannelParticipants(id, chatId, offset, limit, excludeAdmins);
+      res.json(result);
+    } catch (e: any) {
+      if ((e as any).code === 'CHAT_ADMIN_REQUIRED') {
+        throw new AppError(403, 'No permission to get participants', ErrorCodes.FORBIDDEN);
+      }
+      if ((e as any).code === 'CHANNEL_PRIVATE') {
+        throw new AppError(404, 'Channel is private', ErrorCodes.NOT_FOUND);
+      }
+      throw e;
+    }
+  }));
+
+  // GET /:id/chats/:chatId/active-participants — get active participants from chat history (Contact Discovery)
+  router.get('/:id/chats/:chatId/active-participants', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id, chatId } = req.params;
+    const depth = Math.min(2000, Math.max(1, parseInt(String(req.query.depth), 10) || 100));
+    const excludeAdmins = req.query.excludeAdmins === 'true' || req.query.excludeAdmins === '1';
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
+    }
+    if (!chatId || chatId.length > 128) {
+      throw new AppError(400, 'Invalid chatId', ErrorCodes.VALIDATION);
+    }
+    try {
+      const result = await telegramManager.getActiveParticipants(id, chatId, depth, excludeAdmins);
+      res.json(result);
+    } catch (e: any) {
+      if ((e as any).code === 'CHANNEL_PRIVATE') {
+        throw new AppError(404, 'Channel is private', ErrorCodes.NOT_FOUND);
+      }
+      throw e;
+    }
+  }));
+
+  // POST /:id/chats/:chatId/leave — leave channel/supergroup (Contact Discovery)
+  router.post('/:id/chats/:chatId/leave', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id, chatId } = req.params;
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
+    }
+    if (!chatId || chatId.length > 128) {
+      throw new AppError(400, 'Invalid chatId', ErrorCodes.VALIDATION);
+    }
+    try {
+      await telegramManager.leaveChat(id, chatId);
+      res.status(204).send();
+    } catch (e: any) {
+      if ((e as any).code === 'CHANNEL_PRIVATE') {
+        throw new AppError(404, 'Channel is private or already left', ErrorCodes.NOT_FOUND);
+      }
+      throw e;
+    }
+  }));
+
+  const RESOLVE_CHATS_MAX_INPUTS = 20;
+
+  // POST /:id/resolve-chats — resolve links/usernames/invites to chats (Contact Discovery)
+  router.post('/:id/resolve-chats', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    const body = req.body as { inputs?: unknown };
+    const rawInputs = Array.isArray(body?.inputs) ? body.inputs : [];
+    const inputs = rawInputs
+      .slice(0, RESOLVE_CHATS_MAX_INPUTS)
+      .map((x) => (typeof x === 'string' ? x : String(x)).trim())
+      .filter((x) => x.length > 0);
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
+    }
+    const results: Array<{ chatId?: string; title?: string; peerType?: string; error?: string }> = [];
+    for (const input of inputs) {
+      try {
+        const resolved = await telegramManager.resolveChatFromInput(id, input);
+        results.push({ chatId: resolved.chatId, title: resolved.title, peerType: resolved.peerType });
+      } catch (e: any) {
+        const code = (e as any).code;
+        const msg = e?.message || String(e);
+        results.push({ error: code === 'CHAT_NOT_FOUND' ? 'Chat not found' : code === 'INVITE_EXPIRED' ? 'Invite expired' : code === 'INVALID_INVITE' ? 'Invalid invite link' : msg });
+      }
+    }
+    res.json({ results });
+  }));
+
+  // POST /:id/parse/resolve — resolve to ResolvedSource (type, linkedChatId, canGetMembers, canGetMessages) for parse flow
+  router.post('/:id/parse/resolve', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    const body = req.body as { sources?: unknown };
+    const rawSources = Array.isArray(body?.sources) ? body.sources : [];
+    const sources = rawSources
+      .slice(0, RESOLVE_CHATS_MAX_INPUTS)
+      .map((x) => (typeof x === 'string' ? x : String(x)).trim())
+      .filter((x) => x.length > 0);
+
+    const accountResult = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
+    if (accountResult.rows.length === 0) {
+      throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
+    }
+    const results: Array<ResolvedSource & { error?: string }> = [];
+    for (const input of sources) {
+      try {
+        const resolved = await telegramManager.resolveSourceFromInput(id, input);
+        results.push(resolved);
+      } catch (e: any) {
+        const code = (e as any).code;
+        const msg = e?.message || String(e);
+        results.push({
+          input,
+          type: 'unknown',
+          title: '',
+          chatId: '',
+          canGetMembers: false,
+          canGetMessages: false,
+          error: code === 'CHAT_NOT_FOUND' ? 'Chat not found' : code === 'INVITE_EXPIRED' ? 'Invite expired' : code === 'INVALID_INVITE' ? 'Invalid invite link' : msg,
+        });
+      }
+    }
+    res.json({ results });
+  }));
+
   // POST /:id/sync-chats — save selected chats for sync (replace existing selection)
   router.post('/:id/sync-chats', asyncHandler(async (req, res) => {
     const user = req.user;
@@ -589,6 +840,10 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
 
     if (!Array.isArray(chats)) {
       throw new AppError(400, 'chats must be an array', ErrorCodes.VALIDATION);
+    }
+    const MAX_SYNC_CHATS = 2000;
+    if (chats.length > MAX_SYNC_CHATS) {
+      throw new AppError(400, `chats array exceeds maximum of ${MAX_SYNC_CHATS}`, ErrorCodes.VALIDATION);
     }
 
     const accountTelegramId = accountResult.rows[0].telegram_id != null ? String(accountResult.rows[0].telegram_id).trim() : null;

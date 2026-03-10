@@ -76,12 +76,12 @@ export function AddReminderModal({ open, onClose, contactId, onSuccess }: AddRem
       const noteTitle = [title.trim(), description.trim()].filter(Boolean).join(' — ') || undefined;
       await createContactReminder(contactId, { remind_at: remindAt, title: noteTitle ?? undefined });
       setTitle('');
-      setDatetimeLocal(toDatetimeLocal(defaultAt.toISOString()));
+      setDatetimeLocal(getDefaultDatetimeLocal());
       setDescription('');
       onSuccess?.();
       onClose();
     } catch (err: unknown) {
-      setError((err as { message?: string })?.message ?? t('common.error', 'Ошибка'));
+      setError((err as { message?: string })?.message ?? t('common.error'));
     } finally {
       setSaving(false);
     }

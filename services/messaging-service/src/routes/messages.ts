@@ -357,15 +357,9 @@ export function messagesRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
         ]);
         const is413 = (error instanceof ServiceCallError && error.statusCode === 413)
           || (error.message && (error.message.toLowerCase().includes('too large') || error.message.includes('2 GB')));
-        const errBody = error instanceof ServiceCallError && typeof error.body === 'object' && error.body !== null
-          ? error.body as { message?: string; error?: string }
-          : {};
-        const errMsg = is413
-          ? (errBody.message || errBody.error || 'File too large')
-          : (errBody.message || errBody.error || error.message || 'Failed to send message');
         return res.status(is413 ? 413 : 500).json({
           error: is413 ? 'File too large' : 'Internal server error',
-          message: errMsg,
+          message: is413 ? 'File too large' : 'Failed to send message',
         });
       }
     }
@@ -439,12 +433,9 @@ export function messagesRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
         );
       } catch (err: any) {
         log.error({ message: 'Error deleting message in Telegram', error: String(err) });
-        const errMsg = err instanceof ServiceCallError && typeof err.body === 'object' && err.body !== null
-          ? ((err.body as any).message || err.message)
-          : (err.message || 'BD accounts service error');
         return res.status(502).json({
           error: 'Failed to delete in Telegram',
-          message: errMsg,
+          message: 'Failed to delete message in Telegram',
         });
       }
     }

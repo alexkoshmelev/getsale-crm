@@ -5,16 +5,20 @@ import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, validate, AppError, ErrorCodes } from '@getsale/service-core';
-import { ContactCreateSchema, ContactUpdateSchema } from '../validation';
+import { ContactCreateSchema, ContactUpdateSchema, ContactImportSchema, ImportFromTelegramGroupSchema } from '../validation';
 import { parseCsvLine } from '../helpers';
+import type { ServiceHttpClient } from '@getsale/service-core';
 
 interface Deps {
   pool: Pool;
   rabbitmq: RabbitMQClient;
   log: Logger;
+  bdAccountsClient?: ServiceHttpClient;
 }
 
-export function contactsRouter({ pool, rabbitmq, log }: Deps): Router {
+const MAX_IMPORT_PARTICIPANTS = 10_000;
+
+export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps): Router {
   const router = Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -74,19 +78,23 @@ export function contactsRouter({ pool, rabbitmq, log }: Deps): Router {
       throw new AppError(404, 'Contact not found', ErrorCodes.NOT_FOUND);
     }
     const { company_name, ...contact } = result.rows[0];
-    res.json({ ...contact, companyName: company_name ?? null });
+    const sourcesRows = await pool.query(
+      `SELECT telegram_chat_id, telegram_chat_title FROM contact_telegram_sources
+       WHERE contact_id = $1 AND organization_id = $2`,
+      [req.params.id, organizationId]
+    );
+    const telegramGroups = (sourcesRows.rows as { telegram_chat_id: string; telegram_chat_title: string | null }[]).map((r) => ({
+      telegram_chat_id: r.telegram_chat_id,
+      telegram_chat_title: r.telegram_chat_title ?? undefined,
+    }));
+    res.json({ ...contact, companyName: company_name ?? null, telegramGroups });
   }));
 
-  router.post('/import', asyncHandler(async (req, res) => {
+  router.post('/import', validate(ContactImportSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const body = req.body as { content?: string; hasHeader?: boolean; mapping?: Record<string, number> };
-    if (!body || typeof body.content !== 'string') {
-      throw new AppError(400, 'Missing or invalid body: content (CSV string) is required', ErrorCodes.VALIDATION);
-    }
+    const { content, hasHeader, mapping } = req.body;
 
-    const hasHeader = body.hasHeader !== false;
-    const mapping = body.mapping ?? { firstName: 0, lastName: 1, email: 2, phone: 3, telegramId: 4 };
-    const lines = body.content.split('\n').filter((l) => l.trim());
+    const lines = content.split('\n').filter((l: string) => l.trim());
     const rows = lines.map(parseCsvLine);
     const dataRows = hasHeader && rows.length > 1 ? rows.slice(1) : rows;
 
@@ -139,6 +147,81 @@ export function contactsRouter({ pool, rabbitmq, log }: Deps): Router {
     res.json({ created, updated, errors, total: dataRows.length });
   }));
 
+  router.post('/import-from-telegram-group', validate(ImportFromTelegramGroupSchema), asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { bdAccountId, telegramChatId, telegramChatTitle, searchKeyword, excludeAdmins, leaveAfter } = req.body;
+    if (!bdAccountsClient) {
+      throw new AppError(503, 'Contact discovery not configured', ErrorCodes.INTERNAL_ERROR);
+    }
+    const accountRow = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [bdAccountId, organizationId]
+    );
+    if (accountRow.rows.length === 0) {
+      throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
+    }
+    const defaultConsent = JSON.stringify({ email: false, sms: false, telegram: false, marketing: false });
+    const contactIds: string[] = [];
+    let created = 0;
+    let matched = 0;
+    let offset = 0;
+    const limit = 200;
+    let totalFetched = 0;
+    const excludeAdminsParam = excludeAdmins === true ? '&excludeAdmins=true' : '';
+    while (totalFetched < MAX_IMPORT_PARTICIPANTS) {
+      const result = await bdAccountsClient.request<{ users: Array<{ telegram_id: string; username?: string; first_name?: string; last_name?: string }>; nextOffset: number | null }>(
+        `/api/bd-accounts/${bdAccountId}/chats/${encodeURIComponent(telegramChatId)}/participants?limit=${limit}&offset=${offset}${excludeAdminsParam}`,
+        { method: 'GET', headers: { 'x-organization-id': organizationId } }
+      );
+      const users = result?.users ?? [];
+      for (const u of users) {
+        const telegramId = (u.telegram_id || '').trim() || null;
+        if (!telegramId) continue;
+        const existingContact = await pool.query(
+          'SELECT id FROM contacts WHERE organization_id = $1 AND telegram_id = $2 LIMIT 1',
+          [organizationId, telegramId]
+        );
+        let contactId: string;
+        if (existingContact.rows.length > 0) {
+          contactId = existingContact.rows[0].id;
+          matched++;
+        } else {
+          contactId = randomUUID();
+          const firstName = (u.first_name ?? '').trim() || 'Contact';
+          const lastName = (u.last_name ?? '').trim() || null;
+          const username = (u.username ?? '').trim() || null;
+          await pool.query(
+            `INSERT INTO contacts (id, organization_id, first_name, last_name, username, telegram_id, consent_flags)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [contactId, organizationId, firstName, lastName, username, telegramId, defaultConsent]
+          );
+          created++;
+        }
+        contactIds.push(contactId);
+        await pool.query(
+          `INSERT INTO contact_telegram_sources (organization_id, contact_id, bd_account_id, telegram_chat_id, telegram_chat_title, search_keyword)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (organization_id, contact_id, bd_account_id, telegram_chat_id) DO NOTHING`,
+          [organizationId, contactId, bdAccountId, telegramChatId, telegramChatTitle ?? null, searchKeyword ?? null]
+        );
+      }
+      totalFetched += users.length;
+      if (result?.nextOffset == null || users.length === 0) break;
+      offset = result.nextOffset;
+    }
+    if (leaveAfter === true) {
+      try {
+        await bdAccountsClient.request(
+          `/api/bd-accounts/${bdAccountId}/chats/${encodeURIComponent(telegramChatId)}/leave`,
+          { method: 'POST', headers: { 'x-organization-id': organizationId } }
+        );
+      } catch (leaveErr: any) {
+        log.warn({ message: 'Leave after import failed', bdAccountId, telegramChatId, error: leaveErr?.message || String(leaveErr) });
+      }
+    }
+    res.json({ contactIds, created, matched });
+  }));
+
   router.post('/', validate(ContactCreateSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
     const { firstName, lastName, displayName, username, email, phone, telegramId, companyId, consentFlags } = req.body;
@@ -171,17 +254,12 @@ export function contactsRouter({ pool, rabbitmq, log }: Deps): Router {
   const updateHandler = asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
     const { id } = req.params;
-    const parsed = ContactUpdateSchema.safeParse(req.body);
-    if (!parsed.success) {
-      throw new AppError(400, parsed.error.errors.map((e) => e.message).join('; '), ErrorCodes.VALIDATION);
-    }
+    const d = req.body;
 
     const existing = await pool.query('SELECT * FROM contacts WHERE id = $1 AND organization_id = $2', [id, organizationId]);
     if (existing.rows.length === 0) {
       throw new AppError(404, 'Contact not found', ErrorCodes.NOT_FOUND);
     }
-
-    const d = parsed.data;
     if (d.companyId !== undefined) {
       const check = await pool.query('SELECT 1 FROM companies WHERE id = $1 AND organization_id = $2', [d.companyId, organizationId]);
       if (check.rows.length === 0) {
@@ -208,8 +286,8 @@ export function contactsRouter({ pool, rabbitmq, log }: Deps): Router {
     res.json(result.rows[0]);
   });
 
-  router.put('/:id', updateHandler);
-  router.patch('/:id', updateHandler);
+  router.put('/:id', validate(ContactUpdateSchema), updateHandler);
+  router.patch('/:id', validate(ContactUpdateSchema), updateHandler);
 
   router.delete('/:id', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;

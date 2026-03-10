@@ -31,6 +31,7 @@ import {
   ChevronDown,
   Loader2,
   Send,
+  Search,
 } from 'lucide-react';
 import { useNotificationsStore } from '@/lib/stores/notifications-store';
 import { clsx } from 'clsx';
@@ -51,6 +52,7 @@ const productItems: { href: string; i18nKey: string; icon: typeof LayoutDashboar
   { href: '/dashboard/crm', i18nKey: 'crm', icon: Building2 },
   { href: '/dashboard/pipeline', i18nKey: 'pipeline', icon: Workflow },
   { href: '/dashboard/campaigns', i18nKey: 'campaigns', icon: Send },
+  { href: '/dashboard/discovery', i18nKey: 'contactDiscovery', icon: Search },
   { href: '/dashboard/bd-accounts', i18nKey: 'bdAccounts', icon: Smartphone },
   { href: '/dashboard/analytics', i18nKey: 'analytics', icon: BarChart3 },
   { href: '/dashboard/team', i18nKey: 'team', icon: Users },

@@ -125,18 +125,18 @@
 
 ### 2.4 Папки и чаты
 
-**Подробнее:** см. **docs/UX_MESSAGING_ARCHITECTURE.md** (раздел 1).
+**Подробнее:** см. [MESSAGING_ARCHITECTURE.md](MESSAGING_ARCHITECTURE.md) (папки и чаты).
 
 | Требование | Задача | Приоритет | Статус |
 |------------|--------|-----------|--------|
-| Папки из синхронизации + вручную | bd_account_sync_folders + is_user_created; схема и шаги в UX_MESSAGING_ARCHITECTURE | MVP | DONE (миграция is_user_created, GET/POST возвращают) |
+| Папки из синхронизации + вручную | bd_account_sync_folders + is_user_created; схема и шаги в MESSAGING_ARCHITECTURE | MVP | DONE (миграция is_user_created, GET/POST возвращают) |
 | Отображение папок в боковой панели | Вертикальная полоска как в Telegram + кнопка «Изменить» → диалог управления | MVP | DONE (вертикальная полоска, FolderManageModal, POST custom, PATCH order) |
 | Добавить чат в папку | Контекстное меню «Добавить в папку» → список папок, PATCH chat folder | MVP | DONE (ПКМ по чату → Add to folder → папки + «Без папки», PATCH /api/bd-accounts/:id/chats/:chatId/folder) |
 | Обратная синхронизация в TG | Кнопка «Синхр. с TG», POST push-to-telegram, папки 0/1 не трогаем | v1 | DONE |
 
 ### 2.5 Производительность
 
-**Подробнее:** см. **docs/UX_MESSAGING_ARCHITECTURE.md** (раздел 2). Варианты: LRU в памяти, Cache API; при необходимости — виртуальный список (react-virtuoso).
+**Подробнее:** см. [MESSAGING_ARCHITECTURE.md](MESSAGING_ARCHITECTURE.md) (производительность). Варианты: LRU в памяти, Cache API; при необходимости — виртуальный список (react-virtuoso).
 
 | Требование | Задача | Приоритет | Статус |
 |------------|--------|-----------|--------|
@@ -145,7 +145,7 @@
 
 ### 2.6 Workspace
 
-**Подробнее:** см. **docs/UX_MESSAGING_ARCHITECTURE.md** (раздел 3). Состояния invited/accepted/declined, защита от дублей, переключатель активного workspace.
+**Подробнее:** см. [MESSAGING_ARCHITECTURE.md](MESSAGING_ARCHITECTURE.md) (workspace). Состояния invited/accepted/declined, защита от дублей, переключатель активного workspace.
 
 | Требование | Задача | Приоритет | Статус |
 |------------|--------|-----------|--------|
@@ -187,142 +187,6 @@
 
 ---
 
-## Часть 3. Порядок реализации
+## Часть 3. Реализация и текущее состояние
 
-### Фаза 1 (MVP) — UX и базовый Telegram-like
-
-1. **Звук уведомлений:** store (zustand) + localStorage, кнопка в шапке/настройках, проверка в WebSocket перед воспроизведением.
-2. **Стиль Telegram:** CSS (переменные, отступы, скругления), галочки по status.
-3. **LinkifyText:** компонент, парсинг URL в тексте сообщения.
-4. **Медиа overlay:** компонент MediaViewer, открытие фото/видео по клику поверх интерфейса; превью и «Загрузить» для тяжёлых.
-5. **AI-панель:** по умолчанию развёрнута при первом визите (localStorage ключ).
-6. **Скролл к последнему:** scrollToBottom при смене чата + таймауты 150/450 ms; min-height для медиа-блоков.
-7. **Контекстное меню:** компонент ContextMenu; действия для сообщения (удалить, реакция), чата (закрепить, удалить, в папку), аккаунта (настройки).
-8. **Папки в UI:** отображение списка папок, источник (Telegram/CRM), «Добавить в папку» в контекстном меню; API PATCH folder для чата.
-9. **Удаление сообщений:** API DELETE в messaging-service + вызов delete в GramJS; фронт обновляет список.
-10. **Загрузка файлов/фото/аудио:** расширение send API, лимит размера, ошибка на фронте.
-11. **Кэш blob:** LRU для аватарок и медиа (хук или модуль).
-12. **Pinned chats:** таблица user_chat_pins, API GET/POST/DELETE, секция «Закреплённые» и пункты Pin/Unpin в контекстном меню.
-
-### Фаза 2 (v1) — Workspace и роли
-
-13. **organization_invite_links:** миграция, API создание/список/отзыв, verify (public), accept (auth).
-14. **Страница /invite/[token]:** для незарегистрированных (signup с token) и зарегистрированных (accept + redirect).
-15. **organization_members:** миграция; accept = добавление в org без смены текущей; список воркспейсов пользователя.
-16. **Switch workspace:** API смены активной org (новый JWT или заголовок); переключатель в шапке.
-17. **Роли:** унификация Owner/Admin/Manager/Agent/Viewer; отображение и смена ролей на странице Team. — DONE (роли owner/admin/supervisor/bidi/viewer, только owner/admin могут менять, dropdown на Team).
-18. **Реакции сообщений:** поле в БД, PATCH API, отображение в чате. — DONE.
-19. **Иконки папок:** поле icon, UI выбора emoji. — DONE (sync_folders.icon, PATCH sync-folders/:folderId, выбор emoji в мессенджере).
-20. **Обратная синхронизация папок в TG:** кнопка «Синхр. с TG», POST push-to-telegram, папки 0/1 не трогаем, создание фильтров в TG при отсутствии. — DONE.
-
-### Фаза 3 (v2) — AI, омниканал, polish
-
-21. **Audit logs:** таблица audit_logs, запись критических действий (organization.updated, ownership_transferred, team.member_role_changed, invitation_revoked), GET /api/auth/audit-logs, вкладка «Журнал аудита» в Настройках (owner/admin). — DONE.
-22. **Гранулярные permissions:** таблица role_permissions (role, resource, action), дефолты по ролям; canPermission() в auth и team; проверки для workspace.update, audit.read, team.update, invitations.delete. — DONE.
-23. **AI summarize в чате:** API и виджет.
-24. **Auto-create deal/lead из чата:** правила или AI.
-25. **Unified Inbox:** модель channels/conversations, один timeline по контакту.
-26. **Command palette (⌘K):** поиск и быстрые переходы.
-27. **Onboarding и empty states:** шаги для новых пользователей, подсказки.
-
----
-
-## Часть 4. Data models (ключевые изменения)
-
-- **user_chat_pins:** user_id, organization_id, bd_account_id, channel_id, order_index.
-- **bd_account_sync_folders:** добавить icon (VARCHAR), is_user_created (boolean) если ещё нет.
-- **organization_invite_links:** organization_id, token, role, expires_at, created_by.
-- **organization_members:** organization_id, user_id, role, invited_by, joined_at, status (для мульти-воркспейса).
-- **messages:** поддержка reactions (JSONB или отдельная таблица); статусы sent/delivered/read для галочек.
-- **audit_logs:** organization_id, user_id, action, resource_type, resource_id, old_value, new_value, ip, created_at.
-
----
-
-## Часть 5. Что сделано (итог)
-
-### Фаза 1 (сделано)
-
-- **Звук уведомлений:** store notifications-store, кнопка mute/unmute в шапке, проверка в WebSocket перед play, состояние в localStorage.
-- **Стиль Telegram:** классы msg-bubble-out / msg-bubble-in в globals.css, галочки Check/CheckCheck по status.
-- **Ссылки в чате:** компонент LinkifyText.
-- **Фото/видео поверх интерфейса:** MediaViewer, min-height плейсхолдеры, кнопка «Открыть на весь экран» для видео.
-- **AI-панель:** по умолчанию развёрнута при первом визите (localStorage !== 'false').
-- **Скролл к последнему:** scrollToBottom при смене чата и сообщений + таймауты 150/450 ms.
-- **Папки в UI:** миграция `is_user_created` в bd_account_sync_folders; GET sync-folders возвращает is_user_created; GET messaging/chats возвращает folder_id; PATCH bd-accounts/:id/chats/:chatId/folder; в панели чатов — фильтр «Папка: Все» + кнопки папок (TG/CRM); ПКМ по чату — «Добавить в папку» → выбор папки или «Без папки».
-- **Кэш blob (LRU):** модуль `lib/cache/blob-url-cache.ts` (get/set, max 200, revoke при evict); ключи avatar:account:id, avatar:chat:bdAccountId:chatId, media:url; подключён в BDAccountAvatar, ChatAvatar, useMediaUrl.
-- **Pinned chats:** миграция user_chat_pins (user_id, organization_id, bd_account_id, channel_id, order_index); messaging-service: GET/POST/DELETE /api/messaging/pinned-chats; фронт: загрузка pins при выборе аккаунта, секции «Закреплённые» и «Чаты», Pin/Unpin в контекстном меню чата.
-- **Отправка файлов в чат:** опционально fileBase64/fileName в POST messaging/send и bd-accounts/:id/send; лимит 2 GB на бэке, ответ 413 при превышении; фронт — выбор файла (скрепка), отображение имени и сброс, отправка base64, сообщение «Файл слишком большой. Максимальный размер 2 ГБ» при 413.
-- **ПКМ по аккаунту:** контекстное меню по правому клику на аккаунте в панели мессенджера — пункт «Настройки аккаунта» с переходом на `/dashboard/bd-accounts?accountId=…`.
-- **ПКМ по чату — «Удалить чат»:** пункт «Удалить чат» (только для владельца аккаунта); подтверждение; DELETE `/api/bd-accounts/:id/chats/:chatId` (удаление из bd_account_sync_chats); чат исчезает из списка, при необходимости снимается выбор чата.
-- **Реакции на сообщения (v1):** миграция `messages.reactions` (JSONB); PATCH `/api/messaging/messages/:id/reaction` (body `{ emoji }`); в ПКМ по сообщению — блок «Реакция» с эмодзи (👍 ❤️ 🔥 и т.д.); отображение реакций под сообщением (emoji + счётчик).
-- **Подгрузка истории без фризов:** восстановление скролла после prepend — двойной requestAnimationFrame для применения scrollTop после отрисовки; cooldown 2.5 с сохранён; виртуальный список — при необходимости по метрикам.
-- **Обратная синхронизация папок в TG:** кнопка «Синхр. с TG» в блоке папок; POST sync-folders-push-to-telegram; telegram-manager.pushFoldersToTelegram (папки 0/1 не трогаем; folder_id >= 2, UpdateDialogFilter создаёт фильтр в TG при отсутствии).
-- **Переиспользуемый ContextMenu:** компонент `frontend/components/ui/ContextMenu.tsx` — `ContextMenu` (open, onClose, x, y), `ContextMenuSection` (label, noTopBorder), `ContextMenuItem` (label, onClick, icon, destructive, disabled); страница мессенджера переведена на него для ПКМ по чату, аккаунту и сообщению.
-- **Стили message bubbles:** в globals.css добавлены hover/active для .msg-bubble-out и .msg-bubble-in (как в TG).
-- **Instant scroll:** добавлена задержка 50 ms в дополнение к 150/450 ms для scrollToBottom при смене чата/сообщений.
-- **Unread по папкам:** счётчики непрочитанных на кнопках «Все» и на каждой папке в панели чатов (unreadByFolder).
-- **Виртуальный список сообщений:** при количестве сообщений >200 используется react-virtuoso (firstItemIndex для prepend, startReached для подгрузки старых, followOutput, scroll к последнему при смене чата).
-- **Workspace v1:** миграции organization_invite_links и organization_members; auth-service: GET /api/invite/:token (публично), POST /api/invite/:token/accept (с Bearer); team-service: POST /api/team/invite-links; фронт: страница /invite/[token] (принять приглашение), переключатель воркспейса в сайдбаре.
-- **Audit logs:** миграция audit_logs; запись в auth (organization.updated, ownership_transferred) и team (member_role_changed, invitation_revoked); GET /api/auth/audit-logs (по праву audit.read); вкладка «Журнал аудита» в Настройках (owner/admin).
-- **Гранулярные права:** миграция role_permissions с дефолтами; canPermission() в auth и team; проверки для workspace, audit, team, invitations.
-- **Передача владения:** синхронизация users.role при transfer-ownership (UPDATE users SET role для старого и нового owner по organization_id).
-- **Signup:** уникальность slug при создании организации без инвайта (нормализация + проверка + суффикс при коллизии).
-
-### В процессе / следующий шаг
-
-- Защита от дублей при создании инвайта по email (team-service: проверка перед созданием инвайта по email).
-- Расширение гранулярных прав на messaging, bd-accounts, CRM при необходимости.
-
----
-
-## Часть 6. Текущее состояние и приоритеты (Telegram-like CRM)
-
-**Сводка «что сделано / что нет» и приоритеты на следующий период:** см. **[STATE_AND_ROADMAP.md](./STATE_AND_ROADMAP.md)**.
-
-**Цель:** масштабируемая, мульти-воркспейсная, AI-усиленная CRM с **Telegram-like UX**.
-
-### Что сделано (кратко)
-
-- **Мессенджер:** список чатов, папки (вертикальная полоска + диалог управления), закреплённые, непрочитанные по папкам, поиск и фильтр по типу. Сообщения: баблы в стиле TG, галочки sent/read, ссылки (LinkifyText), **превью ссылок (unfurl)** — GET /api/messaging/unfurl (og:title/description/image), компонент LinkPreview в сообщениях. Медиа в overlay (MediaViewer), подгрузка истории вверх, виртуальный список при >200, черновики в localStorage, ответ на сообщение (reply preview, скролл к цитате). ПКМ: чат (Pin, в папку, удалить), аккаунт (настройки), сообщение (реакция, удалить). Реакции в БД (reactions, our_reactions), отправка в TG. Отправка файлов/фото/аудио, лимит 2 GB. Кэш blob (LRU) для аватарок и медиа. **Удаление пользовательской папки** в диалоге управления (API DELETE sync-folders/:folderRowId + кнопка в UI). **Синхронизация закреплённых из Telegram** при «Обновить папки и чаты» (folders-refetch). **AI-панель:** кнопка «Саммаризация чата» вызывает POST /api/ai/chat/summarize (OpenAI), виджет с кратким содержанием переписки.
-- **Воркспейсы:** organization_members, invite-links, страница /invite, accept, переключатель в сайдбаре, настройки воркспейса (owner/admin), передача владения, уникальность slug, signup с проверкой slug. **Защита от дублей инвайтов:** при создании приглашения по email (POST /api/team/members/invite) проверка pending team_invitations по организации; при конфликте 409 (ALREADY_INVITED). Аудит (audit_logs, запись в auth/team, вкладка в Настройках), гранулярные права (role_permissions, canPermission в auth/team).
-- **Инфра:** rate limiting в API Gateway (Redis), WebSocket для сообщений и уведомлений, звук уведомлений (mute в шапке). **Command palette (⌘K):** реальный поиск по компаниям, контактам, сделкам и **чатам** (GET /api/messaging/search?q=…), группированные результаты, переход к карточке CRM (/dashboard/crm?tab=…&open=id) или к чату (/dashboard/messaging?bdAccountId=…&open=channelId). Страницы CRM и Messaging поддерживают открытие сущности по URL. **Empty states:** мессенджер (нет чатов), воронка (нет стадий / нет сделок) — EmptyState с CTA (BD Accounts, CRM). OnboardingBanner — приветствие и шаги (без глубокой интеграции).
-
-### Что не сделано / частично
-
-| Область | Что отсутствует или неполно |
-|--------|-----------------------------|
-| **Telegram-like polish** | Удаление папки, синхронизация закреплённых, превью ссылок (unfurl) — **сделано**. Иконки папок из API Telegram — пока фиксированный набор emoji. |
-| **AI** | API summarize в чате + виджет в AI-панели — **сделано**. Автосоздание сделки/лида из чата, виджеты в карточке сделки — нет. |
-| **Omnichannel** | Нет модели channels/conversations; один timeline по контакту не реализован (только Telegram). |
-| **Command palette** | Поиск по компаниям, контактам, сделкам и чатам в ⌘K с переходом к карточке/чату — **сделано**. |
-| **Onboarding** | Пошаговый онбординг после первого входа (модальное окно с 3 шагами, ссылки на CRM/BD Accounts/Воронку, «Начать»/«Позже») — **сделано**. Empty states с CTA во всех пустых разделах (CRM, Воронка, Мессенджер, Аналитика, Команда) — **сделано**. |
-| **Защита от дублей** | При создании инвайта по email — проверка pending team_invitations и 409 — **сделано**. |
-| **Прочее** | Rate limits — есть в Gateway; детальные лимиты по типу операции не разделены. MFA, email-уведомления, Campaign Service — не в фокусе. |
-
-### Приоритеты дальше (по порядку)
-
-1. ~~**Telegram-like polish (высокий)**~~ — **сделано:** удаление папки, синхронизация закреплённых, превью ссылок (unfurl).
-
-2. ~~**Command palette / поиск (высокий)**~~ — **сделано:** поиск по компаниям, контактам, сделкам и чатам в ⌘K с переходом к карточке/чату.
-
-3. ~~**Защита от дублей инвайтов (средний)**~~ — **сделано:** проверка pending team_invitations, 409 ALREADY_INVITED.
-
-4. ~~**AI в чате (средний)**~~ — **сделано:** POST /api/ai/chat/summarize + виджет «Саммаризация чата» в AI-панели. Дальше: автосоздание сделки/лида из чата.
-
-5. ~~**Empty states (средний)**~~ — **сделано:** мессенджер (нет чатов → CTA BD Accounts + текст о безопасности синхронизации), воронка (нет воронок/стадий/лидов → CTA CRM и ссылка «Добавить контакты из CRM»), аналитика (нет данных → CTA CRM и Воронка), команда (нет участников → «Пригласить»). Пошаговый онбординг после первого входа (OnboardingModal с 3 шагами в layout) — **сделано**.
-
-6. **Unified Inbox / омниканал (низкий, v2)**  
-   - Модель channels + conversations, единый timeline по контакту; затем подключение каналов помимо Telegram.
-
-7. **Расширение прав (низкий)**  
-   - Подключить canPermission в messaging-service, bd-accounts-service, CRM где нужно (например удаление чата, настройки аккаунта).
-
-**Что можно сделать дальше (по приоритету):**  
-- Автосоздание сделки/лида из чата (правила или AI).  
-- Unified Inbox (channels + conversations, единый timeline по контакту).  
-- Расширение прав (canPermission в сервисах).  
-- Детальные rate limits по типу операции (чтение/отправка).  
-- Campaign Service (кампании, шаблоны, sequences).  
-- MFA и восстановление пароля по email.
-
-Документ можно использовать как единый бэклог. Реализация идёт по фазам; после каждой задачи обновлять статус в таблицах выше и раздел «Что сделано».
+**Порядок реализации, модели данных и актуальный статус задач** см. **[STATE_AND_ROADMAP.md](STATE_AND_ROADMAP.md)** (единый источник правды по состоянию и приоритетам) и **[STAGES.md](STAGES.md)** (этапы Stage 1–7).

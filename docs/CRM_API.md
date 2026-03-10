@@ -26,8 +26,9 @@
 | Метод | Путь | Описание |
 |-------|------|----------|
 | GET | `/api/crm/contacts` | Список с пагинацией. Query: `page`, `limit`, `search` (имя, email, phone, display_name), `companyId` |
-| GET | `/api/crm/contacts/:id` | Детали контакта (включая `companyName`). 404 если не найден |
+| GET | `/api/crm/contacts/:id` | Детали контакта (включая `companyName`, **`telegramGroups`** — список групп, в которых контакт найден при импорте). 404 если не найден |
 | POST | `/api/crm/contacts` | Создание. Body: `firstName` (обяз.), `lastName`, `email`, `phone`, `telegramId`, `companyId`, `consentFlags` |
+| POST | `/api/crm/contacts/import-from-telegram-group` | Импорт участников Telegram-группы как контактов. Body: `bdAccountId`, `telegramChatId` (обяз.), `telegramChatTitle`, `searchKeyword` (опц.), `excludeAdmins`, `leaveAfter`, `postDepth` (опц.). Требует настроенный bd-accounts client. Ответ: `{ contactIds, created, matched }`. 503 если discovery не настроен; 404 если BD-аккаунт не принадлежит организации. При `leaveAfter: true` после импорта вызывается выход из чата (bd-accounts). |
 | PUT / PATCH | `/api/crm/contacts/:id` | Обновление (частичное). Поля: `firstName`, `lastName`, `email`, `phone`, `telegramId`, `companyId`, `displayName`, `username`, `consentFlags` |
 | DELETE | `/api/crm/contacts/:id` | Удаление. У сделок поле `contact_id` обнуляется |
 

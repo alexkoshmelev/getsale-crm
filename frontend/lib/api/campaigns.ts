@@ -385,11 +385,30 @@ export async function fetchContactsForPicker(params?: {
   limit?: number;
   outreachStatus?: 'new' | 'in_outreach';
   search?: string;
+  sourceKeyword?: string;
+  sourceTelegramChatId?: string;
+  sourceBdAccountId?: string;
 }): Promise<ContactForPicker[]> {
   const { data } = await apiClient.get<ContactForPicker[]>('/api/campaigns/contacts-for-picker', {
     params: params ?? {},
   });
   return data;
+}
+
+export async function fetchTelegramSourceKeywords(): Promise<string[]> {
+  const { data } = await apiClient.get<string[]>('/api/campaigns/telegram-source-keywords');
+  return Array.isArray(data) ? data : [];
+}
+
+export interface TelegramSourceGroup {
+  bdAccountId: string;
+  telegramChatId: string;
+  telegramChatTitle?: string;
+}
+
+export async function fetchTelegramSourceGroups(): Promise<TelegramSourceGroup[]> {
+  const { data } = await apiClient.get<TelegramSourceGroup[]>('/api/campaigns/telegram-source-groups');
+  return Array.isArray(data) ? data : [];
 }
 
 /** Обогатить контакты данными из Telegram (first_name, last_name, username) через getEntity. */

@@ -1,39 +1,51 @@
-# Начало работы - Пошаговое руководство
+# Начало работы
 
-## 🎯 Цель
-
-Пошагово протестировать и довести платформу до рабочего состояния с полным функционалом, интеграциями и современным UI/UX.
-
-## 📋 План действий
-
-### Этап 1: Базовая проверка (15 минут)
-
-```bash
-# 1. Запустить все сервисы
-docker-compose up -d
-
-# 2. Подождать 30-60 секунд для инициализации
-sleep 60
-
-# 3. Проверить health checks
-bash scripts/test-services.sh
-
-# Ожидаемый результат: все сервисы показывают ✅
-```
-
-**Если есть ошибки:**
-- Проверить логи: `docker-compose logs -f <service-name>`
-- Проверить порты: `netstat -an | grep LISTEN`
-- Пересобрать: `docker-compose build --no-cache`
+Единое руководство: быстрый старт и пошаговая проверка платформы.
 
 ---
 
-### Этап 2: Тестирование Auth (10 минут)
+## Быстрый старт (5 минут)
 
-#### 2.1 Через API
+### 1. Клонировать и установить
 
 ```bash
-# Регистрация
+git clone <repository>
+cd getsale-crm
+npm install
+```
+
+### 2. Запустить инфраструктуру
+
+```bash
+make dev
+# или
+docker-compose up -d
+```
+
+Подождите 30–60 секунд для инициализации.
+
+### 3. Проверить статус
+
+```bash
+docker-compose ps
+bash scripts/test-services.sh
+```
+
+Ожидаемый результат: все сервисы показывают ✅.
+
+### 4. Открыть приложение
+
+- **Frontend**: http://localhost:3000 (при локальном `npm run dev` в `frontend/`). В Docker может быть маппинг на порт 5173 — см. `frontend/README.md`.
+- **API Gateway**: http://localhost:8000
+- **RabbitMQ Management**: http://localhost:15672 (getsale/getsale_dev)
+- **Prometheus**: http://localhost:9090
+- **Jaeger**: http://localhost:16686
+
+### 5. Создать первого пользователя
+
+Откройте frontend (http://localhost:3000 или 5173 в зависимости от способа запуска) и зарегистрируйтесь через UI или API:
+
+```bash
 curl -X POST http://localhost:8000/api/auth/signup \
   -H "Content-Type: application/json" \
   -d '{
@@ -41,258 +53,73 @@ curl -X POST http://localhost:8000/api/auth/signup \
     "password": "password123",
     "organizationName": "My Company"
   }'
-
-# Сохранить токен из ответа
-TOKEN="your_access_token_here"
-
-# Проверка токена
-curl -X POST http://localhost:8000/api/auth/verify \
-  -H "Content-Type: application/json" \
-  -d "{\"token\": \"$TOKEN\"}"
 ```
-
-#### 2.2 Через Frontend
-
-1. Открыть http://localhost:3000
-2. Нажать "Зарегистрироваться"
-3. Заполнить форму и зарегистрироваться
-4. Должен произойти редирект на `/dashboard`
-
-**Ожидаемый результат:** 
-- ✅ Регистрация работает
-- ✅ Токен сохраняется
-- ✅ Редирект на dashboard
 
 ---
 
-### Этап 3: Создание данных (20 минут)
+## Пошаговая проверка
 
-#### 3.1 Создание компании
+### Этап 1: Базовая проверка
 
-**Через Frontend:**
-1. Перейти в `/dashboard/crm`
-2. Нажать "Добавить"
-3. Заполнить форму:
-   - Название: "Acme Corp"
-   - Отрасль: "Technology"
-   - Размер: "51-100"
-4. Сохранить
+- Запуск: `docker-compose up -d`, затем `bash scripts/test-services.sh`
+- При ошибках: `docker-compose logs -f <service-name>`, при необходимости `docker-compose build --no-cache`
 
-**Через API:**
-```bash
-curl -X POST http://localhost:8000/api/crm/companies \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Acme Corp",
-    "industry": "Technology",
-    "size": "51-100"
-  }'
-```
+### Этап 2: Auth
 
-**Ожидаемый результат:**
-- ✅ Компания появляется в списке
-- ✅ Можно увидеть в UI
+- **API:** `POST /api/auth/signup`, затем `POST /api/auth/verify` с токеном
+- **UI:** открыть frontend → «Зарегистрироваться» → редирект на `/dashboard`
 
-#### 3.2 Создание контакта
+### Этап 3: Данные (CRM, воронка)
 
-**Через Frontend:**
-1. В CRM перейти на вкладку "Контакты"
-2. Создать контакт (пока через API, форма будет добавлена)
+- **Компания:** через UI `/dashboard/crm` или `POST /api/crm/companies`
+- **Контакт:** вкладка «Контакты» или `POST /api/crm/contacts`
+- **Воронка и стадии:** `POST /api/pipeline`, затем `POST /api/pipeline/stages` (см. примеры в [TESTING.md](TESTING.md) при необходимости)
 
-**Через API:**
-```bash
-# Получить ID компании
-COMPANY_ID="company_id_from_previous_step"
+### Этап 4: Event-Driven
 
-curl -X POST http://localhost:8000/api/crm/contacts \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "firstName": "John",
-    "lastName": "Doe",
-    "email": "john@acme.com",
-    "companyId": "'"$COMPANY_ID"'"
-  }'
-```
+- RabbitMQ: http://localhost:15672 → Exchanges → events. Создать контакт — проверить событие `contact.created`
+- При наличии: `bash scripts/test-events.sh`
 
-**Ожидаемый результат:**
-- ✅ Контакт появляется в списке
-- ✅ Публикуется событие `contact.created`
+### Этап 5: WebSocket
 
-#### 3.3 Создание воронки и стадий
+- DevTools → Network → WS: активное соединение к `ws://localhost:3004`
+- Два окна: в одном создать контакт, в другом — обновление в реальном времени
 
-```bash
-# Создать воронку
-curl -X POST http://localhost:8000/api/pipeline \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Sales Pipeline",
-    "isDefault": true
-  }'
+### Этап 6: E2E-сценарий
 
-# Получить ID воронки
-PIPELINE_ID="pipeline_id"
-
-# Создать стадии
-for stage in "Lead" "Qualified" "Proposal" "Negotiation" "Closed"; do
-  curl -X POST http://localhost:8000/api/pipeline/stages \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"pipelineId\": \"$PIPELINE_ID\",
-      \"name\": \"$stage\",
-      \"orderIndex\": 1,
-      \"color\": \"#3B82F6\"
-    }"
-done
-```
-
-**Ожидаемый результат:**
-- ✅ Воронка создана
-- ✅ Стадии видны в Kanban на `/dashboard/pipeline`
+Регистрация → компания → контакт → сделка → воронка `/dashboard/pipeline` → смена стадии → аналитика `/dashboard/analytics` → команда `/dashboard/team`.
 
 ---
 
-### Этап 4: Тестирование Event-Driven (15 минут)
+## Решение проблем
 
-#### 4.1 Проверка событий в RabbitMQ
+| Проблема | Действия |
+|----------|----------|
+| Сервис не запускается | `docker-compose logs <service-name>`, `docker-compose build --no-cache <service-name>`, `docker-compose up -d <service-name>` |
+| Ошибка подключения к БД | `docker-compose ps postgres`, `docker-compose exec postgres psql -U postgres -d postgres -c "SELECT 1;"` |
+| Frontend не работает | Проверить порт 3000 (или 5173 в Docker): `lsof -i :3000`. Локально: `cd frontend && npm install && npm run dev` |
+| WebSocket не подключается | `docker-compose ps websocket-service`, `docker-compose logs websocket-service`. Проверить `NEXT_PUBLIC_WS_URL=ws://localhost:3004` |
+| Зависимости | `docker-compose build --no-cache`; при необходимости переустановка пакетов в контейнере |
 
-1. Открыть http://localhost:15672
-2. Войти (getsale/getsale_dev)
-3. Перейти в "Exchanges" → "events"
-4. Создать контакт через API
-5. Проверить, что событие `contact.created` появилось
-
-#### 4.2 Тестирование через скрипт
-
-```bash
-bash scripts/test-events.sh
-```
-
-**Ожидаемый результат:**
-- ✅ События публикуются в RabbitMQ
-- ✅ События видны в Management UI
+Подключение к БД вручную: `docker-compose exec postgres psql -U postgres -d postgres`  
+Redis: `docker-compose exec redis redis-cli`  
+Очереди RabbitMQ: http://localhost:15672 или `docker-compose exec rabbitmq rabbitmqctl list_queues`
 
 ---
 
-### Этап 5: Тестирование WebSocket (10 минут)
+## Чеклист готовности
 
-#### 5.1 Проверка подключения
-
-1. Открыть DevTools → Network → WS
-2. Обновить страницу
-3. Должно быть активное WebSocket соединение к `ws://localhost:3004`
-
-#### 5.2 Тестирование real-time обновлений
-
-1. Открыть два окна браузера
-2. В одном создать контакт
-3. В другом должно прийти обновление через WebSocket
-
-**Ожидаемый результат:**
-- ✅ WebSocket подключен
-- ✅ События приходят в реальном времени
-
----
-
-### Этап 6: Полный E2E сценарий (30 минут)
-
-#### Сценарий: Полный цикл продажи
-
-1. **Регистрация** → Создать аккаунт через UI
-2. **Создание компании** → Добавить компанию через UI
-3. **Создание контакта** → Добавить контакт через API
-4. **Создание сделки** → Создать сделку через API
-5. **Просмотр воронки** → Открыть `/dashboard/pipeline`
-6. **Перемещение по стадии** → Изменить стадию через API
-7. **Проверка аналитики** → Открыть `/dashboard/analytics`
-8. **Проверка команды** → Открыть `/dashboard/team`
-
-**Ожидаемый результат:**
-- ✅ Все шаги выполняются без ошибок
-- ✅ Данные отображаются корректно
-- ✅ UI обновляется
-
----
-
-## 🐛 Решение проблем
-
-### Проблема: Сервис не запускается
-
-```bash
-# Проверить логи
-docker-compose logs <service-name>
-
-# Пересобрать
-docker-compose build --no-cache <service-name>
-docker-compose up -d <service-name>
-```
-
-### Проблема: Ошибка подключения к БД
-
-```bash
-# Проверить статус PostgreSQL
-docker-compose ps postgres
-
-# Проверить подключение
-docker-compose exec postgres psql -U postgres -d postgres -c "SELECT 1;"
-```
-
-### Проблема: Frontend не работает
-
-```bash
-# Проверить порт
-lsof -i :3000
-
-# Запустить локально
-cd frontend
-npm install
-npm run dev
-```
-
-### Проблема: WebSocket не подключается
-
-1. Проверить, что WebSocket сервис запущен: `docker-compose ps websocket-service`
-2. Проверить логи: `docker-compose logs websocket-service`
-3. Проверить URL в frontend: `NEXT_PUBLIC_WS_URL=ws://localhost:3004`
-
----
-
-## ✅ Чеклист готовности
-
-После выполнения всех этапов проверьте:
-
-- [ ] Все сервисы запущены и здоровы
+- [ ] Все сервисы запущены и проходят health checks
 - [ ] Регистрация и вход работают
-- [ ] Можно создавать компании и контакты
-- [ ] Воронка отображается корректно
-- [ ] События публикуются в RabbitMQ
+- [ ] Создание компаний и контактов
+- [ ] Воронка отображается на `/dashboard/pipeline`
+- [ ] События в RabbitMQ
 - [ ] WebSocket подключен
-- [ ] Frontend отображает данные
 - [ ] Нет критических ошибок в консоли
 
 ---
 
-## 📈 Следующие шаги
+## Дальнейшие шаги
 
-После базового тестирования:
-
-1. **Доработать недостающий функционал** (см. [NEXT_STEPS.md](NEXT_STEPS.md))
-2. **Добавить валидацию** на всех уровнях
-3. **Улучшить UX** - добавить loading states, error handling
-4. **Интегрировать Telegram** - полная интеграция GramJS
-5. **Добавить тесты** - unit, integration, e2e
-6. **Оптимизировать** - производительность, кеширование
-
----
-
-## 💡 Советы
-
-- Тестируйте по одному сервису за раз
-- Проверяйте логи при ошибках
-- Используйте RabbitMQ Management UI для отладки событий
-- Проверяйте DevTools для отладки фронтенда
-- Документируйте найденные баги
-
+Состояние продукта и приоритеты задач — в [STATE_AND_ROADMAP.md](STATE_AND_ROADMAP.md).  
+Рекомендации по тестам и сценариям — в [TESTING.md](TESTING.md).

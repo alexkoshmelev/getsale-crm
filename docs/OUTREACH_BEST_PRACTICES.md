@@ -27,5 +27,5 @@
 
 ## Ссылки
 
-- [CAMPAIGN_COLD_OUTREACH.md](./CAMPAIGN_COLD_OUTREACH.md) — архитектура и API кампаний.
+- [CAMPAIGNS.md](CAMPAIGNS.md) — цели, статус и архитектура кампаний.
 - [COMPETITOR_CRMCHAT_ANALYSIS.md](./COMPETITOR_CRMCHAT_ANALYSIS.md) — анализ конкурента и бэклог.

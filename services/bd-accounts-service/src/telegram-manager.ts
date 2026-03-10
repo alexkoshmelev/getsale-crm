@@ -20,7 +20,6 @@ import {
 } from '@getsale/events';
 import { MessageChannel, MessageDirection, MessageStatus } from '@getsale/types';
 import { serializeMessage, getMessageText, SerializedTelegramMessage } from './telegram-serialize';
-import { Logger } from '@getsale/logger';
 
 function formatLogArgs(...args: unknown[]): string {
   return args.map(a => {
@@ -74,6 +73,21 @@ function ourReactionsFromTelegramExtra(telegram_extra: Record<string, unknown> |
   if (withOrder.length === 0) return null;
   withOrder.sort((a, b) => a.order - b.order);
   return withOrder.map((x) => x.emoji).slice(0, 3);
+}
+
+/** Resolved source for parse flow: type, capabilities, linked discussion group. */
+export type TelegramSourceType = 'channel' | 'public_group' | 'private_group' | 'comment_group' | 'unknown';
+
+export interface ResolvedSource {
+  input: string;
+  type: TelegramSourceType;
+  title: string;
+  username?: string;
+  chatId: string;
+  membersCount?: number;
+  linkedChatId?: number;
+  canGetMembers: boolean;
+  canGetMessages: boolean;
 }
 
 interface TelegramClientInfo {
@@ -2353,6 +2367,12 @@ export class TelegramManager {
     }
 
     const client = clientInfo.client;
+    const accRow = await this.pool.query<{ created_by_user_id: string | null }>(
+      'SELECT created_by_user_id FROM bd_accounts WHERE id = $1',
+      [accountId]
+    );
+    const createdByUserId = accRow.rows[0]?.created_by_user_id ?? null;
+
     const rows = await this.pool.query(
       'SELECT telegram_chat_id, title, peer_type FROM bd_account_sync_chats WHERE bd_account_id = $1 ORDER BY created_at',
       [accountId]
@@ -2376,6 +2396,12 @@ export class TelegramManager {
       data: { bdAccountId: accountId, totalChats },
     };
     await this.rabbitmq.publishEvent(startedEvent);
+    if (this.redis && createdByUserId) {
+      this.redis.publish(`events:${createdByUserId}`, JSON.stringify({
+        event: 'sync_progress',
+        data: { bdAccountId: accountId, done: 0, total: totalChats },
+      })).catch(() => {});
+    }
     this.log.info({ message: `Sync started for account ${accountId}, ${totalChats} chats` });
 
     let totalMessages = 0;
@@ -2485,6 +2511,9 @@ export class TelegramManager {
           data: { bdAccountId: accountId, done, total: totalChats, currentChatId: telegramChatId, currentChatTitle: title, error: err?.message || String(err) },
         };
         await this.rabbitmq.publishEvent(progressEvent);
+        if (this.redis && createdByUserId) {
+          this.redis.publish(`events:${createdByUserId}`, JSON.stringify({ event: 'sync_progress', data: progressEvent.data })).catch(() => {});
+        }
         onProgress?.(done, totalChats, telegramChatId, title);
         await sleep(this.SYNC_DELAY_MS);
         continue;
@@ -2503,6 +2532,9 @@ export class TelegramManager {
         data: { bdAccountId: accountId, done, total: totalChats, currentChatId: telegramChatId, currentChatTitle: title },
       };
       await this.rabbitmq.publishEvent(progressEvent);
+      if (this.redis && createdByUserId) {
+        this.redis.publish(`events:${createdByUserId}`, JSON.stringify({ event: 'sync_progress', data: progressEvent.data })).catch(() => {});
+      }
       onProgress?.(done, totalChats, telegramChatId, title);
       this.log.info({ message: `Chat ${done}/${totalChats} done: ${title}, messages: ${fetched}` });
       await sleep(this.SYNC_DELAY_MS);
@@ -2520,6 +2552,9 @@ export class TelegramManager {
       data: { bdAccountId: accountId, totalChats, totalMessages, failedChats: failedChatsCount },
     };
     await this.rabbitmq.publishEvent(completedEvent);
+    if (this.redis && createdByUserId) {
+      this.redis.publish(`events:${createdByUserId}`, JSON.stringify({ event: 'sync_progress', data: { bdAccountId: accountId, done: totalChats, total: totalChats, completed: true } })).catch(() => {});
+    }
     this.log.info({ message: `Sync completed for account ${accountId}: ${totalChats} chats, ${totalMessages} messages, ${failedChatsCount} chats failed` });
     return { totalChats, totalMessages };
   }
@@ -2615,6 +2650,1052 @@ export class TelegramManager {
       this.log.error({ message: `Error getting dialogs for ${accountId}`, error: error?.message || String(error) });
       throw error;
     }
+  }
+
+  /**
+   * Search groups/channels by keyword (messages.SearchGlobal). Returns unique chats from global message search.
+   * Uses pagination (next_rate, offsetPeer, offsetId) to fetch more results; handles search_flood with backoff.
+   * @param type - 'groups' | 'channels' | 'all' (default 'all')
+   * @param maxPages - max pagination iterations (default 10) to avoid excessive requests
+   */
+  async searchGroupsByKeyword(
+    accountId: string,
+    query: string,
+    limit: number = 50,
+    type: 'groups' | 'channels' | 'all' = 'all',
+    maxPages: number = 10
+  ): Promise<{ chatId: string; title: string; peerType: string; membersCount?: number; username?: string }[]> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const q = (query || '').trim();
+    if (q.length < 2) {
+      const err = new Error('Query too short');
+      (err as any).code = 'QUERY_TOO_SHORT';
+      throw err;
+    }
+    const groupsOnly = type === 'groups';
+    const broadcastOnly = type === 'channels';
+    const requestLimit = Math.min(100, Math.max(1, limit));
+    const seen = new Set<string>();
+    const out: { chatId: string; title: string; peerType: string; membersCount?: number; username?: string }[] = [];
+    let offsetRate = 0;
+    let offsetPeer: InstanceType<typeof Api.InputPeerEmpty> = new Api.InputPeerEmpty();
+    let offsetId = 0;
+    let page = 0;
+    const SEARCH_FLOOD_BACKOFF_MS = 8000;
+    const PAGINATION_DELAY_MS = 1500;
+
+    // Collect chat/channel IDs the user is already in — filter them out so we return only "new" groups (global search)
+    const myChatIds = new Set<string>();
+    try {
+      const dialogs = await clientInfo.client.getDialogs({ limit: 150, folderId: 0 });
+      for (const d of dialogs) {
+        const ent = (d as any).entity;
+        if (!ent) continue;
+        const cls = String(ent.className ?? ent.constructor?.className ?? '').toLowerCase();
+        if (cls.includes('channel') || cls.includes('chat')) {
+          const id = ent.id ?? ent.channelId ?? ent.chatId;
+          if (id != null) myChatIds.add(String(id));
+        }
+      }
+    } catch (e: any) {
+      this.log.warn({ message: 'Could not load dialogs for search filter', accountId, error: e?.message });
+    }
+
+    function extractChatsFromResult(
+      result: { messages?: any[]; chats?: any[] },
+      chatsAcc: typeof out,
+      seenIds: Set<string>,
+      excludeChatIds: Set<string>
+    ): void {
+      const chats = result?.chats ?? [];
+      const messages = result?.messages ?? [];
+      for (const msg of messages) {
+        const peer = msg?.peer ?? msg?.peerId ?? msg?.peer_id;
+        if (!peer) continue;
+        const p = peer as any;
+        let cid: string | null = null;
+        const cn = String(peer.className ?? peer.constructor?.className ?? '').toLowerCase();
+        if (cn.includes('peerchannel')) {
+          const id = p.channelId ?? p.channel_id;
+          if (id != null) cid = String(id);
+        } else if (cn.includes('peerchat')) {
+          const id = p.chatId ?? p.chat_id;
+          if (id != null) cid = String(id);
+        }
+        if (cid && !seenIds.has(cid) && !excludeChatIds.has(cid)) {
+          seenIds.add(cid);
+          const chat = chats.find((c: any) => {
+            const id = c.id ?? c.channelId ?? c.chat_id ?? c.chatId;
+            return id != null && String(id) === cid;
+          });
+          const title = (chat?.title ?? chat?.name ?? '').trim() || cid;
+          const peerType = (chat as any)?.broadcast ? 'channel' : (chat as any)?.megagroup ? 'channel' : 'chat';
+          const membersCount = chat?.participantsCount ?? chat?.participants_count ?? undefined;
+          const username = (chat?.username ?? '').trim() || undefined;
+          chatsAcc.push({ chatId: cid, title, peerType, membersCount, username });
+        }
+      }
+      // Fallback: add channels/groups from result.chats (in case message peer parsing missed them)
+      for (const c of chats) {
+        const id = c.id ?? c.channelId ?? c.chat_id ?? c.chatId;
+        if (id == null) continue;
+        const cid = String(id);
+        const cn = String(c.className ?? c.constructor?.className ?? '').toLowerCase();
+        const isChannel = cn.includes('channel');
+        const isChat = cn.includes('chat') && !cn.includes('peer');
+        if (!isChannel && !isChat) continue;
+        if (seenIds.has(cid) || excludeChatIds.has(cid)) continue;
+        seenIds.add(cid);
+        const title = (c.title ?? c.name ?? '').trim() || cid;
+        const peerType = (c as any)?.broadcast ? 'channel' : (c as any)?.megagroup ? 'channel' : 'chat';
+        const membersCount = c?.participantsCount ?? c?.participants_count ?? undefined;
+        const username = (c?.username ?? '').trim() || undefined;
+        chatsAcc.push({ chatId: cid, title, peerType, membersCount, username });
+      }
+    }
+
+    try {
+      const client = clientInfo.client;
+
+      while (page < maxPages) {
+        let result: any;
+        try {
+          result = await client.invoke(
+            new Api.messages.SearchGlobal({
+              q,
+              filter: new Api.InputMessagesFilterEmpty(),
+              minDate: 0,
+              maxDate: 0,
+              offsetRate,
+              offsetPeer,
+              offsetId,
+              limit: requestLimit,
+              folderId: 0,
+              broadcastOnly,
+              groupsOnly,
+              samePeer: false,
+            })
+          );
+        } catch (e: any) {
+          if (e?.message?.includes('QUERY_TOO_SHORT') || (e as any)?.code === 'QUERY_TOO_SHORT') {
+            const err = new Error('Query too short');
+            (err as any).code = 'QUERY_TOO_SHORT';
+            throw err;
+          }
+          throw e;
+        }
+
+        const messages = result?.messages ?? [];
+        const isSlice = result?.className === 'messages.messagesSlice' || (result?.constructor?.className === 'messages.messagesSlice');
+        const searchFlood = !!(result?.searchFlood ?? result?.search_flood);
+
+        if (searchFlood) {
+          this.log.warn({ message: 'SearchGlobal search_flood, backing off', accountId, query: q, page });
+          await new Promise((r) => setTimeout(r, SEARCH_FLOOD_BACKOFF_MS));
+          const retryResult = await client.invoke(
+            new Api.messages.SearchGlobal({
+              q,
+              filter: new Api.InputMessagesFilterEmpty(),
+              minDate: 0,
+              maxDate: 0,
+              offsetRate,
+              offsetPeer,
+              offsetId,
+              limit: requestLimit,
+              folderId: 0,
+              broadcastOnly,
+              groupsOnly,
+              samePeer: false,
+            })
+          ) as any;
+          if (retryResult?.searchFlood ?? retryResult?.search_flood) {
+            this.log.warn({ message: 'SearchGlobal search_flood on retry, returning collected results', accountId, query: q });
+            return out;
+          }
+          result = retryResult;
+        }
+
+        if (page === 0) {
+          const msgCount = result?.messages?.length ?? 0;
+          const chatCount = result?.chats?.length ?? 0;
+          const firstMsgKeys = result?.messages?.[0] ? Object.keys(result.messages[0]).filter((k) => ['peer', 'peerId', 'peer_id'].includes(k)) : [];
+          this.log.info({
+            message: 'SearchGlobal first response',
+            accountId,
+            query: q,
+            messagesCount: msgCount,
+            chatsCount: chatCount,
+            firstMessagePeerKeys: firstMsgKeys,
+          });
+        }
+
+        extractChatsFromResult(result, out, seen, myChatIds);
+
+        if (out.length >= limit) break;
+        if (!isSlice || messages.length === 0) break;
+
+        const nextRate = result?.nextRate ?? result?.next_rate;
+        if (nextRate == null) break;
+
+        const lastMsg = messages[messages.length - 1];
+        offsetRate = typeof nextRate === 'number' ? nextRate : Number(nextRate) || 0;
+        offsetId = lastMsg?.id ?? offsetId;
+        try {
+          const lastPeer = lastMsg?.peer ?? lastMsg?.peerId ?? lastMsg?.peer_id;
+          if (lastPeer) {
+            offsetPeer = await client.getInputEntity(lastPeer) as any;
+          }
+        } catch (_) {
+          break;
+        }
+
+        page++;
+        await new Promise((r) => setTimeout(r, PAGINATION_DELAY_MS));
+      }
+
+      return out;
+    } catch (e: any) {
+      if (e?.message?.includes('QUERY_TOO_SHORT') || (e as any)?.code === 'QUERY_TOO_SHORT') {
+        const err = new Error('Query too short');
+        (err as any).code = 'QUERY_TOO_SHORT';
+        throw err;
+      }
+      this.log.error({ message: 'searchGroupsByKeyword failed', accountId, query: q, error: e?.message || String(e) });
+      throw e;
+    }
+  }
+
+  /**
+   * Search public channels by keyword (channels.SearchPosts). Returns channels/groups from public posts
+   * including those the user is not a member of. Use for type=channels or type=all in Contact Discovery.
+   */
+  async searchPublicChannelsByKeyword(
+    accountId: string,
+    query: string,
+    limit: number = 50,
+    maxPages: number = 10,
+    searchMode: 'query' | 'hashtag' = 'query'
+  ): Promise<{ chatId: string; title: string; peerType: string; membersCount?: number; username?: string }[]> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const q = (query || '').trim();
+    if (q.length < 2) {
+      const err = new Error('Query too short');
+      (err as any).code = 'QUERY_TOO_SHORT';
+      throw err;
+    }
+    const requestLimit = Math.min(100, Math.max(1, limit));
+    const seen = new Set<string>();
+    const out: { chatId: string; title: string; peerType: string; membersCount?: number; username?: string }[] = [];
+    let offsetRate = 0;
+    let offsetPeer: InstanceType<typeof Api.InputPeerEmpty> = new Api.InputPeerEmpty();
+    let offsetId = 0;
+    let page = 0;
+    const SEARCH_FLOOD_BACKOFF_MS = 8000;
+    const PAGINATION_DELAY_MS = 1500;
+    const emptyExclude = new Set<string>();
+
+    function extract(result: { messages?: any[]; chats?: any[] }, chatsAcc: typeof out, seenIds: Set<string>, excludeChatIds: Set<string>) {
+      const chats = result?.chats ?? [];
+      const messages = result?.messages ?? [];
+      for (const msg of messages) {
+        const peer = msg?.peer ?? msg?.peerId ?? msg?.peer_id;
+        if (!peer) continue;
+        const p = peer as any;
+        let cid: string | null = null;
+        const cn = String(peer.className ?? peer.constructor?.className ?? '').toLowerCase();
+        if (cn.includes('peerchannel')) {
+          const id = p.channelId ?? p.channel_id;
+          if (id != null) cid = String(id);
+        } else if (cn.includes('peerchat')) {
+          const id = p.chatId ?? p.chat_id;
+          if (id != null) cid = String(id);
+        }
+        if (cid && !seenIds.has(cid) && !excludeChatIds.has(cid)) {
+          seenIds.add(cid);
+          const chat = chats.find((c: any) => {
+            const id = c.id ?? c.channelId ?? c.chat_id ?? c.chatId;
+            return id != null && String(id) === cid;
+          });
+          const title = (chat?.title ?? chat?.name ?? '').trim() || cid;
+          const peerType = (chat as any)?.broadcast ? 'channel' : (chat as any)?.megagroup ? 'channel' : 'chat';
+          const membersCount = chat?.participantsCount ?? chat?.participants_count ?? undefined;
+          const username = (chat?.username ?? '').trim() || undefined;
+          chatsAcc.push({ chatId: cid, title, peerType, membersCount, username });
+        }
+      }
+      for (const c of chats) {
+        const id = c.id ?? c.channelId ?? c.chat_id ?? c.chatId;
+        if (id == null) continue;
+        const cid = String(id);
+        const cn = String(c.className ?? c.constructor?.className ?? '').toLowerCase();
+        const isChannel = cn.includes('channel');
+        const isChat = cn.includes('chat') && !cn.includes('peer');
+        if (!isChannel && !isChat) continue;
+        if (seenIds.has(cid) || excludeChatIds.has(cid)) continue;
+        seenIds.add(cid);
+        const title = (c.title ?? c.name ?? '').trim() || cid;
+        const peerType = (c as any)?.broadcast ? 'channel' : (c as any)?.megagroup ? 'channel' : 'chat';
+        const membersCount = c?.participantsCount ?? c?.participants_count ?? undefined;
+        const username = (c?.username ?? '').trim() || undefined;
+        chatsAcc.push({ chatId: cid, title, peerType, membersCount, username });
+      }
+    }
+
+    try {
+      const client = clientInfo.client;
+
+      const safeOffsetPeer = () => offsetPeer ?? new Api.InputPeerEmpty();
+
+      while (page < maxPages) {
+        let result: any;
+        try {
+          if (searchMode === 'hashtag') {
+            const hashtagVal = (q.startsWith('#') ? q.slice(1) : q).trim() || ' ';
+            result = await client.invoke(new Api.channels.SearchPosts({
+              hashtag: hashtagVal,
+              offsetRate,
+              offsetPeer: safeOffsetPeer(),
+              offsetId,
+              limit: requestLimit,
+            }));
+          } else {
+            // Вариант B: вместе с query передаём пустой hashtag, чтобы обойти строгую
+            // проверку типов в пакете telegram (GramJS), которая ожидает строку.
+            result = await client.invoke(new Api.channels.SearchPosts({
+              query: q,
+              hashtag: '',
+              offsetRate,
+              offsetPeer: safeOffsetPeer(),
+              offsetId,
+              limit: requestLimit,
+            }));
+          }
+        } catch (e: any) {
+          if (e?.message?.includes('QUERY_TOO_SHORT') || (e as any)?.code === 'QUERY_TOO_SHORT') {
+            const err = new Error('Query too short');
+            (err as any).code = 'QUERY_TOO_SHORT';
+            throw err;
+          }
+          throw e;
+        }
+
+        const messages = result?.messages ?? [];
+        const isSlice = result?.className === 'messages.messagesSlice' || (result?.constructor?.className === 'messages.messagesSlice');
+        const searchFlood = !!(result?.searchFlood ?? result?.search_flood);
+
+        if (searchFlood) {
+          this.log.warn({ message: 'SearchPosts search_flood, backing off', accountId, query: q, page });
+          await new Promise((r) => setTimeout(r, SEARCH_FLOOD_BACKOFF_MS));
+          if (searchMode === 'hashtag') {
+            const hashtagVal = (q.startsWith('#') ? q.slice(1) : q).trim() || ' ';
+            result = await client.invoke(new Api.channels.SearchPosts({
+              hashtag: hashtagVal,
+              offsetRate,
+              offsetPeer: safeOffsetPeer(),
+              offsetId,
+              limit: requestLimit,
+            })) as any;
+          } else {
+            result = await client.invoke(new Api.channels.SearchPosts({
+              query: q,
+              hashtag: '',
+              offsetRate,
+              offsetPeer: safeOffsetPeer(),
+              offsetId,
+              limit: requestLimit,
+            })) as any;
+          }
+          if (result?.searchFlood ?? result?.search_flood) {
+            this.log.warn({ message: 'SearchPosts search_flood on retry, returning collected results', accountId, query: q });
+            return out;
+          }
+        }
+
+        extract(result, out, seen, emptyExclude);
+
+        if (out.length >= limit) break;
+        if (!isSlice || messages.length === 0) break;
+
+        const nextRate = result?.nextRate ?? result?.next_rate;
+        if (nextRate == null) break;
+
+        const lastMsg = messages[messages.length - 1];
+        offsetRate = typeof nextRate === 'number' ? nextRate : Number(nextRate) || 0;
+        offsetId = lastMsg?.id ?? offsetId;
+        try {
+          const lastPeer = lastMsg?.peer ?? lastMsg?.peerId ?? lastMsg?.peer_id;
+          if (lastPeer) {
+            offsetPeer = await client.getInputEntity(lastPeer) as any;
+          }
+        } catch (_) {
+          break;
+        }
+
+        page++;
+        await new Promise((r) => setTimeout(r, PAGINATION_DELAY_MS));
+      }
+
+      return out;
+    } catch (e: any) {
+      if (e?.message?.includes('QUERY_TOO_SHORT') || (e as any)?.code === 'QUERY_TOO_SHORT') {
+        const err = new Error('Query too short');
+        (err as any).code = 'QUERY_TOO_SHORT';
+        throw err;
+      }
+      this.log.error({ message: 'searchPublicChannelsByKeyword failed', accountId, query: q, error: e?.message || String(e) });
+      throw e;
+    }
+  }
+
+  /**
+   * Search by contacts.search (Telegram API). Returns only groups and channels from the result;
+   * personal chats (PeerUser) are excluded. Use to enrich type=all search.
+   */
+  async searchByContacts(
+    accountId: string,
+    query: string,
+    limit: number = 50
+  ): Promise<{ chatId: string; title: string; peerType: string; membersCount?: number; username?: string }[]> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const q = (query || '').trim();
+    if (q.length < 2) {
+      const err = new Error('Query too short');
+      (err as any).code = 'QUERY_TOO_SHORT';
+      throw err;
+    }
+    const requestLimit = Math.min(100, Math.max(1, limit));
+    const seen = new Set<string>();
+    const out: { chatId: string; title: string; peerType: string; membersCount?: number; username?: string }[] = [];
+
+    try {
+      const result = await clientInfo.client.invoke(
+        new Api.contacts.Search({ q, limit: requestLimit })
+      ) as { my_results?: any[]; results?: any[]; chats?: any[]; users?: any[] };
+
+      const allPeers = [
+        ...(result?.my_results ?? []),
+        ...(result?.results ?? []),
+      ];
+      const chats = result?.chats ?? [];
+
+      for (const peer of allPeers) {
+        const cn = String(peer?.className ?? peer?.constructor?.className ?? '').toLowerCase();
+        if (cn.includes('peeruser')) continue;
+        let cid: string | null = null;
+        if (cn.includes('peerchannel')) {
+          const id = (peer as any).channelId ?? (peer as any).channel_id;
+          if (id != null) cid = String(id);
+        } else if (cn.includes('peerchat')) {
+          const id = (peer as any).chatId ?? (peer as any).chat_id;
+          if (id != null) cid = String(id);
+        }
+        if (!cid || seen.has(cid)) continue;
+        seen.add(cid);
+        const chat = chats.find((c: any) => {
+          const id = c.id ?? c.channelId ?? c.chat_id ?? c.chatId;
+          return id != null && String(id) === cid;
+        });
+        const title = (chat?.title ?? chat?.name ?? '').trim() || cid;
+        const peerType = (chat as any)?.broadcast ? 'channel' : (chat as any)?.megagroup ? 'channel' : 'chat';
+        const membersCount = chat?.participantsCount ?? chat?.participants_count ?? undefined;
+        const username = (chat?.username ?? '').trim() || undefined;
+        out.push({ chatId: cid, title, peerType, membersCount, username });
+      }
+
+      return out;
+    } catch (e: any) {
+      if (e?.message?.includes('QUERY_TOO_SHORT') || e?.message?.includes('SEARCH_QUERY_EMPTY') || (e as any)?.code === 'QUERY_TOO_SHORT') {
+        const err = new Error('Query too short');
+        (err as any).code = 'QUERY_TOO_SHORT';
+        throw err;
+      }
+      this.log.error({ message: 'searchByContacts failed', accountId, query: q, error: e?.message || String(e) });
+      throw e;
+    }
+  }
+
+  /**
+   * Get channels and supergroups that the user administers (channels.GetAdminedPublicChannels).
+   * Same response shape as search for consistency (chatId, title, peerType, membersCount?, username?).
+   */
+  async getAdminedPublicChannels(
+    accountId: string
+  ): Promise<{ chatId: string; title: string; peerType: string; membersCount?: number; username?: string }[]> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    try {
+      const result = await clientInfo.client.invoke(new Api.channels.GetAdminedPublicChannels({})) as { chats?: any[] };
+      const chats = result?.chats ?? [];
+      return chats.map((c: any) => {
+        const id = c.id ?? c.channelId ?? c.chat_id ?? c.chatId;
+        const chatId = id != null ? String(id) : '';
+        const title = (c.title ?? c.name ?? '').trim() || chatId;
+        const peerType = (c as any)?.broadcast ? 'channel' : (c as any)?.megagroup ? 'channel' : 'chat';
+        const membersCount = c?.participantsCount ?? c?.participants_count ?? undefined;
+        const username = (c?.username ?? '').trim() || undefined;
+        return { chatId, title, peerType, membersCount, username };
+      });
+    } catch (e: any) {
+      this.log.error({ message: 'getAdminedPublicChannels failed', accountId, error: e?.message || String(e) });
+      throw e;
+    }
+  }
+
+  /**
+   * Get basic group participants via messages.GetFullChat (for Api.Chat).
+   */
+  private async getBasicGroupParticipants(
+    client: any,
+    chatEntity: any,
+    excludeAdmins: boolean
+  ): Promise<{ users: Array<{ telegram_id: string; username?: string; first_name?: string; last_name?: string }>; nextOffset: number | null }> {
+    const chatId = chatEntity.id ?? chatEntity.chatId;
+    const full = await client.invoke(new Api.messages.GetFullChat({ chatId })) as any;
+    const fullChat = full?.fullChat ?? full?.full_chat;
+    const participants = fullChat?.participants?.participants ?? fullChat?.participants ?? [];
+    const users = full?.users ?? [];
+    const userMap = new Map<number, any>();
+    for (const u of users) {
+      const id = (u as any).id ?? (u as any).userId;
+      if (id != null) userMap.set(Number(id), u);
+    }
+    const out: Array<{ telegram_id: string; username?: string; first_name?: string; last_name?: string }> = [];
+    for (const p of participants) {
+      const uid = (p as any).userId ?? (p as any).user_id;
+      if (uid == null) continue;
+      if (excludeAdmins) {
+        const cn = String((p as any).className ?? (p as any).constructor?.className ?? '').toLowerCase();
+        if (cn.includes('chatparticipantadmin') || cn.includes('chatparticipantcreator')) continue;
+      }
+      const u = userMap.get(Number(uid));
+      if ((u as any)?.deleted || (u as any)?.bot) continue;
+      out.push({
+        telegram_id: String(uid),
+        username: (u?.username ?? '').trim() || undefined,
+        first_name: (u?.firstName ?? u?.first_name ?? '').trim() || undefined,
+        last_name: (u?.lastName ?? u?.last_name ?? '').trim() || undefined,
+      });
+    }
+    return { users: out, nextOffset: null };
+  }
+
+  /**
+   * Get channel/supergroup participants (channels.GetParticipants). Paginated; returns users and nextOffset.
+   * For basic groups (Api.Chat) uses GetFullChat. ExcludeAdmins - if true, omit admins/creator.
+   */
+  async getChannelParticipants(
+    accountId: string,
+    channelId: string,
+    offset: number,
+    limit: number,
+    excludeAdmins: boolean = false
+  ): Promise<{ users: Array<{ telegram_id: string; username?: string; first_name?: string; last_name?: string }>; nextOffset: number | null }> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const client = clientInfo.client;
+    let entity: any;
+
+    try {
+      const peerId = Number(channelId);
+      const isNumericId = !Number.isNaN(peerId) && !channelId.startsWith('@') && !channelId.includes('://');
+      // For channels from SearchGlobal we get raw channelId (e.g. 1619174067). gram.js needs -100xxxxxxxxxx for channel, -id for basic group.
+      if (isNumericId && peerId > 0) {
+        try {
+          entity = await client.getEntity(`-100${channelId}`);
+        } catch {
+          try {
+            entity = await client.getEntity(`-${channelId}`);
+          } catch {
+            try {
+              entity = await client.getEntity(channelId);
+            } catch (err2) {
+              throw err2;
+            }
+          }
+        }
+      } else {
+        entity = await client.getEntity(channelId);
+      }
+
+      if (!(entity instanceof Api.Chat || entity instanceof Api.Channel)) {
+        throw new Error('Not a group or channel');
+      }
+      if (entity instanceof Api.Chat) {
+        return this.getBasicGroupParticipants(client, entity, excludeAdmins);
+      }
+    } catch (e: any) {
+      if (e?.message?.includes('CHAT_ADMIN_REQUIRED') || (e as any)?.code === 'CHAT_ADMIN_REQUIRED') {
+        const err = new Error('No permission to get participants');
+        (err as any).code = 'CHAT_ADMIN_REQUIRED';
+        throw err;
+      }
+      if (e?.message?.includes('CHANNEL_PRIVATE') || (e as any)?.code === 'CHANNEL_PRIVATE') {
+        const err = new Error('Channel is private');
+        (err as any).code = 'CHANNEL_PRIVATE';
+        throw err;
+      }
+      throw e;
+    }
+
+    try {
+      const result = await client.invoke(
+        new Api.channels.GetParticipants({
+          channel: entity,
+          filter: new Api.ChannelParticipantsRecent(),
+          offset,
+          limit: Math.min(limit, 200),
+          hash: BigInt(0),
+        })
+      ) as { participants?: any[]; users?: any[]; count?: number };
+      const participants = result?.participants ?? [];
+      const users = result?.users ?? [];
+      const userMap = new Map<number, any>();
+      for (const u of users) {
+        const id = (u as any).id ?? (u as any).userId;
+        if (id != null) userMap.set(Number(id), u);
+      }
+      const out: Array<{ telegram_id: string; username?: string; first_name?: string; last_name?: string }> = [];
+      for (const p of participants) {
+        if (excludeAdmins) {
+          const cn = String((p as any).className ?? (p as any).constructor?.className ?? '').toLowerCase();
+          if (cn.includes('channelparticipantadmin') || cn.includes('channelparticipantcreator')) continue;
+        }
+        const uid = (p as any).userId;
+        if (uid == null) continue;
+        const u = userMap.get(Number(uid));
+        out.push({
+          telegram_id: String(uid),
+          username: (u?.username ?? '').trim() || undefined,
+          first_name: (u?.firstName ?? u?.first_name ?? '').trim() || undefined,
+          last_name: (u?.lastName ?? u?.last_name ?? '').trim() || undefined,
+        });
+      }
+      const count = result?.count ?? 0;
+      const nextOffset = offset + participants.length < count && participants.length >= Math.min(limit, 200)
+        ? offset + participants.length
+        : null;
+      return { users: out, nextOffset };
+    } catch (e: any) {
+      if (e?.message?.includes('CHAT_ADMIN_REQUIRED') || (e as any)?.code === 'CHAT_ADMIN_REQUIRED') {
+        const err = new Error('No permission to get participants');
+        (err as any).code = 'CHAT_ADMIN_REQUIRED';
+        throw err;
+      }
+      if (e?.message?.includes('CHANNEL_PRIVATE') || (e as any)?.code === 'CHANNEL_PRIVATE') {
+        const err = new Error('Channel is private');
+        (err as any).code = 'CHANNEL_PRIVATE';
+        throw err;
+      }
+      this.log.error({ message: 'getChannelParticipants failed', accountId, channelId, error: e?.message || String(e) });
+      throw e;
+    }
+  }
+
+  /**
+   * Get active participants (users who sent messages) from a chat history.
+   */
+  async getActiveParticipants(
+    accountId: string,
+    chatId: string,
+    depth: number,
+    excludeAdmins: boolean = false
+  ): Promise<{ users: Array<{ telegram_id: string; username?: string; first_name?: string; last_name?: string }> }> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const client = clientInfo.client;
+    let entity: any;
+
+    try {
+      const peerId = Number(chatId);
+      const isNumericId = !Number.isNaN(peerId) && !chatId.startsWith('@') && !chatId.includes('://');
+      if (isNumericId && peerId > 0) {
+        try {
+          entity = await client.getEntity(`-100${chatId}`);
+        } catch {
+          try {
+            entity = await client.getEntity(`-${chatId}`);
+          } catch {
+            try {
+              entity = await client.getEntity(chatId);
+            } catch (err2) {
+              throw err2;
+            }
+          }
+        }
+      } else {
+        entity = await client.getEntity(chatId);
+      }
+    } catch (e: any) {
+      this.log.error({ message: 'Failed to resolve entity for getActiveParticipants', accountId, chatId, error: e?.message || String(e) });
+      throw e;
+    }
+
+    const uniqueUsers = new Map<string, any>();
+    let offsetId = 0;
+    const limit = 100;
+    let fetched = 0;
+
+    try {
+      while (fetched < depth) {
+        const fetchLimit = Math.min(limit, depth - fetched);
+        const result = await client.invoke(
+          new Api.messages.GetHistory({
+            peer: entity,
+            offsetId,
+            offsetDate: 0,
+            addOffset: 0,
+            limit: fetchLimit,
+            maxId: 0,
+            minId: 0,
+            hash: BigInt(0),
+          })
+        ) as any;
+
+        const messages = result.messages || [];
+        const users = result.users || [];
+        
+        if (messages.length === 0) break; // no more messages
+
+        // Map users from this batch
+        const usersMap = new Map();
+        for (const u of users) {
+           usersMap.set(String(u.id), u);
+        }
+
+        for (const msg of messages) {
+          const fromId = msg.fromId;
+          if (fromId && fromId.className === 'PeerUser') {
+             const uid = String(fromId.userId);
+             if (!uniqueUsers.has(uid) && usersMap.has(uid)) {
+               uniqueUsers.set(uid, usersMap.get(uid));
+             }
+          }
+        }
+        
+        fetched += messages.length;
+        offsetId = messages[messages.length - 1].id;
+      }
+
+      // Filter and map users
+      let usersResult = Array.from(uniqueUsers.values())
+        .filter((u: any) => !u.deleted && !u.bot)
+        .map((u: any) => ({
+          telegram_id: String(u.id),
+          username: u.username,
+          first_name: u.firstName,
+          last_name: u.lastName,
+        }));
+
+      if (excludeAdmins) {
+         try {
+           if (entity instanceof Api.Channel) {
+             const adminResult = await client.invoke(new Api.channels.GetParticipants({
+               channel: entity,
+               filter: new Api.ChannelParticipantsAdmins(),
+               offset: 0,
+               limit: 100,
+               hash: BigInt(0),
+             })) as { participants?: any[]; users?: any[] };
+             const adminIds = new Set(
+               (adminResult.participants || [])
+               .filter(p => p instanceof Api.ChannelParticipantAdmin || p instanceof Api.ChannelParticipantCreator)
+               .map(p => String(p.userId))
+             );
+             usersResult = usersResult.filter(u => !adminIds.has(u.telegram_id));
+           }
+         } catch(err) {
+           this.log.warn({ message: 'Failed to fetch admins for exclusion in getActiveParticipants', error: String(err) });
+         }
+      }
+
+      return { users: usersResult };
+    } catch (e: any) {
+      this.log.error({ message: 'getActiveParticipants failed', accountId, chatId, error: e?.message || String(e) });
+      throw e;
+    }
+  }
+
+  /**
+   * Leave a channel/supergroup (channels.LeaveChannel). No-op if already left.
+   */
+  async leaveChat(accountId: string, chatId: string): Promise<void> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const client = clientInfo.client;
+    let inputChannel: Api.TypeInputChannel;
+    try {
+      const peerId = Number(chatId);
+      const fullId = Number.isNaN(peerId) ? chatId : (peerId < 0 ? peerId : -1000000000 - Math.abs(peerId));
+      const peer = await client.getInputEntity(fullId);
+      if (peer instanceof Api.InputChannel) {
+        inputChannel = peer;
+      } else if (peer && typeof (peer as any).channelId !== 'undefined') {
+        inputChannel = new Api.InputChannel({
+          channelId: (peer as any).channelId,
+          accessHash: (peer as any).accessHash ?? BigInt(0),
+        });
+      } else {
+        throw new Error('Not a channel or supergroup');
+      }
+    } catch (e: any) {
+      if (e?.message?.includes('CHANNEL_PRIVATE') || (e as any)?.code === 'CHANNEL_PRIVATE') {
+        const err = new Error('Channel is private or already left');
+        (err as any).code = 'CHANNEL_PRIVATE';
+        throw err;
+      }
+      throw e;
+    }
+    try {
+      await client.invoke(new Api.channels.LeaveChannel({ channel: inputChannel }));
+    } catch (e: any) {
+      if (e?.message?.includes('USER_NOT_PARTICIPANT') || (e as any).code === 'USER_NOT_PARTICIPANT') {
+        return;
+      }
+      this.log.error({ message: 'leaveChat failed', accountId, chatId, error: e?.message || String(e) });
+      throw e;
+    }
+  }
+
+  /**
+   * Resolve one input (link, username, invite) to chatId + title + peerType.
+   * For invite links the account will join the chat (ImportChatInvite).
+   */
+  async resolveChatFromInput(
+    accountId: string,
+    input: string
+  ): Promise<{ chatId: string; title: string; peerType: string }> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const client = clientInfo.client;
+    const raw = (input || '').trim();
+    if (!raw) {
+      const err = new Error('Empty input');
+      (err as any).code = 'VALIDATION';
+      throw err;
+    }
+    const lower = raw.toLowerCase();
+    const isInvite = lower.includes('/joinchat/') || lower.startsWith('+') || lower.includes('t.me/+');
+    if (isInvite) {
+      let hash = '';
+      const joinchatMatch = raw.match(/joinchat\/([a-zA-Z0-9_-]+)/i) || raw.match(/t\.me\/\+?([a-zA-Z0-9_-]+)/i);
+      if (joinchatMatch) hash = joinchatMatch[1];
+      else if (raw.startsWith('+')) hash = raw.slice(1).trim();
+      if (!hash) {
+        const err = new Error('Invalid invite link');
+        (err as any).code = 'INVALID_INVITE';
+        throw err;
+      }
+      try {
+        const updates = await client.invoke(new Api.messages.ImportChatInvite({ hash })) as any;
+        const chats = updates?.chats ?? [];
+        const c = Array.isArray(chats) ? chats[0] : chats;
+        if (!c) {
+          const err = new Error('No chat in invite response');
+          (err as any).code = 'INVALID_INVITE';
+          throw err;
+        }
+        const id = c.id ?? c.channelId ?? c.chatId;
+        const title = (c.title ?? c.name ?? '').trim() || String(id);
+        const peerType = (c as any).broadcast ? 'channel' : (c as any).megagroup ? 'channel' : 'chat';
+        return { chatId: String(id), title, peerType };
+      } catch (e: any) {
+        if (e?.message?.includes('INVITE_HASH_EXPIRED') || (e as any).code === 'INVITE_HASH_EXPIRED') {
+          const err = new Error('Invite link expired');
+          (err as any).code = 'INVITE_EXPIRED';
+          throw err;
+        }
+        if (e?.message?.includes('INVITE_HASH_INVALID') || (e as any).code === 'INVITE_HASH_INVALID') {
+          const err = new Error('Invalid invite link');
+          (err as any).code = 'INVALID_INVITE';
+          throw err;
+        }
+        throw e;
+      }
+    }
+    let username = raw
+      .replace(/^@/, '')
+      .replace(/^https?:\/\/t\.me\//i, '')
+      .replace(/^t\.me\//i, '')
+      .trim();
+    if (!username) {
+      const err = new Error('Invalid username or link');
+      (err as any).code = 'VALIDATION';
+      throw err;
+    }
+    try {
+      const resolved = await client.invoke(new Api.contacts.ResolveUsername({ username })) as any;
+      const peer = resolved?.peer;
+      const chats = resolved?.chats ?? [];
+      if (!peer) {
+        const err = new Error('Chat not found');
+        (err as any).code = 'CHAT_NOT_FOUND';
+        throw err;
+      }
+      let cid: string | null = null;
+      const pn = String(peer.className ?? peer.constructor?.className ?? '').toLowerCase();
+      if (pn.includes('peerchannel') && (peer as any).channelId != null) {
+        cid = String((peer as any).channelId);
+      } else if (pn.includes('peerchat') && (peer as any).chatId != null) {
+        cid = String((peer as any).chatId);
+      }
+      if (!cid) {
+        const err = new Error('Not a group or channel');
+        (err as any).code = 'CHAT_NOT_FOUND';
+        throw err;
+      }
+      const chat = (Array.isArray(chats) ? chats : [chats]).find((ch: any) => {
+        const id = ch?.id ?? ch?.channelId ?? ch?.chatId;
+        return id != null && String(id) === cid;
+      });
+      const title = (chat?.title ?? chat?.name ?? '').trim() || cid;
+      const peerType = (chat as any)?.broadcast ? 'channel' : (chat as any)?.megagroup ? 'channel' : 'chat';
+      return { chatId: cid, title, peerType };
+    } catch (e: any) {
+      if (e?.message?.includes('USERNAME_NOT_OCCUPIED') || (e as any).code === 'USERNAME_NOT_OCCUPIED') {
+        const err = new Error('Chat not found');
+        (err as any).code = 'CHAT_NOT_FOUND';
+        throw err;
+      }
+      this.log.error({ message: 'resolveChatFromInput failed', accountId, input: raw, error: e?.message || String(e) });
+      throw e;
+    }
+  }
+
+  /**
+   * Resolve one input to ResolvedSource (type, linkedChatId, canGetMembers, canGetMessages).
+   * Uses GetFullChannel/GetFullChat to get full info for smart parse strategy.
+   */
+  async resolveSourceFromInput(
+    accountId: string,
+    input: string
+  ): Promise<ResolvedSource> {
+    const basic = await this.resolveChatFromInput(accountId, input);
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo?.isConnected) {
+      return this.basicToResolvedSource(basic, input);
+    }
+    const client = clientInfo.client;
+    const chatId = basic.chatId;
+    const raw = (input || '').trim();
+
+    const peerId = Number(chatId);
+    const isNumericId = !Number.isNaN(peerId) && !chatId.startsWith('@') && !chatId.includes('://');
+    let entity: any;
+    try {
+      if (isNumericId && peerId > 0) {
+        try {
+          entity = await client.getEntity(`-100${chatId}`);
+        } catch {
+          entity = await client.getEntity(chatId);
+        }
+      } else {
+        entity = await client.getEntity(chatId);
+      }
+    } catch (e: any) {
+      this.log.warn({ message: 'resolveSourceFromInput getEntity failed, using basic', accountId, input: raw, error: e?.message });
+      return this.basicToResolvedSource(basic, input);
+    }
+
+    let type: TelegramSourceType = 'unknown';
+    let membersCount: number | undefined;
+    let linkedChatId: number | undefined;
+    let canGetMembers = false;
+    let canGetMessages = true;
+    const username = (entity as any)?.username ? String((entity as any).username) : undefined;
+
+    if (entity instanceof Api.Channel) {
+      const ch = entity as any;
+      if (ch.broadcast) {
+        canGetMembers = false;
+        try {
+          const inputChannel = await client.getInputEntity(entity) as any;
+          const full = await client.invoke(new Api.channels.GetFullChannel({ channel: inputChannel })) as any;
+          const fullChat = full?.fullChat ?? full?.full_chat;
+          if (fullChat?.linkedChatId) {
+            linkedChatId = Number(fullChat.linkedChatId);
+            type = 'comment_group';
+          } else {
+            type = 'channel';
+          }
+          if (fullChat?.participantsCount != null) membersCount = Number(fullChat.participantsCount);
+        } catch (e: any) {
+          this.log.warn({ message: 'GetFullChannel failed in resolveSource', accountId, chatId, error: e?.message });
+          type = 'channel';
+        }
+      } else {
+        type = ch.username ? 'public_group' : 'private_group';
+        canGetMembers = !!ch.username;
+        try {
+          const inputChannel = await client.getInputEntity(entity) as any;
+          const full = await client.invoke(new Api.channels.GetFullChannel({ channel: inputChannel })) as any;
+          const fullChat = full?.fullChat ?? full?.full_chat;
+          if (fullChat?.participantsCount != null) membersCount = Number(fullChat.participantsCount);
+        } catch (e: any) {
+          this.log.warn({ message: 'GetFullChannel failed in resolveSource', accountId, chatId, error: e?.message });
+        }
+      }
+    } else if (entity instanceof Api.Chat) {
+      type = 'public_group';
+      canGetMembers = true;
+      try {
+        const chatIdNum = (entity as any).id ?? (entity as any).chatId;
+        const full = await client.invoke(new Api.messages.GetFullChat({ chatId: chatIdNum })) as any;
+        const fullChat = full?.fullChat ?? full?.full_chat;
+        if (fullChat?.participantsCount != null) membersCount = Number(fullChat.participantsCount);
+      } catch (e: any) {
+        this.log.warn({ message: 'GetFullChat failed in resolveSource', accountId, chatId, error: e?.message });
+      }
+    } else {
+      type = basic.peerType === 'channel' ? 'public_group' : 'unknown';
+      canGetMembers = type === 'public_group';
+    }
+
+    return {
+      input: raw,
+      type,
+      title: basic.title,
+      username,
+      chatId: basic.chatId,
+      membersCount,
+      linkedChatId,
+      canGetMembers,
+      canGetMessages,
+    };
+  }
+
+  private basicToResolvedSource(
+    basic: { chatId: string; title: string; peerType: string },
+    input: string
+  ): ResolvedSource {
+    const type: TelegramSourceType =
+      basic.peerType === 'channel' ? 'public_group' : basic.peerType === 'chat' ? 'public_group' : 'unknown';
+    return {
+      input: (input || '').trim(),
+      type,
+      title: basic.title,
+      chatId: basic.chatId,
+      canGetMembers: type === 'public_group',
+      canGetMessages: true,
+    };
   }
 
   /**

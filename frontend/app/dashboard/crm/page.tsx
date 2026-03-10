@@ -7,6 +7,7 @@ import {
   Plus,
   Building2,
   User,
+  Users,
   Pencil,
   Trash2,
   ChevronRight,
@@ -22,10 +23,11 @@ import {
   Crown,
   FileText,
 } from 'lucide-react';
-import { apiClient } from '@/lib/api/client';
 import {
   fetchCompanies,
   fetchContacts,
+  fetchCompany,
+  fetchContact,
   deleteCompany,
   deleteContact,
   importContactsFromCsv,
@@ -189,9 +191,9 @@ export default function CRMPage() {
       return;
     }
     if (detailType === 'companies') {
-      apiClient.get(`/api/crm/companies/${detailId}`).then((r) => setDetailData(r.data));
+      fetchCompany(detailId).then(setDetailData).catch(() => setDetailData(null));
     } else {
-      apiClient.get(`/api/crm/contacts/${detailId}`).then((r) => setDetailData(r.data));
+      fetchContact(detailId).then(setDetailData).catch(() => setDetailData(null));
     }
   }, [detailId, detailType]);
 
@@ -249,7 +251,7 @@ export default function CRMPage() {
             <>
               <Button variant="outline" onClick={() => { setImportModalOpen(true); setImportResult(null); setImportFileContent(''); setImportColumnMapping({}); }}>
                 <FileUp className="w-4 h-4 mr-2" />
-                {t('crm.importContacts', 'Импорт')}
+                {t('crm.importContacts')}
               </Button>
               <Button onClick={() => { setContactEdit(null); setContactModalOpen(true); }}>
                 <Plus className="w-4 h-4 mr-2" />
@@ -388,10 +390,10 @@ export default function CRMPage() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.name')}</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.email')}</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('common.company')}</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.phone', 'Телефон')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.phone')}</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Username</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Telegram ID</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.premium', 'Premium')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.premium')}</th>
                     <th className="px-6 py-3 w-24" />
                   </tr>
                 </thead>
@@ -404,10 +406,10 @@ export default function CRMPage() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.name')}</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.email')}</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('common.company')}</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.phone', 'Телефон')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.phone')}</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Username</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Telegram ID</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.premium', 'Premium')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('crm.premium')}</th>
                     <th className="px-6 py-3 w-24" />
                   </tr>
                 </thead>
@@ -435,9 +437,9 @@ export default function CRMPage() {
                       <td className="px-6 py-4 text-sm text-muted-foreground">{c.telegram_id ?? '—'}</td>
                       <td className="px-6 py-4 text-sm text-muted-foreground">
                         {c.premium === true ? (
-                          <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400"><Crown className="w-4 h-4" />{t('crm.yes', 'Да')}</span>
+                          <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400"><Crown className="w-4 h-4" />{t('crm.yes')}</span>
                         ) : c.premium === false ? (
-                          <span className="text-muted-foreground">{t('crm.no', 'Нет')}</span>
+                          <span className="text-muted-foreground">{t('crm.no')}</span>
                         ) : '—'}
                       </td>
                       <td className="px-6 py-4">
@@ -579,12 +581,12 @@ export default function CRMPage() {
       <Modal
         isOpen={importModalOpen}
         onClose={() => { setImportModalOpen(false); setImportResult(null); setImportFileContent(''); }}
-        title={t('crm.importContacts', 'Импорт контактов из CSV')}
+        title={t('crm.importTitle')}
         size="md"
       >
         <div className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            {t('crm.importContactsHint', 'Загрузите CSV с колонками: имя, фамилия, email, телефон, Telegram ID. В каждой строке должен быть указан email или Telegram ID.')}
+            {t('crm.importContactsHint')}
           </p>
           <input
             type="file"
@@ -618,29 +620,29 @@ export default function CRMPage() {
             className="inline-flex items-center justify-center font-medium rounded-lg border border-border hover:bg-accent text-foreground px-4 py-2 text-sm cursor-pointer transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           >
             <FileUp className="w-4 h-4 mr-2" />
-            {importFileContent ? t('crm.importChangeFile', 'Выбрать другой файл') : t('crm.importSelectFile', 'Выбрать CSV')}
+            {importFileContent ? t('crm.importChangeFile') : t('crm.importSelectFile')}
           </label>
           {importFileContent && (
             <>
               <label className="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" checked={importHasHeader} onChange={(e) => setImportHasHeader(e.target.checked)} className="rounded border-border" />
-                <span className="text-sm text-foreground">{t('crm.importHasHeader', 'Первая строка — заголовки')}</span>
+                <span className="text-sm text-foreground">{t('crm.importHasHeader')}</span>
               </label>
               {(() => {
                 const lines = importFileContent.split('\n').filter((l) => l.trim());
                 const firstRow = lines[importHasHeader ? 1 : 0];
                 const colCount = firstRow ? firstRow.split(',').length : 0;
                 const fieldOpts = [
-                  { value: '', label: t('crm.importSkip', '—') },
-                  { value: 'firstName', label: t('crm.importFirstName', 'Имя') },
-                  { value: 'lastName', label: t('crm.importLastName', 'Фамилия') },
-                  { value: 'email', label: t('crm.importEmail', 'Email') },
-                  { value: 'phone', label: t('crm.importPhone', 'Телефон') },
-                  { value: 'telegramId', label: t('crm.importTelegramId', 'Telegram ID') },
+                  { value: '', label: t('crm.importSkip') },
+                  { value: 'firstName', label: t('crm.importFirstName') },
+                  { value: 'lastName', label: t('crm.importLastName') },
+                  { value: 'email', label: t('crm.importEmail') },
+                  { value: 'phone', label: t('crm.importPhone') },
+                  { value: 'telegramId', label: t('crm.importTelegramId') },
                 ];
                 return (
                   <div className="space-y-2">
-                    <span className="text-sm font-medium text-foreground">{t('crm.importMapping', 'Соответствие колонок')}</span>
+                    <span className="text-sm font-medium text-foreground">{t('crm.importMapping')}</span>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                       {Array.from({ length: colCount }, (_, i) => (
                         <div key={i} className="flex flex-col gap-1">
@@ -664,9 +666,9 @@ export default function CRMPage() {
           )}
           {importResult && (
             <div className="p-3 rounded-lg bg-muted/50 text-sm">
-              <p className="text-foreground">{t('crm.importCreated', 'Создано')}: {importResult.created}, {t('crm.importUpdated', 'Обновлено')}: {importResult.updated}</p>
+              <p className="text-foreground">{t('crm.importCreated')}: {importResult.created}, {t('crm.importUpdated')}: {importResult.updated}</p>
               {importResult.errors.length > 0 && (
-                <p className="text-destructive mt-1">{t('crm.importErrors', 'Ошибки')}: {importResult.errors.length} (строки: {importResult.errors.slice(0, 5).map((e) => e.row).join(', ')}{importResult.errors.length > 5 ? '…' : ''})</p>
+                <p className="text-destructive mt-1">{t('crm.importErrors')}: {importResult.errors.length} (строки: {importResult.errors.slice(0, 5).map((e) => e.row).join(', ')}{importResult.errors.length > 5 ? '…' : ''})</p>
               )}
             </div>
           )}
@@ -698,7 +700,7 @@ export default function CRMPage() {
                 }
               }}
             >
-              {importLoading ? t('common.loading') : t('crm.importRun', 'Импортировать')}
+              {importLoading ? t('common.loading') : t('crm.importRun')}
             </Button>
           </div>
         </div>
@@ -823,7 +825,7 @@ function ContactDetail({
         {contact.phone && (
           <div>
             <dt className="text-muted-foreground flex items-center gap-2">
-              <Phone className="w-4 h-4" /> {t('crm.phone', 'Телефон')}
+              <Phone className="w-4 h-4" /> {t('crm.phone')}
             </dt>
             <dd className="font-medium text-foreground mt-0.5">
               <a href={`tel:${contact.phone}`} className="text-primary hover:underline">{contact.phone}</a>
@@ -853,11 +855,26 @@ function ContactDetail({
       {contact.bio?.trim() && (
         <div className="pt-4 border-t border-border">
           <dt className="text-muted-foreground flex items-center gap-2 mb-1">
-            <FileText className="w-4 h-4" /> {t('crm.bio', 'О себе')}
+            <FileText className="w-4 h-4" /> {t('crm.bio')}
           </dt>
           <dd className="text-foreground whitespace-pre-wrap">{contact.bio.trim()}</dd>
         </div>
       )}
+
+      {(contact as Contact & { telegramGroups?: { telegram_chat_id: string; telegram_chat_title?: string }[] }).telegramGroups?.length ? (
+        <div className="pt-4 border-t border-border">
+          <h4 className="text-sm font-medium text-foreground flex items-center gap-2 mb-2">
+            <Users className="w-4 h-4" /> {t('crm.telegramGroups')}
+          </h4>
+          <ul className="flex flex-wrap gap-1.5">
+            {(contact as Contact & { telegramGroups: { telegram_chat_id: string; telegram_chat_title?: string }[] }).telegramGroups.map((g) => (
+              <li key={g.telegram_chat_id} className="px-2 py-1 rounded-md bg-muted/50 text-sm text-foreground">
+                {g.telegram_chat_title || g.telegram_chat_id}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       <div className="border-t border-border pt-4 space-y-4">
         <h4 className="text-sm font-medium text-foreground flex items-center gap-2">

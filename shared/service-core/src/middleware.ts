@@ -26,13 +26,14 @@ declare global {
 
 const INTERNAL_AUTH_HEADER = 'x-internal-auth';
 
-/** Reject requests that did not come from the gateway (missing or invalid X-Internal-Auth). Skip when INTERNAL_AUTH_SECRET is not set.
- *  Fallback: if X-User-Id and X-Organization-Id are both present and non-empty, allow (gateway sets these after JWT verification). */
+/** Reject requests that did not come from the gateway (missing or invalid X-Internal-Auth).
+ *  When INTERNAL_AUTH_SECRET is set: require either valid X-Internal-Auth header or present X-User-Id + X-Organization-Id (gateway sets these after JWT).
+ *  When INTERNAL_AUTH_SECRET is not set: reject with 503 so the service never runs in insecure "trust any headers" mode. */
 export function internalAuth(): RequestHandler {
   return (req: Request, _res: Response, next: NextFunction) => {
     const secret = process.env.INTERNAL_AUTH_SECRET?.trim();
     if (!secret) {
-      return next();
+      return next(new AppError(503, 'Service unavailable: INTERNAL_AUTH_SECRET is not configured', ErrorCodes.INTERNAL_ERROR));
     }
     const value = req.headers[INTERNAL_AUTH_HEADER];
     const headerOk = typeof value === 'string' && value.trim() === secret;
