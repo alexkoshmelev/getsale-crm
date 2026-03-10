@@ -1,10 +1,20 @@
 export const AUTH_COOKIE_ACCESS = 'access_token';
 export const AUTH_COOKIE_REFRESH = 'refresh_token';
-export const AUTH_COOKIE_OPTS = {
+
+const cookieDomain = process.env.COOKIE_DOMAIN?.trim();
+const isProduction = process.env.NODE_ENV === 'production';
+export const AUTH_COOKIE_OPTS: {
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: 'strict' | 'lax';
+  path: string;
+  domain?: string;
+} = {
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: (process.env.NODE_ENV === 'production' ? 'strict' : 'lax') as 'strict' | 'lax',
+  secure: isProduction,
+  sameSite: (isProduction && cookieDomain ? 'lax' : isProduction ? 'strict' : 'lax') as 'strict' | 'lax',
   path: '/',
+  ...(cookieDomain ? { domain: cookieDomain } : {}),
 };
 
 export const ACCESS_MAX_AGE_SEC = 15 * 60; // 15 min

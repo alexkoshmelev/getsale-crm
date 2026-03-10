@@ -124,6 +124,7 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET}
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN:-.getsale.ai}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

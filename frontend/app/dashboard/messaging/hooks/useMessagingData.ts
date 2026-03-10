@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from 'react';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
+import { useAuthStore } from '@/lib/stores/auth-store';
 import { apiClient } from '@/lib/api/client';
 import { setCurrentMessagingChat } from '@/lib/messaging-open-chat';
 import {
@@ -23,9 +24,14 @@ export function useMessagingData(s: MessagingState) {
   const fetchAccounts = useCallback(async () => {
     try {
       const response = await apiClient.get('/api/bd-accounts');
-      s.setAccounts(response.data);
-      if (response.data.length > 0 && !s.selectedAccountId) {
-        s.setSelectedAccountId(response.data[0].id);
+      const user = useAuthStore.getState().user;
+      const isBidi = user?.role?.toLowerCase() === 'bidi';
+      let list = response.data || [];
+      if (isBidi) list = list.filter((a) => a.is_owner === true);
+      const sorted = [...list].sort((a, b) => (b.is_owner ? 1 : 0) - (a.is_owner ? 1 : 0));
+      s.setAccounts(sorted);
+      if (sorted.length > 0 && (!s.selectedAccountId || !sorted.some((a) => a.id === s.selectedAccountId))) {
+        s.setSelectedAccountId(sorted[0].id);
       }
     } catch (error) {
       console.error('Error fetching accounts:', error);
