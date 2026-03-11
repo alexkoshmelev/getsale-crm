@@ -12,12 +12,13 @@ import { parseRouter } from './routes/parse';
 import { startDiscoveryLoop } from './discovery-loop';
 
 async function main() {
-  const ctx = await createServiceApp({ name: 'crm-service', port: 3002 });
+  const redis = process.env.REDIS_URL ? new RedisClient(process.env.REDIS_URL) : null;
+  const ctx = await createServiceApp({
+    name: 'crm-service',
+    port: 3002,
+    onShutdown: () => { if (redis) redis.disconnect(); },
+  });
   const { pool, rabbitmq, log, registry } = ctx;
-
-  const redis = process.env.REDIS_URL
-    ? new RedisClient(process.env.REDIS_URL)
-    : null;
 
   const bdAccountsClient = new ServiceHttpClient({
     baseUrl: process.env.BD_ACCOUNTS_SERVICE_URL || 'http://bd-accounts-service:3007',

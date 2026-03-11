@@ -1,9 +1,10 @@
 import type { Request, Response } from 'express';
 import Redis from 'ioredis';
 import type { Logger } from '@getsale/logger';
-import { REDIS_URL, SSE_HEARTBEAT_MS } from './config';
+import { REDIS_URL, SSE_HEARTBEAT_MS, SSE_MAX_CONNECTIONS_PER_USER } from './config';
 
-export const sseClients = new Map<string, Response>();
+/** Per channel (events:userId): set of response streams. Enforces per-user connection limit. */
+export const sseClients = new Map<string, Set<Response>>();
 
 let redisSub: Redis | null = null;
 
@@ -19,15 +20,19 @@ export function setupRedisSubscriber(log: Logger): void {
     });
     redisSub.on('error', (err: Error) => log.error({ message: 'Redis subscriber error', error: String(err) }));
     redisSub.on('message', (channel: string, message: string) => {
-      const res = sseClients.get(channel);
-      if (!res || res.writableEnded) return;
-      try {
-        const parsed = JSON.parse(message) as { event?: string; data?: unknown };
-        const event = parsed.event ?? 'message';
-        const data = parsed.data !== undefined ? JSON.stringify(parsed.data) : message;
-        res.write(`event: ${event}\ndata: ${data}\n\n`);
-      } catch {
-        res.write(`data: ${message}\n\n`);
+      const set = sseClients.get(channel);
+      if (!set) return;
+      const parsed = JSON.parse(message) as { event?: string; data?: unknown };
+      const event = parsed.event ?? 'message';
+      const data = parsed.data !== undefined ? JSON.stringify(parsed.data) : message;
+      const line = `event: ${event}\ndata: ${data}\n\n`;
+      for (const res of set) {
+        if (res.writableEnded) continue;
+        try {
+          res.write(line);
+        } catch {
+          /* ignore */
+        }
       }
     });
   } catch (e) {
@@ -39,6 +44,29 @@ export function getRedisSub(): Redis | null {
   return redisSub;
 }
 
+/** Close all SSE connections and the Redis subscriber. Call on process shutdown. */
+export async function closeSseConnections(): Promise<void> {
+  for (const [channel, set] of sseClients.entries()) {
+    for (const res of set) {
+      try {
+        if (!res.writableEnded) res.end();
+      } catch {
+        /* ignore */
+      }
+    }
+    sseClients.delete(channel);
+  }
+  if (redisSub) {
+    try {
+      await redisSub.unsubscribe();
+      await redisSub.quit();
+    } catch {
+      /* ignore */
+    }
+    redisSub = null;
+  }
+}
+
 export function createSseRoute(log: Logger) {
   const sub = getRedisSub();
   return function sseRoute(req: Request, res: Response): void {
@@ -48,13 +76,23 @@ export function createSseRoute(log: Logger) {
       return;
     }
     const channel = `events:${user.id}`;
+    let set = sseClients.get(channel);
+    if (set && set.size >= SSE_MAX_CONNECTIONS_PER_USER) {
+      res.status(429).json({ error: 'Too many event streams open. Close other tabs or wait and retry.' });
+      return;
+    }
+    if (!set) {
+      set = new Set();
+      sseClients.set(channel, set);
+    }
+    set.add(res);
+
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
 
-    sseClients.set(channel, res);
     sub.subscribe(channel).catch((err: Error) => {
       log.error({ message: 'SSE subscribe error', error: String(err) });
     });
@@ -70,8 +108,14 @@ export function createSseRoute(log: Logger) {
 
     req.on('close', () => {
       clearInterval(heartbeat);
-      sseClients.delete(channel);
-      sub.unsubscribe(channel).catch(() => {});
+      const s = sseClients.get(channel);
+      if (s) {
+        s.delete(res);
+        if (s.size === 0) {
+          sseClients.delete(channel);
+          sub.unsubscribe(channel).catch(() => {});
+        }
+      }
       try {
         if (!res.writableEnded) res.end();
       } catch {

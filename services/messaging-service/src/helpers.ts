@@ -22,16 +22,18 @@ export async function ensureConversation(
   }
 }
 
-/** Attach lead to conversation (idempotent). Triggered by LEAD_CREATED_FROM_CAMPAIGN. */
+/** Attach lead to conversation (idempotent by conversationId + leadId). Triggered by LEAD_CREATED_FROM_CAMPAIGN.
+ *  On duplicate event delivery, UPDATE matches 0 rows (already same lead_id) — safe no-op. */
 export async function attachLead(
   db: Pool,
   params: { conversationId: string; leadId: string; campaignId: string }
-): Promise<void> {
-  await db.query(
+): Promise<number> {
+  const r = await db.query(
     `UPDATE conversations SET lead_id = $1, campaign_id = $2, became_lead_at = COALESCE(became_lead_at, NOW()), updated_at = NOW()
      WHERE id = $3 AND (lead_id IS NULL OR lead_id = $1)`,
     [params.leadId, params.campaignId, params.conversationId]
   );
+  return r.rowCount ?? 0;
 }
 
 export const MESSAGES_FOR_AI_LIMIT = 200;

@@ -7,7 +7,7 @@ import { EventType, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, validate, AppError, ErrorCodes } from '@getsale/service-core';
 import { DealCreateSchema, DealUpdateSchema, DealStageUpdateSchema } from '../validation';
-import { getFirstStageId, ensureStageInPipeline } from '../helpers';
+import { getFirstStageId, ensureStageInPipeline, parsePageLimit, buildPagedResponse } from '../helpers';
 
 interface Deps {
   pool: Pool;
@@ -55,8 +55,7 @@ export function dealsRouter({ pool, rabbitmq, log, dealCreatedTotal, dealStageCh
 
   router.get('/', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const page = Math.max(1, parseInt(String(req.query.page), 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit), 10) || 20));
+    const { page, limit, offset } = parsePageLimit(req.query);
 
     let where = 'WHERE d.organization_id = $1';
     const params: unknown[] = [organizationId];
@@ -75,7 +74,6 @@ export function dealsRouter({ pool, rabbitmq, log, dealCreatedTotal, dealStageCh
     const countResult = await pool.query(`SELECT COUNT(*)::int AS total FROM deals d ${where}`, params);
     const total = countResult.rows[0].total;
 
-    const offset = (page - 1) * limit;
     params.push(limit, offset);
     const result = await pool.query(
       `SELECT d.*${DEAL_EXTRA_COLS} FROM deals d ${DEAL_JOINS} ${where}
@@ -83,10 +81,7 @@ export function dealsRouter({ pool, rabbitmq, log, dealCreatedTotal, dealStageCh
       params
     );
 
-    res.json({
-      items: result.rows.map(mapDealRow),
-      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
-    });
+    res.json(buildPagedResponse(result.rows.map(mapDealRow), total, page, limit));
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {
@@ -178,18 +173,18 @@ export function dealsRouter({ pool, rabbitmq, log, dealCreatedTotal, dealStageCh
     const existing = await pool.query('SELECT * FROM deals WHERE id = $1 AND organization_id = $2', [id, organizationId]);
     if (existing.rows.length === 0) throw new AppError(404, 'Deal not found', ErrorCodes.NOT_FOUND);
 
-    const d = req.body;
+    const payload = req.body as Record<string, unknown>;
     const row = existing.rows[0];
     const result = await pool.query(
       `UPDATE deals SET title = COALESCE($2, title), value = $3, currency = $4, contact_id = $5,
         owner_id = COALESCE($6, owner_id), probability = $7, expected_close_date = $8, comments = $9, updated_at = NOW()
        WHERE id = $1 AND organization_id = $10 RETURNING *`,
-      [id, d.title ?? row.title, d.value !== undefined ? d.value : row.value,
-       d.currency !== undefined ? d.currency : row.currency,
-       d.contactId !== undefined ? d.contactId : row.contact_id,
-       d.ownerId ?? row.owner_id, d.probability !== undefined ? d.probability : row.probability,
-       d.expectedCloseDate !== undefined ? d.expectedCloseDate : row.expected_close_date,
-       d.comments !== undefined ? d.comments : row.comments, organizationId]
+      [id, payload.title ?? row.title, payload.value !== undefined ? payload.value : row.value,
+       payload.currency !== undefined ? payload.currency : row.currency,
+       payload.contactId !== undefined ? payload.contactId : row.contact_id,
+       payload.ownerId ?? row.owner_id, payload.probability !== undefined ? payload.probability : row.probability,
+       payload.expectedCloseDate !== undefined ? payload.expectedCloseDate : row.expected_close_date,
+       payload.comments !== undefined ? payload.comments : row.comments, organizationId]
     );
 
     await rabbitmq.publishEvent({

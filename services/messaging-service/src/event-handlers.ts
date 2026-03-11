@@ -19,7 +19,8 @@ export async function subscribeToEvents(deps: EventHandlerDeps): Promise<void> {
       const { conversationId, leadId, campaignId } = event.data || {};
       if (!conversationId || !leadId || !campaignId) return;
       try {
-        await attachLead(pool, { conversationId, leadId, campaignId });
+        const updated = await attachLead(pool, { conversationId, leadId, campaignId });
+        if (updated === 0) log.info({ message: 'attachLead no-op (already attached)', conversationId, leadId });
       } catch (err) {
         log.error({ message: 'attachLead error', error: String(err) });
       }

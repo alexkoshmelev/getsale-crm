@@ -152,10 +152,7 @@ export async function ensureLeadInPipeline(
       pipelineId,
       ...(stageId ? { stageId } : {}),
       ...(responsibleId ? { responsibleId } : {}),
-    }, {
-      'X-User-Id': systemUserId,
-      'X-Organization-Id': organizationId,
-    });
+    }, undefined, { userId: systemUserId, organizationId });
     return body.id ?? null;
   } catch (err) {
     if (err instanceof ServiceCallError && err.statusCode === 409) {

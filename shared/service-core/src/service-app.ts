@@ -28,6 +28,8 @@ export interface ServiceConfig {
   cors?: boolean;
   /** Extra pool config overrides */
   poolConfig?: Partial<PoolConfig>;
+  /** Optional cleanup run during graceful shutdown (e.g. close Redis). Called after server close, before pool/rabbitmq. */
+  onShutdown?: () => void | Promise<void>;
 }
 
 export interface ServiceContext {
@@ -228,6 +230,10 @@ export async function createServiceApp(config: ServiceConfig): Promise<ServiceCo
         }, 15_000);
 
         try {
+          if (config.onShutdown) {
+            await Promise.resolve(config.onShutdown());
+            log.info({ message: `${config.name} custom shutdown cleanup completed` });
+          }
           if (!config.skipDb && pool) {
             await pool.end();
             log.info({ message: `${config.name} DB pool closed` });

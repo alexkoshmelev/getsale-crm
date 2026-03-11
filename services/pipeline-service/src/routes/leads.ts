@@ -224,37 +224,52 @@ export function leadsRouter({ pool, rabbitmq, log, eventPublishTotal, eventPubli
   router.patch('/leads/:id/stage', asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
     const { id } = req.params;
-    const stageId = req.body?.stage_id;
-
+    const stageId = req.body?.stage_id ?? req.body?.stageId;
     if (stageId == null || typeof stageId !== 'string') {
       throw new AppError(400, 'stage_id required', ErrorCodes.BAD_REQUEST);
     }
-
-    const existing = await pool.query(
-      'SELECT l.*, s.name AS stage_name FROM leads l JOIN stages s ON s.id = l.stage_id WHERE l.id = $1 AND l.organization_id = $2',
-      [id, organizationId]
+    const stage = await applyLeadStageChange(
+      { pool, rabbitmq, log, eventPublishTotal, eventPublishFailedTotal },
+      { leadId: id, organizationId, userId, stageId }
     );
-    if (existing.rows.length === 0) throw new AppError(404, 'Lead not found', ErrorCodes.NOT_FOUND);
-    if (String(existing.rows[0].stage_name) === 'Converted') {
-      throw new AppError(400, 'Cannot move lead from Converted stage', ErrorCodes.BAD_REQUEST);
+    res.json({ stage: { id: stage.id, name: stage.name } });
+  }));
+
+  // Move lead stage by contact id (for automation / service-to-service). Requires X-Organization-Id (context).
+  router.put('/clients/:clientId/stage', asyncHandler(async (req, res) => {
+    const { id: userId, organizationId } = req.user;
+    const clientId = req.params.clientId?.trim();
+    if (!clientId) throw new AppError(400, 'clientId (contactId) is required', ErrorCodes.BAD_REQUEST);
+
+    const body = req.body as { stageId?: string; stage_id?: string; pipelineId?: string };
+    const stageId = body?.stageId ?? body?.stage_id;
+    if (stageId == null || typeof stageId !== 'string') {
+      throw new AppError(400, 'stageId is required', ErrorCodes.BAD_REQUEST);
     }
 
-    const stageCheck = await pool.query(
-      'SELECT id, name FROM stages WHERE id = $1 AND pipeline_id = $2 AND organization_id = $3',
-      [stageId, existing.rows[0].pipeline_id, organizationId]
+    const pipelineId = typeof body?.pipelineId === 'string' ? body.pipelineId.trim() : null;
+    let leadRow: { id: string; pipeline_id: string; contact_id: string; stage_id: string };
+    if (pipelineId) {
+      const r = await pool.query(
+        'SELECT id, pipeline_id, contact_id, stage_id FROM leads WHERE organization_id = $1 AND contact_id = $2 AND pipeline_id = $3 LIMIT 1',
+        [organizationId, clientId, pipelineId]
+      );
+      if (r.rows.length === 0) throw new AppError(404, 'Lead not found for this contact and pipeline', ErrorCodes.NOT_FOUND);
+      leadRow = r.rows[0] as { id: string; pipeline_id: string; contact_id: string; stage_id: string };
+    } else {
+      const r = await pool.query(
+        'SELECT id, pipeline_id, contact_id, stage_id FROM leads WHERE organization_id = $1 AND contact_id = $2 ORDER BY updated_at DESC LIMIT 1',
+        [organizationId, clientId]
+      );
+      if (r.rows.length === 0) throw new AppError(404, 'Lead not found for this contact', ErrorCodes.NOT_FOUND);
+      leadRow = r.rows[0] as { id: string; pipeline_id: string; contact_id: string; stage_id: string };
+    }
+
+    const stage = await applyLeadStageChange(
+      { pool, rabbitmq, log, eventPublishTotal, eventPublishFailedTotal },
+      { leadId: leadRow.id, organizationId, userId, stageId }
     );
-    if (stageCheck.rows.length === 0) throw new AppError(400, 'Stage not found', ErrorCodes.BAD_REQUEST);
-
-    const fromStageId = existing.rows[0].stage_id;
-    await pool.query('UPDATE leads SET stage_id = $1, updated_at = NOW() WHERE id = $2 AND organization_id = $3',
-      [stageId, id, organizationId]);
-
-    await publishStageChange({ pool, rabbitmq, log, eventPublishTotal, eventPublishFailedTotal,
-      leadId: id, organizationId, userId, contactId: existing.rows[0].contact_id,
-      pipelineId: existing.rows[0].pipeline_id, fromStageId, toStageId: stageId });
-
-    const stageRow = stageCheck.rows[0] as { id: string; name: string };
-    res.json({ stage: { id: stageRow.id, name: stageRow.name } });
+    res.json({ stage: { id: stage.id, name: stage.name } });
   }));
 
   // Lead activity timeline
@@ -284,6 +299,49 @@ export function leadsRouter({ pool, rabbitmq, log, eventPublishTotal, eventPubli
   }));
 
   return router;
+}
+
+// --- Shared: apply stage change to a lead (validation + update + publish) ---
+interface ApplyStageChangeDeps {
+  pool: Pool;
+  rabbitmq: RabbitMQClient;
+  log: Logger;
+  eventPublishTotal: Counter;
+  eventPublishFailedTotal: Counter;
+}
+
+async function applyLeadStageChange(
+  deps: ApplyStageChangeDeps,
+  params: { leadId: string; organizationId: string; userId: string; stageId: string }
+): Promise<{ id: string; name: string }> {
+  const { pool, rabbitmq, log, eventPublishTotal, eventPublishFailedTotal } = deps;
+  const { leadId, organizationId, userId, stageId } = params;
+
+  const existing = await pool.query(
+    'SELECT l.*, s.name AS stage_name FROM leads l JOIN stages s ON s.id = l.stage_id WHERE l.id = $1 AND l.organization_id = $2',
+    [leadId, organizationId]
+  );
+  if (existing.rows.length === 0) throw new AppError(404, 'Lead not found', ErrorCodes.NOT_FOUND);
+  if (String(existing.rows[0].stage_name) === 'Converted') {
+    throw new AppError(400, 'Cannot move lead from Converted stage', ErrorCodes.BAD_REQUEST);
+  }
+
+  const stageCheck = await pool.query(
+    'SELECT id, name FROM stages WHERE id = $1 AND pipeline_id = $2 AND organization_id = $3',
+    [stageId, existing.rows[0].pipeline_id, organizationId]
+  );
+  if (stageCheck.rows.length === 0) throw new AppError(400, 'Stage not found', ErrorCodes.BAD_REQUEST);
+
+  const fromStageId = existing.rows[0].stage_id;
+  await pool.query('UPDATE leads SET stage_id = $1, updated_at = NOW() WHERE id = $2 AND organization_id = $3',
+    [stageId, leadId, organizationId]);
+
+  await publishStageChange({ pool, rabbitmq, log, eventPublishTotal, eventPublishFailedTotal,
+    leadId, organizationId, userId, contactId: existing.rows[0].contact_id,
+    pipelineId: existing.rows[0].pipeline_id, fromStageId, toStageId: stageId });
+
+  const stageRow = stageCheck.rows[0] as { id: string; name: string };
+  return { id: stageRow.id, name: stageRow.name };
 }
 
 // --- Shared: publish lead stage change + activity log ---

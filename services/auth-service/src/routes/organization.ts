@@ -1,9 +1,12 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes, canPermission } from '@getsale/service-core';
+import { asyncHandler, AppError, ErrorCodes, canPermission, parseLimit } from '@getsale/service-core';
 import { extractBearerToken, auditLog, resolveRole, getClientIp } from '../helpers';
 import { AUTH_COOKIE_ACCESS } from '../cookies';
+
+const ORG_NAME_MAX_LEN = 200;
+const ORG_SLUG_MAX_LEN = 100;
 
 interface Deps {
   pool: Pool;
@@ -34,11 +37,14 @@ export function organizationRouter({ pool, log }: Deps): Router {
     let i = 1;
 
     if (name !== undefined && typeof name === 'string' && name.trim()) {
+      const nameVal = name.trim().slice(0, ORG_NAME_MAX_LEN);
+      if (name.trim().length > ORG_NAME_MAX_LEN) throw new AppError(400, `Organization name must be at most ${ORG_NAME_MAX_LEN} characters`, ErrorCodes.VALIDATION);
       updates.push(`name = $${i++}`);
-      values.push(name.trim());
+      values.push(nameVal);
     }
     if (slug !== undefined && typeof slug === 'string' && slug.trim()) {
-      const slugNormalized = slug.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+      const slugNormalized = slug.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, ORG_SLUG_MAX_LEN);
+      if (slug.trim().length > ORG_SLUG_MAX_LEN) throw new AppError(400, `URL slug must be at most ${ORG_SLUG_MAX_LEN} characters`, ErrorCodes.VALIDATION);
       const existing = await pool.query('SELECT id FROM organizations WHERE slug = $1 AND id != $2', [slugNormalized, decoded.organizationId]);
       if (existing.rows.length > 0) throw new AppError(409, 'This URL slug is already taken', ErrorCodes.CONFLICT);
       updates.push(`slug = $${i++}`);
@@ -57,7 +63,7 @@ export function organizationRouter({ pool, log }: Deps): Router {
     await auditLog(pool, {
       organizationId: decoded.organizationId, userId: decoded.userId,
       action: 'organization.updated', resourceType: 'organization', resourceId: decoded.organizationId,
-      oldValue, newValue, ip: getClientIp(req),
+      oldValue, newValue, ip: getClientIp(req), log,
     });
 
     res.json(rows.rows[0]);
@@ -75,16 +81,27 @@ export function organizationRouter({ pool, log }: Deps): Router {
     if (target.rows.length === 0) throw new AppError(404, 'User is not a member of this organization', ErrorCodes.NOT_FOUND);
     if (newOwnerUserId.trim() === decoded.userId) throw new AppError(400, 'Cannot transfer to yourself', ErrorCodes.BAD_REQUEST);
 
-    await pool.query('UPDATE organization_members SET role = $1 WHERE user_id = $2 AND organization_id = $3', ['admin', decoded.userId, decoded.organizationId]);
-    await pool.query('UPDATE organization_members SET role = $1 WHERE user_id = $2 AND organization_id = $3', ['owner', newOwnerUserId.trim(), decoded.organizationId]);
-    await pool.query('UPDATE users SET role = $1 WHERE id = $2 AND organization_id = $3', ['admin', decoded.userId, decoded.organizationId]);
-    await pool.query('UPDATE users SET role = $1 WHERE id = $2 AND organization_id = $3', ['owner', newOwnerUserId.trim(), decoded.organizationId]);
+    const newOwnerId = newOwnerUserId.trim();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('UPDATE organization_members SET role = $1 WHERE user_id = $2 AND organization_id = $3', ['admin', decoded.userId, decoded.organizationId]);
+      await client.query('UPDATE organization_members SET role = $1 WHERE user_id = $2 AND organization_id = $3', ['owner', newOwnerId, decoded.organizationId]);
+      await client.query('UPDATE users SET role = $1 WHERE id = $2 AND organization_id = $3', ['admin', decoded.userId, decoded.organizationId]);
+      await client.query('UPDATE users SET role = $1 WHERE id = $2 AND organization_id = $3', ['owner', newOwnerId, decoded.organizationId]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
 
     await auditLog(pool, {
       organizationId: decoded.organizationId, userId: decoded.userId,
       action: 'organization.ownership_transferred', resourceType: 'organization',
-      resourceId: decoded.organizationId, newValue: { newOwnerUserId: newOwnerUserId.trim() },
-      ip: getClientIp(req),
+      resourceId: decoded.organizationId, newValue: { newOwnerUserId: newOwnerId },
+      ip: getClientIp(req), log,
     });
 
     res.json({ success: true });
@@ -96,7 +113,7 @@ export function organizationRouter({ pool, log }: Deps): Router {
     const allowed = await checkPermission(role, 'audit', 'read');
     if (!allowed) throw new AppError(403, 'Only owner or admin can view audit logs', ErrorCodes.FORBIDDEN);
 
-    const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 500);
+    const limit = parseLimit(req.query, 100, 500);
     const rows = await pool.query(
       `SELECT id, user_id, action, resource_type, resource_id, old_value, new_value, ip, created_at
        FROM audit_logs WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2`,

@@ -214,10 +214,10 @@ async function processLeadStageChanged(deps: EventHandlerDeps, event: Automation
       effectiveUserId = userRow.rows[0]?.id ?? '';
     }
 
-    const headers: Record<string, string> = {
-      'X-User-Id': effectiveUserId ?? '',
-      'X-Organization-Id': organizationId,
-      'X-Correlation-Id': correlationId,
+    const context = {
+      userId: effectiveUserId ?? undefined,
+      organizationId,
+      correlationId,
     };
     try {
       const body = await deps.crmClient.post<{ id?: string }>(
@@ -228,7 +228,8 @@ async function processLeadStageChanged(deps: EventHandlerDeps, event: Automation
           contactId: data?.contactId,
           title: `Deal from lead ${leadId.slice(0, 8)}`,
         },
-        headers
+        undefined,
+        context
       );
       dealId = body?.id ?? null;
       deps.dealCreatedTotal.inc();
@@ -507,18 +508,28 @@ async function moveToStage(deps: EventHandlerDeps, action: AutomationAction, eve
     await deps.crmClient.patch(
       `/api/crm/deals/${dealId}/stage`,
       { ...payload, stageId: action.targetStageId },
-      { 'X-User-Id': userId, 'X-Organization-Id': organizationId }
+      undefined,
+      { userId, organizationId }
     );
     return;
   }
   const clientId = event.data?.clientId ?? event.data?.contactId;
-  if (clientId && action.targetStageId) {
+  if (clientId && action.targetStageId && organizationId) {
+    const userRow = await deps.pool.query(
+      'SELECT id FROM users WHERE organization_id = $1 LIMIT 1',
+      [organizationId]
+    );
+    const userId = event.userId ?? userRow.rows[0]?.id ?? '';
+    const body: { stageId: string; pipelineId?: string } = {
+      stageId: action.targetStageId,
+    };
+    if (event.data?.pipelineId && typeof event.data.pipelineId === 'string') {
+      body.pipelineId = event.data.pipelineId;
+    }
     await deps.pipelineClient.request(`/api/pipeline/clients/${clientId}/stage`, {
       method: 'PUT',
-      body: {
-        ...payload,
-        dealId: event.data?.dealId ?? undefined,
-      },
+      body,
+      context: { organizationId, userId },
     });
   }
 }

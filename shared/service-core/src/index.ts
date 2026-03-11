@@ -18,6 +18,7 @@ export {
   ServiceHttpClient,
   ServiceCallError,
   type HttpClientOptions,
+  type RequestContext,
 } from './http-client';
 
 export {
@@ -26,3 +27,5 @@ export {
   type ServiceContext,
   type ServiceMetrics,
 } from './service-app';
+
+export { parseLimit } from './query-utils';

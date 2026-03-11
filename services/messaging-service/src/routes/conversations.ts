@@ -511,11 +511,8 @@ export function conversationsRouter({ pool, log, bdAccountsClient, aiClient, reg
           lead_telegram_user_id: leadTelegramUserId,
           extra_usernames: extraUsernames,
         },
-        {
-          'x-user-id': userId || '',
-          'x-organization-id': organizationId || '',
-          'x-correlation-id': req.correlationId || '',
-        }
+        undefined,
+        { userId: userId || undefined, organizationId: organizationId || undefined, correlationId: req.correlationId }
       );
     } catch (err: any) {
       const externalCallMs = Date.now() - externalCallStart;

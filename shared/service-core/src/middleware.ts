@@ -120,8 +120,7 @@ export function canPermission(pool: Pool) {
       if (roleLower === 'admin') return action !== 'transfer_ownership';
       return false;
     } catch {
-      if (roleLower === 'owner') return true;
-      if (roleLower === 'admin') return action !== 'transfer_ownership';
+      // Fail closed: on DB error deny access (do not allow by role)
       return false;
     }
   };

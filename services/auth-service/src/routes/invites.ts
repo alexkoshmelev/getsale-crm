@@ -51,17 +51,29 @@ export function invitesRouter({ pool }: Deps): Router {
     const { organization_id: organizationId, role, expires_at: expiresAt } = inv.rows[0];
     if (new Date(expiresAt) <= new Date()) throw new AppError(410, 'Invite expired', ErrorCodes.BAD_REQUEST);
 
-    const existing = await pool.query(
-      'SELECT 1 FROM organization_members WHERE user_id = $1 AND organization_id = $2',
-      [decoded.userId, organizationId]
-    );
-    if (existing.rows.length > 0) return res.json({ success: true, message: 'Already a member' });
-
-    await pool.query(
-      'INSERT INTO organization_members (user_id, organization_id, role) VALUES ($1, $2, $3)',
-      [decoded.userId, organizationId, role]
-    );
-    res.json({ success: true });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const existing = await client.query(
+        'SELECT 1 FROM organization_members WHERE user_id = $1 AND organization_id = $2',
+        [decoded.userId, organizationId]
+      );
+      if (existing.rows.length > 0) {
+        await client.query('ROLLBACK').catch(() => {});
+        return res.json({ success: true, message: 'Already a member' });
+      }
+      await client.query(
+        'INSERT INTO organization_members (user_id, organization_id, role) VALUES ($1, $2, $3)',
+        [decoded.userId, organizationId, role]
+      );
+      await client.query('COMMIT');
+      res.json({ success: true });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
   }));
 
   return router;

@@ -6,7 +6,7 @@ import { EventType, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, validate, AppError, ErrorCodes } from '@getsale/service-core';
 import { ContactCreateSchema, ContactUpdateSchema, ContactImportSchema, ImportFromTelegramGroupSchema } from '../validation';
-import { parseCsvLine } from '../helpers';
+import { parseCsvLine, parsePageLimit, buildPagedResponse } from '../helpers';
 import type { ServiceHttpClient } from '@getsale/service-core';
 
 interface Deps {
@@ -23,8 +23,7 @@ export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
 
   router.get('/', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const page = Math.max(1, parseInt(String(req.query.page), 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit), 10) || 20));
+    const { page, limit, offset } = parsePageLimit(req.query);
     const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
     const companyId = typeof req.query.companyId === 'string' ? req.query.companyId : undefined;
 
@@ -45,7 +44,6 @@ export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
     const countResult = await pool.query(`SELECT COUNT(*)::int AS total FROM contacts c ${where}`, params);
     const total = countResult.rows[0].total;
 
-    const offset = (page - 1) * limit;
     params.push(limit, offset);
     const result = await pool.query(
       `SELECT c.*, co.name AS company_name FROM contacts c
@@ -60,10 +58,7 @@ export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
       return { ...rest, companyName: company_name ?? null };
     });
 
-    res.json({
-      items,
-      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
-    });
+    res.json(buildPagedResponse(items, total, page, limit));
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {
@@ -171,7 +166,7 @@ export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
     while (totalFetched < MAX_IMPORT_PARTICIPANTS) {
       const result = await bdAccountsClient.request<{ users: Array<{ telegram_id: string; username?: string; first_name?: string; last_name?: string }>; nextOffset: number | null }>(
         `/api/bd-accounts/${bdAccountId}/chats/${encodeURIComponent(telegramChatId)}/participants?limit=${limit}&offset=${offset}${excludeAdminsParam}`,
-        { method: 'GET', headers: { 'x-organization-id': organizationId } }
+        { method: 'GET', context: { organizationId, userId: req.user?.id } }
       );
       const users = result?.users ?? [];
       for (const u of users) {
@@ -213,7 +208,7 @@ export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
       try {
         await bdAccountsClient.request(
           `/api/bd-accounts/${bdAccountId}/chats/${encodeURIComponent(telegramChatId)}/leave`,
-          { method: 'POST', headers: { 'x-organization-id': organizationId } }
+          { method: 'POST', context: { organizationId, userId: req.user?.id } }
         );
       } catch (leaveErr: any) {
         log.warn({ message: 'Leave after import failed', bdAccountId, telegramChatId, error: leaveErr?.message || String(leaveErr) });
@@ -254,14 +249,14 @@ export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
   const updateHandler = asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
     const { id } = req.params;
-    const d = req.body;
+    const payload = req.body as Record<string, unknown>;
 
     const existing = await pool.query('SELECT * FROM contacts WHERE id = $1 AND organization_id = $2', [id, organizationId]);
     if (existing.rows.length === 0) {
       throw new AppError(404, 'Contact not found', ErrorCodes.NOT_FOUND);
     }
-    if (d.companyId !== undefined) {
-      const check = await pool.query('SELECT 1 FROM companies WHERE id = $1 AND organization_id = $2', [d.companyId, organizationId]);
+    if (payload.companyId !== undefined) {
+      const check = await pool.query('SELECT 1 FROM companies WHERE id = $1 AND organization_id = $2', [payload.companyId, organizationId]);
       if (check.rows.length === 0) {
         throw new AppError(400, 'Company not found or access denied', ErrorCodes.VALIDATION);
       }
@@ -273,9 +268,9 @@ export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
         telegram_id = $6, company_id = $7, display_name = $8, username = $9,
         consent_flags = COALESCE($10, consent_flags), updated_at = NOW()
        WHERE id = $1 AND organization_id = $11 RETURNING *`,
-      [id, d.firstName, d.lastName ?? null, d.email ?? null, d.phone ?? null,
-       d.telegramId ?? null, d.companyId ?? null, d.displayName ?? null, d.username ?? null,
-       d.consentFlags ? JSON.stringify(d.consentFlags) : null, organizationId]
+      [id, payload.firstName, payload.lastName ?? null, payload.email ?? null, payload.phone ?? null,
+       payload.telegramId ?? null, payload.companyId ?? null, payload.displayName ?? null, payload.username ?? null,
+       payload.consentFlags ? JSON.stringify(payload.consentFlags) : null, organizationId]
     );
 
     await rabbitmq.publishEvent({

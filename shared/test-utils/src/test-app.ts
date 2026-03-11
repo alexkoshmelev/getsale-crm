@@ -1,4 +1,5 @@
 import express, { Express, Router } from 'express';
+import cookieParser from 'cookie-parser';
 import type { Logger } from '@getsale/logger';
 import {
   correlationId,
@@ -13,6 +14,8 @@ export interface TestAppOptions {
   log?: Logger;
   /** Mount routes under this prefix. */
   prefix?: string;
+  /** Parse Cookie header into req.cookies (e.g. for auth tests). */
+  cookieParser?: boolean;
 }
 
 /**
@@ -28,6 +31,7 @@ export function createTestApp(
   const log = options.log ?? createLogger('test');
 
   app.use(express.json({ limit: '5mb' }));
+  if (options.cookieParser) app.use(cookieParser());
   app.use(correlationId());
   app.use(extractUser());
   app.use(requestLogger(log));

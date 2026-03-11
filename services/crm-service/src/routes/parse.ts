@@ -27,7 +27,8 @@ export function parseRouter({ pool, log, bdAccountsClient, redis }: Deps): Route
     const data = await bdAccountsClient.post<{ results: unknown[] }>(
       `/api/bd-accounts/${bdAccountId}/parse/resolve`,
       { sources },
-      { 'x-organization-id': organizationId }
+      undefined,
+      { organizationId, userId: req.user?.id }
     );
     res.json(data);
   }));

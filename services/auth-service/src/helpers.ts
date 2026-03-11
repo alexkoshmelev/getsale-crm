@@ -74,8 +74,7 @@ export async function canPermission(pool: Pool, role: string, resource: string, 
     if (roleLower === 'owner') return true;
     return false;
   } catch {
-    if (roleLower === 'owner') return true;
-    if (roleLower === 'admin') return action !== 'transfer_ownership';
+    // Fail closed: on DB error deny access (do not allow by role)
     return false;
   }
 }
@@ -86,6 +85,7 @@ export async function auditLog(
     organizationId: string; userId: string; action: string;
     resourceType?: string; resourceId?: string;
     oldValue?: object; newValue?: object; ip?: string | null;
+    log?: import('@getsale/logger').Logger;
   }
 ): Promise<void> {
   try {
@@ -100,8 +100,8 @@ export async function auditLog(
         params.ip ?? null,
       ]
     );
-  } catch {
-    // best effort
+  } catch (err) {
+    params.log?.warn({ message: 'Audit log write failed', action: params.action, error: err instanceof Error ? err.message : String(err) });
   }
 }
 

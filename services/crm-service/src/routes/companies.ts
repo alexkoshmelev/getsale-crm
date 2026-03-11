@@ -5,6 +5,7 @@ import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, validate, AppError, ErrorCodes } from '@getsale/service-core';
+import { parsePageLimit, buildPagedResponse } from '../helpers';
 import { CompanyCreateSchema, CompanyUpdateSchema } from '../validation';
 
 interface Deps {
@@ -18,8 +19,7 @@ export function companiesRouter({ pool, rabbitmq, log }: Deps): Router {
 
   router.get('/', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const page = Math.max(1, parseInt(String(req.query.page), 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit), 10) || 20));
+    const { page, limit, offset } = parsePageLimit(req.query);
     const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
     const industry = typeof req.query.industry === 'string' ? req.query.industry.trim() : '';
 
@@ -41,7 +41,6 @@ export function companiesRouter({ pool, rabbitmq, log }: Deps): Router {
     );
     const total = countResult.rows[0].total;
 
-    const offset = (page - 1) * limit;
     params.push(limit, offset);
     const result = await pool.query(
       `SELECT * FROM companies ${where}
@@ -50,10 +49,7 @@ export function companiesRouter({ pool, rabbitmq, log }: Deps): Router {
       params
     );
 
-    res.json({
-      items: result.rows,
-      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
-    });
+    res.json(buildPagedResponse(result.rows, total, page, limit));
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {

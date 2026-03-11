@@ -3,6 +3,7 @@ import { createServiceApp } from '@getsale/service-core';
 import { pipelinesRouter } from './routes/pipelines';
 import { stagesRouter } from './routes/stages';
 import { leadsRouter } from './routes/leads';
+import { internalPipelineRouter } from './routes/internal';
 
 async function main() {
   const ctx = await createServiceApp({ name: 'pipeline-service', port: 3008 });
@@ -22,6 +23,7 @@ async function main() {
   ctx.mount('/api/pipeline', pipelinesRouter(deps));
   ctx.mount('/api/pipeline/stages', stagesRouter(deps));
   ctx.mount('/api/pipeline', leadsRouter({ ...deps, eventPublishTotal, eventPublishFailedTotal }));
+  ctx.mount('/internal', internalPipelineRouter(deps));
 
   ctx.start();
 }

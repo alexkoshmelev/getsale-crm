@@ -185,10 +185,7 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
             channelId: row.channel_id,
             content,
             bdAccountId: row.bd_account_id,
-          }, {
-            'X-User-Id': systemUserId,
-            'X-Organization-Id': row.organization_id,
-          });
+          }, undefined, { userId: systemUserId, organizationId: row.organization_id });
         } catch (sendErr) {
           await client.query(
             `UPDATE campaign_participants SET status = 'failed', metadata = $1, updated_at = NOW() WHERE id = $2`,

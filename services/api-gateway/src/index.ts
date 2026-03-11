@@ -14,7 +14,7 @@ import { createAuthenticate, requireRole } from './auth';
 import { createRateLimit } from './rate-limit';
 import { addCorrelationToResponse } from './proxy-helpers';
 import { createProxies } from './proxies';
-import { setupRedisSubscriber, createSseRoute } from './sse';
+import { setupRedisSubscriber, createSseRoute, closeSseConnections } from './sse';
 
 const log = createLogger('api-gateway');
 const redis = new RedisClient(REDIS_URL);
@@ -72,6 +72,25 @@ adminRouter.all('*', (_req, res) => {
 });
 app.use('/api/admin', authenticate, requireRole(UserRole.OWNER, UserRole.ADMIN), rateLimit, adminRouter);
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   log.info({ message: 'API Gateway running', port: PORT });
 });
+
+async function shutdown(): Promise<void> {
+  log.info({ message: 'API Gateway shutting down gracefully' });
+  server.close(() => {
+    closeSseConnections()
+      .then(() => {
+        redis.disconnect();
+        process.exit(0);
+      })
+      .catch((err) => {
+        log.error({ message: 'Error during SSE/Redis cleanup', error: String(err) });
+        redis.disconnect();
+        process.exit(1);
+      });
+  });
+}
+
+process.on('SIGTERM', () => shutdown());
+process.on('SIGINT', () => shutdown());

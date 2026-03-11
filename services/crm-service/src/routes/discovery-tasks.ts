@@ -72,9 +72,7 @@ export function discoveryTasksRouter({ pool, rabbitmq, log, campaignServiceClien
          // Call campaign-service to create a new campaign
          const createCampRes = await campaignServiceClient.post<any>('/api/campaigns', {
             name: params.campaignName,
-         }, {
-            'x-organization-id': organizationId
-         });
+         }, undefined, { organizationId, userId: req.user?.id });
          finalParams.campaignId = createCampRes.id;
          delete finalParams.campaignName;
        } catch (err: any) {

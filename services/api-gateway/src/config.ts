@@ -42,3 +42,5 @@ export const serviceUrls = {
 
 export const CORRELATION_HEADER = 'x-correlation-id';
 export const SSE_HEARTBEAT_MS = 28000;
+/** Max SSE connections per user (prevents exhausting file descriptors). */
+export const SSE_MAX_CONNECTIONS_PER_USER = parseInt(String(process.env.SSE_MAX_CONNECTIONS_PER_USER || 3), 10);

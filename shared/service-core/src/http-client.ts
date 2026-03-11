@@ -8,11 +8,21 @@ export interface HttpClientOptions {
   name: string;
 }
 
+/** Optional context to forward to downstream services for attribution and tracing */
+export interface RequestContext {
+  userId?: string;
+  organizationId?: string;
+  userRole?: string;
+  correlationId?: string;
+}
+
 interface RequestOptions {
   method?: string;
   headers?: Record<string, string>;
   body?: unknown;
   timeoutMs?: number;
+  /** When set, adds X-User-Id, X-Organization-Id, X-User-Role, x-correlation-id to the request */
+  context?: RequestContext;
 }
 
 export class ServiceHttpClient {
@@ -52,6 +62,13 @@ export class ServiceHttpClient {
         };
         if (this.internalAuthSecret && !hdrs['x-internal-auth']) {
           hdrs['x-internal-auth'] = this.internalAuthSecret;
+        }
+        const ctx = options.context;
+        if (ctx) {
+          if (ctx.userId) hdrs['x-user-id'] = ctx.userId;
+          if (ctx.organizationId) hdrs['x-organization-id'] = ctx.organizationId;
+          if (ctx.userRole) hdrs['x-user-role'] = ctx.userRole;
+          if (ctx.correlationId) hdrs['x-correlation-id'] = ctx.correlationId;
         }
         const res = await fetch(url, {
           method,
@@ -116,20 +133,20 @@ export class ServiceHttpClient {
     throw lastError;
   }
 
-  async get<T = unknown>(path: string, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>(path, { method: 'GET', headers });
+  async get<T = unknown>(path: string, headers?: Record<string, string>, context?: RequestContext): Promise<T> {
+    return this.request<T>(path, { method: 'GET', headers, context });
   }
 
-  async post<T = unknown>(path: string, body: unknown, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>(path, { method: 'POST', body, headers });
+  async post<T = unknown>(path: string, body: unknown, headers?: Record<string, string>, context?: RequestContext): Promise<T> {
+    return this.request<T>(path, { method: 'POST', body, headers, context });
   }
 
-  async patch<T = unknown>(path: string, body: unknown, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>(path, { method: 'PATCH', body, headers });
+  async patch<T = unknown>(path: string, body: unknown, headers?: Record<string, string>, context?: RequestContext): Promise<T> {
+    return this.request<T>(path, { method: 'PATCH', body, headers, context });
   }
 
-  async delete<T = unknown>(path: string, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>(path, { method: 'DELETE', headers });
+  async delete<T = unknown>(path: string, headers?: Record<string, string>, context?: RequestContext): Promise<T> {
+    return this.request<T>(path, { method: 'DELETE', headers, context });
   }
 }
 
