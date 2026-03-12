@@ -19,6 +19,7 @@ export interface CampaignLoopDeps {
 }
 
 export function startCampaignLoop(deps: CampaignLoopDeps): void {
+  processCampaignSends(deps).catch((err) => deps.log.error({ message: 'Campaign send initial run error', error: String(err) }));
   setInterval(() => processCampaignSends(deps), CAMPAIGN_SEND_INTERVAL_MS);
 }
 
@@ -125,11 +126,13 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
         const steps = stepsByCampaign.get(row.campaign_id) || [];
         const step = steps[row.current_step];
         if (!step) {
+          const reason = { no_sequence_step: true, current_step: row.current_step };
           await client.query(
-            `UPDATE campaign_participants SET status = 'completed', next_send_at = NULL, updated_at = NOW() WHERE id = $1`,
-            [row.participant_id]
+            `UPDATE campaign_participants SET status = 'failed', next_send_at = NULL, metadata = $1, updated_at = NOW() WHERE id = $2`,
+            [JSON.stringify(reason), row.participant_id]
           );
           await client.query('COMMIT');
+          log.warn({ message: 'Campaign participant failed: no sequence step', campaignId: row.campaign_id, participantId: row.participant_id, currentStep: row.current_step });
           continue;
         }
 

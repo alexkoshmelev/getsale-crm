@@ -380,7 +380,7 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       params.push(status);
       updates.push(`status = $${idx++}`);
     }
-    if (params.length === 1) {
+    if (params.length === 0) {
       return res.json(existing.rows[0]);
     }
     params.push(id, organizationId);

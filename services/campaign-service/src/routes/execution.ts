@@ -35,6 +35,11 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
       await pool.query('DELETE FROM campaign_participants WHERE campaign_id = $1', [id]);
     }
 
+    const seqRes = await pool.query('SELECT 1 FROM campaign_sequences WHERE campaign_id = $1 LIMIT 1', [id]);
+    if (seqRes.rows.length === 0) {
+      throw new AppError(400, 'Add at least one sequence step before starting the campaign', ErrorCodes.VALIDATION);
+    }
+
     const audience = (campaign.target_audience || {}) as {
       filters?: Record<string, unknown>;
       limit?: number;
@@ -106,6 +111,7 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
     }
 
     const now = new Date();
+    let insertedCount = 0;
     for (const row of contacts) {
       let bdAccountId = defaultBdAccountId;
       let channelId: string | null = row.telegram_id;
@@ -125,6 +131,15 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
          VALUES ($1, $2, $3, $4, 'pending', 0, $5)
          ON CONFLICT (campaign_id, contact_id) DO NOTHING`,
         [id, row.contact_id, bdAccountId, channelId, now]
+      );
+      insertedCount++;
+    }
+
+    if (contacts.length > 0 && insertedCount === 0) {
+      throw new AppError(
+        400,
+        'No participants could be added. Ensure contacts have Telegram ID and an active BD account is selected.',
+        ErrorCodes.VALIDATION
       );
     }
 
