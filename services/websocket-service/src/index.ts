@@ -30,6 +30,7 @@ const io = new Server(httpServer, {
   cors: {
     origin: wsCorsOrigin,
     methods: ['GET', 'POST'],
+    credentials: true,
   },
 });
 
@@ -245,11 +246,23 @@ function getCookieFromHeader(cookieHeader: string | undefined, name: string): st
 }
 
 const ACCESS_TOKEN_COOKIE = 'access_token';
+const REFRESH_TOKEN_COOKIE = 'refresh_token';
+
+/** Parse access_token from Set-Cookie header(s) in auth refresh response. */
+function getAccessTokenFromSetCookie(setCookieHeader: string | string[] | undefined): string | undefined {
+  if (!setCookieHeader) return undefined;
+  const parts = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
+  for (const part of parts) {
+    const match = part.match(new RegExp(`${ACCESS_TOKEN_COOKIE}=([^;]+)`));
+    if (match) return decodeURIComponent(match[1].trim());
+  }
+  return undefined;
+}
 
 // Authentication middleware - verify token (from cookie, auth object, or Authorization header) with auth service
 io.use(async (socket, next) => {
   try {
-    const token =
+    let token =
       getCookieFromHeader(socket.handshake.headers.cookie, ACCESS_TOKEN_COOKIE) ||
       socket.handshake.auth?.token ||
       socket.handshake.headers?.authorization?.replace(/^Bearer\s+/i, '')?.trim();
@@ -258,26 +271,55 @@ io.use(async (socket, next) => {
       return next(new Error('Authentication error: No token provided'));
     }
 
-    // Verify token with auth service
     const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://auth-service:3001';
-    
-    try {
+    const internalSecret = process.env.INTERNAL_AUTH_SECRET?.trim();
+
+    const doVerify = async (t: string): Promise<{ ok: boolean; user?: AuthUserData; status?: number }> => {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (internalSecret) headers['x-internal-auth'] = internalSecret;
       const response = await fetch(`${authServiceUrl}/api/auth/verify`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
+        headers,
+        body: JSON.stringify({ token: t }),
       });
+      if (!response.ok) return { ok: false, status: response.status };
+      const userData = (await response.json()) as AuthUserData;
+      return { ok: true, user: userData };
+    };
 
-      if (!response.ok) {
+    try {
+      let result = await doVerify(token);
+
+      // On 401, try refresh_token from handshake cookie and retry verify
+      if (!result.ok && result.status === 401) {
+        const refreshToken = getCookieFromHeader(socket.handshake.headers.cookie, REFRESH_TOKEN_COOKIE);
+        if (refreshToken) {
+          const refreshHeaders: Record<string, string> = { Cookie: socket.handshake.headers.cookie || '' };
+          if (internalSecret) refreshHeaders['x-internal-auth'] = internalSecret;
+          const refreshRes = await fetch(`${authServiceUrl}/api/auth/refresh`, {
+            method: 'POST',
+            headers: refreshHeaders,
+          });
+          if (refreshRes.ok) {
+            const headers = refreshRes.headers as Headers & { getSetCookie?: () => string[] };
+            const setCookies = typeof headers.getSetCookie === 'function' ? headers.getSetCookie() : [headers.get('set-cookie'), headers.get('Set-Cookie')].filter(Boolean) as string[];
+            const newAccess = getAccessTokenFromSetCookie(setCookies.length > 0 ? setCookies : undefined);
+            if (newAccess) {
+              result = await doVerify(newAccess);
+            }
+          }
+        }
+      }
+
+      if (!result.ok || !result.user) {
         return next(new Error('Authentication error: Invalid token'));
       }
 
-      const userData = (await response.json()) as AuthUserData;
       const user = {
-        id: userData.id,
-        email: userData.email,
-        organizationId: userData.organization_id || userData.organizationId,
-        role: userData.role,
+        id: result.user.id,
+        email: result.user.email,
+        organizationId: result.user.organization_id || result.user.organizationId,
+        role: result.user.role,
       };
 
       (socket as any).user = user;

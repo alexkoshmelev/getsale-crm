@@ -24,6 +24,11 @@ import { fetchCompanies, type Company } from '@/lib/api/crm';
 import { fetchPipelines, fetchStages, type Pipeline } from '@/lib/api/pipeline';
 import { apiClient } from '@/lib/api/client';
 
+/** Reads CSV file and returns string for the backend. */
+async function readFileAsCsv(file: File): Promise<string> {
+  return file.text();
+}
+
 interface CampaignAudienceScheduleProps {
   campaignId: string;
   campaign: Campaign;
@@ -55,15 +60,6 @@ export function CampaignAudienceSchedule({
   const [pipelineId, setPipelineId] = useState<string>(() =>
     (campaign.target_audience?.filters as { pipelineId?: string })?.pipelineId ?? ''
   );
-  const [hasTelegram, setHasTelegram] = useState<boolean>(() =>
-    (campaign.target_audience?.filters as { hasTelegram?: boolean })?.hasTelegram !== false
-  );
-  const [limit, setLimit] = useState<number>(() =>
-    campaign.target_audience?.limit ?? 1000
-  );
-  const [onlyNew, setOnlyNew] = useState<boolean>(() =>
-    !!campaign.target_audience?.onlyNew
-  );
   const [contactIds, setContactIds] = useState<string[]>(() =>
     Array.isArray(campaign.target_audience?.contactIds) ? campaign.target_audience!.contactIds! : []
   );
@@ -73,9 +69,6 @@ export function CampaignAudienceSchedule({
   const [sendDelaySeconds, setSendDelaySeconds] = useState<number>(() =>
     campaign.target_audience?.sendDelaySeconds ?? 60
   );
-  const [enrichContactsBeforeStart, setEnrichContactsBeforeStart] = useState<boolean>(() =>
-    !!campaign.target_audience?.enrichContactsBeforeStart
-  );
   type AudienceSource = 'database' | 'file' | 'group';
   const [audienceSource, setAudienceSource] = useState<AudienceSource>(() => {
     const s = (campaign.target_audience?.filters as { audienceSource?: AudienceSource })?.audienceSource;
@@ -84,6 +77,8 @@ export function CampaignAudienceSchedule({
   const [agents, setAgents] = useState<CampaignAgent[]>([]);
   const [groupSources, setGroupSources] = useState<GroupSource[]>([]);
   const [csvLoading, setCsvLoading] = useState(false);
+  const [csvError, setCsvError] = useState<string | null>(null);
+  const [csvResult, setCsvResult] = useState<{ created: number; matched: number } | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [leadSectionOpen, setLeadSectionOpen] = useState(() => !!(campaign.lead_creation_settings?.trigger && (campaign.pipeline_id || campaign.lead_creation_settings)));
   const csvInputRef = useRef<HTMLInputElement>(null);
@@ -105,6 +100,9 @@ export function CampaignAudienceSchedule({
   const [leadStageId, setLeadStageId] = useState<string>(() => lcs?.default_stage_id ?? '');
   const [leadResponsibleId, setLeadResponsibleId] = useState<string>(() => (lcs as { default_responsible_id?: string })?.default_responsible_id ?? '');
   const leadCreationEnabled = leadTrigger === 'on_first_send' || leadTrigger === 'on_reply';
+  const [enrichContactsBeforeStart, setEnrichContactsBeforeStart] = useState<boolean>(() =>
+    !!(campaign.target_audience as { enrichContactsBeforeStart?: boolean } | undefined)?.enrichContactsBeforeStart
+  );
   const [stages, setStages] = useState<{ id: string; name: string }[]>([]);
   const [teamMembers, setTeamMembers] = useState<{ user_id: string; email?: string; first_name?: string; last_name?: string }[]>([]);
   const isDraft = campaign.status === 'draft' || campaign.status === 'paused';
@@ -126,6 +124,11 @@ export function CampaignAudienceSchedule({
     setLeadResponsibleId(nextResponsibleId);
     if (nextTrigger && nextPipelineId) setLeadSectionOpen(true);
   }, [campaign.id, campaign.pipeline_id, campaign.lead_creation_settings]);
+
+  useEffect(() => {
+    const next = !!(campaign.target_audience as { enrichContactsBeforeStart?: boolean } | undefined)?.enrichContactsBeforeStart;
+    setEnrichContactsBeforeStart(next);
+  }, [campaign.id, campaign.target_audience]);
 
   useEffect(() => {
     Promise.all([
@@ -151,7 +154,21 @@ export function CampaignAudienceSchedule({
     );
   };
 
-  const handleSave = async () => {
+  type LeadOverrides = { leadTrigger?: string; leadPipelineId?: string; leadStageId?: string; leadResponsibleId?: string };
+  const saveAudience = useCallback(async (overrides?: {
+    contactIds?: string[];
+    audienceSource?: AudienceSource;
+    bdAccountId?: string;
+    enrichContactsBeforeStart?: boolean;
+  } & LeadOverrides) => {
+    const ids = overrides?.contactIds ?? contactIds;
+    const src = overrides?.audienceSource ?? audienceSource;
+    const bdId = overrides?.bdAccountId ?? bdAccountId;
+    const enrich = overrides?.enrichContactsBeforeStart ?? enrichContactsBeforeStart;
+    const trigger = overrides?.leadTrigger ?? leadTrigger;
+    const pipeline = overrides?.leadPipelineId ?? leadPipelineId;
+    const stage = overrides?.leadStageId ?? leadStageId;
+    const responsible = overrides?.leadResponsibleId ?? leadResponsibleId;
     setSaving(true);
     try {
       await updateCampaign(campaignId, {
@@ -159,28 +176,25 @@ export function CampaignAudienceSchedule({
           filters: {
             companyId: companyId || undefined,
             pipelineId: pipelineId || undefined,
-            hasTelegram,
-            audienceSource,
+            audienceSource: src,
           },
-          limit: Math.min(10000, Math.max(1, limit)),
-          onlyNew: contactIds.length === 0 ? onlyNew : undefined,
-          contactIds: contactIds.length > 0 ? contactIds : undefined,
-          bdAccountId: bdAccountId || undefined,
+          limit: 10000,
+          contactIds: ids.length > 0 ? ids : undefined,
+          bdAccountId: bdId || undefined,
           sendDelaySeconds: Math.max(0, Math.min(3600, sendDelaySeconds)),
-          enrichContactsBeforeStart: enrichContactsBeforeStart || undefined,
+          enrichContactsBeforeStart: enrich,
         },
-        // Расписание убрано из UI — не отправляем, чтобы отправки шли в любое время по задержке шага
         schedule: null,
-        ...(leadTrigger && leadPipelineId
+        ...(trigger && pipeline
           ? {
-              pipelineId: leadPipelineId,
+              pipelineId: pipeline,
               leadCreationSettings: {
-                trigger: leadTrigger as 'on_first_send' | 'on_reply',
-                default_stage_id: leadStageId || undefined,
-                default_responsible_id: leadResponsibleId || undefined,
+                trigger: trigger as 'on_first_send' | 'on_reply',
+                default_stage_id: stage || undefined,
+                default_responsible_id: responsible || undefined,
               },
             }
-          : { leadCreationSettings: null }),
+          : { pipelineId: null, leadCreationSettings: null }),
       });
       onUpdate();
     } catch (e) {
@@ -188,7 +202,7 @@ export function CampaignAudienceSchedule({
     } finally {
       setSaving(false);
     }
-  };
+  }, [campaignId, contactIds, audienceSource, bdAccountId, companyId, pipelineId, sendDelaySeconds, enrichContactsBeforeStart, leadTrigger, leadPipelineId, leadStageId, leadResponsibleId, onUpdate]);
 
   return (
     <div className="space-y-8 max-w-2xl">
@@ -203,7 +217,7 @@ export function CampaignAudienceSchedule({
             <button
               key={src}
               type="button"
-              onClick={() => isDraft && setAudienceSource(src)}
+              onClick={() => { if (isDraft) { setAudienceSource(src); saveAudience({ audienceSource: src }); } }}
               disabled={!isDraft}
               className={clsx(
                 'p-4 rounded-xl border-2 text-left transition-colors disabled:opacity-60',
@@ -225,10 +239,6 @@ export function CampaignAudienceSchedule({
         {audienceSource === 'database' && (
           <div className="space-y-4">
             <div className="flex flex-wrap items-center gap-3">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" checked={onlyNew && contactIds.length === 0} onChange={(e) => { setOnlyNew(e.target.checked); if (e.target.checked) setContactIds([]); }} disabled={!isDraft || contactIds.length > 0} className="rounded border-border" />
-                <span className="text-sm text-foreground">{t('campaigns.onlyNew')}</span>
-              </label>
               <Button type="button" variant="outline" size="sm" onClick={() => isDraft && setPickerOpen(true)} disabled={!isDraft}>
                 <Database className="w-4 h-4 mr-1" />
                 {t('campaigns.selectFromDatabase')}
@@ -236,24 +246,10 @@ export function CampaignAudienceSchedule({
               {contactIds.length > 0 && (
                 <>
                   <span className="text-sm text-muted-foreground">{t('campaigns.contactsSelected', { count: contactIds.length })}</span>
-                  <Button type="button" variant="ghost" size="sm" onClick={() => setContactIds([])} disabled={!isDraft}>{t('campaigns.clearSelection')}</Button>
+                  <Button type="button" variant="ghost" size="sm" onClick={() => { if (isDraft) { setContactIds([]); saveAudience({ contactIds: [] }); } }} disabled={!isDraft}>{t('campaigns.clearSelection')}</Button>
                 </>
               )}
             </div>
-            <div className="flex items-center gap-4">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" id="hasTelegram" checked={hasTelegram} onChange={(e) => setHasTelegram(e.target.checked)} disabled={!isDraft} className="rounded border-border" />
-                <span className="text-sm text-foreground">{t('campaigns.filterHasTelegram')}</span>
-              </label>
-              <div className="flex items-center gap-2">
-                <label className="text-sm text-foreground">{t('campaigns.audienceLimit')}</label>
-                <input type="number" min={1} max={10000} value={limit} onChange={(e) => setLimit(parseInt(e.target.value, 10) || 1000)} disabled={!isDraft} className="w-24 px-2 py-1.5 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60" />
-              </div>
-            </div>
-            <label className="flex items-center gap-2 cursor-pointer mt-2">
-              <input type="checkbox" checked={enrichContactsBeforeStart} onChange={(e) => setEnrichContactsBeforeStart(e.target.checked)} disabled={!isDraft} className="rounded border-border" />
-              <span className="text-sm text-foreground">{t('campaigns.enrichContactsBeforeStart')}</span>
-            </label>
           </div>
         )}
 
@@ -262,20 +258,45 @@ export function CampaignAudienceSchedule({
             <input ref={csvInputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={async (e) => {
               const file = e.target.files?.[0];
               if (!file || !isDraft) return;
+              e.target.value = '';
+              setCsvError(null);
+              setCsvResult(null);
               setCsvLoading(true);
               try {
-                const content = await file.text();
+                const content = await readFileAsCsv(file);
+                if (!content || !content.trim()) {
+                  setCsvError(t('campaigns.uploadFileEmpty', { defaultValue: 'Файл пустой или не удалось прочитать.' }));
+                  return;
+                }
                 const data = await uploadAudienceFromCsv(campaignId, { content, hasHeader: true });
                 setContactIds(data.contactIds);
-                setOnlyNew(false);
-                onUpdate();
-              } catch (err) { console.error('CSV import failed', err); }
-              finally { setCsvLoading(false); e.target.value = ''; }
+                saveAudience({ contactIds: data.contactIds });
+                setCsvResult({ created: data.created, matched: data.matched });
+              } catch (err: unknown) {
+                let message = t('campaigns.uploadFileError', { defaultValue: 'Ошибка загрузки' });
+                if (err && typeof err === 'object' && 'response' in err) {
+                  const res = (err as { response?: { data?: { error?: string; message?: string }; status?: number } }).response;
+                  if (res?.data?.error) message = res.data.error;
+                  else if (res?.data?.message) message = res.data.message;
+                  else if (res?.status) message = `${message} (${res.status})`;
+                } else if (err instanceof Error) message = err.message;
+                else if (typeof err === 'string') message = err;
+                setCsvError(message);
+                console.error('CSV/Excel import failed', err);
+              } finally {
+                setCsvLoading(false);
+              }
             }} />
-            <Button type="button" variant="outline" disabled={!isDraft || csvLoading} onClick={() => csvInputRef.current?.click()}>
+            <Button type="button" variant="outline" disabled={!isDraft || csvLoading} onClick={() => { setCsvError(null); setCsvResult(null); csvInputRef.current?.click(); }}>
               <FileUp className="w-4 h-4 mr-2" />
-              {csvLoading ? '...' : t('campaigns.uploadCsv')}
+              {csvLoading ? t('campaigns.uploading', { defaultValue: 'Загрузка...' }) : t('campaigns.uploadCsv')}
             </Button>
+            {csvError && <p className="text-sm text-destructive">{csvError}</p>}
+            {csvResult && !csvError && (
+              <p className="text-sm text-foreground">
+                {t('campaigns.uploadResult', { created: csvResult.created, matched: csvResult.matched, total: csvResult.created + csvResult.matched, defaultValue: `Загружено: {{total}} контактов (новых: {{created}}, из базы: {{matched}})` })}
+              </p>
+            )}
             <p className="text-xs text-muted-foreground">{t('campaigns.uploadCsvHint')}</p>
             {contactIds.length > 0 && <p className="text-sm text-foreground">{t('campaigns.contactsSelected', { count: contactIds.length })}</p>}
           </div>
@@ -285,7 +306,7 @@ export function CampaignAudienceSchedule({
           <div className="space-y-2">
             <p className="text-sm text-muted-foreground">{t('campaigns.groupSourceHint')}</p>
             <select
-              className="w-full sm:max-w-md px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
+              className="w-full sm:max-w-md px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-ring disabled:opacity-60"
               value=""
               onChange={async (e) => {
                 const v = e.target.value;
@@ -295,8 +316,7 @@ export function CampaignAudienceSchedule({
                 try {
                   const { contactIds: ids } = await fetchGroupSourceContacts({ bdAccountId: bid, telegramChatId: tid });
                   setContactIds(ids);
-                  setOnlyNew(false);
-                  onUpdate();
+                  saveAudience({ contactIds: ids });
                 } catch (err) { console.error('Group contacts failed', err); }
                 e.target.value = '';
               }}
@@ -332,7 +352,7 @@ export function CampaignAudienceSchedule({
                   !isDraft && 'opacity-60 pointer-events-none'
                 )}
               >
-                <input type="radio" name="bdAccount" checked={bdAccountId === a.id} onChange={() => setBdAccountId(a.id)} disabled={!isDraft} className="sr-only" />
+                <input type="radio" name="bdAccount" checked={bdAccountId === a.id} onChange={() => { setBdAccountId(a.id); saveAudience({ bdAccountId: a.id }); }} disabled={!isDraft} className="sr-only" />
                 <span className="text-sm font-medium text-foreground">{a.displayName}</span>
                 <span className="text-xs text-muted-foreground">{t('campaigns.sentToday', { count: a.sentToday })}</span>
               </label>
@@ -341,6 +361,24 @@ export function CampaignAudienceSchedule({
           {agents.length > 0 && !bdAccountId && isDraft && <p className="text-xs text-muted-foreground mt-2">{t('campaigns.agentAny')}</p>}
         </section>
       )}
+
+      {/* 3. Обогащение контактов перед запуском */}
+      <section className="rounded-xl border border-border bg-card p-6">
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={enrichContactsBeforeStart}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              setEnrichContactsBeforeStart(checked);
+              saveAudience({ enrichContactsBeforeStart: checked });
+            }}
+            disabled={!isDraft}
+            className="h-4 w-4 rounded border-border text-primary focus:ring-ring"
+          />
+          <span className="text-sm font-medium text-foreground">{t('campaigns.enrichContactsBeforeStart')}</span>
+        </label>
+      </section>
 
       {/* 4. Создание лида в CRM: галочка + когда/воронка/стадия */}
       <section className="rounded-xl border border-border bg-card overflow-hidden">
@@ -363,10 +401,13 @@ export function CampaignAudienceSchedule({
                 checked={leadCreationEnabled}
                 onChange={(e) => {
                   if (e.target.checked) {
+                    const nextPipeline = leadPipelineId || (pipelines.length > 0 ? pipelines[0].id : '');
                     setLeadTrigger('on_first_send');
                     if (!leadPipelineId && pipelines.length > 0) setLeadPipelineId(pipelines[0].id);
+                    saveAudience({ leadTrigger: 'on_first_send', leadPipelineId: nextPipeline });
                   } else {
                     setLeadTrigger('');
+                    saveAudience({ leadTrigger: '', leadPipelineId: '', leadStageId: '', leadResponsibleId: '' });
                   }
                 }}
                 disabled={!isDraft}
@@ -380,11 +421,11 @@ export function CampaignAudienceSchedule({
                   <p className="text-sm font-medium text-foreground mb-2">{t('campaigns.leadCreationTrigger')}</p>
                   <div className="flex flex-wrap gap-4">
                     <label className="flex items-center gap-2 cursor-pointer">
-                      <input type="radio" name="leadTrigger" checked={leadTrigger === 'on_first_send'} onChange={() => setLeadTrigger('on_first_send')} disabled={!isDraft} className="border-border" />
+                      <input type="radio" name="leadTrigger" checked={leadTrigger === 'on_first_send'} onChange={() => { setLeadTrigger('on_first_send'); saveAudience({ leadTrigger: 'on_first_send' }); }} disabled={!isDraft} className="border-border" />
                       <span className="text-sm text-foreground">{t('campaigns.leadCreationOnFirstSend')}</span>
                     </label>
                     <label className="flex items-center gap-2 cursor-pointer">
-                      <input type="radio" name="leadTrigger" checked={leadTrigger === 'on_reply'} onChange={() => setLeadTrigger('on_reply')} disabled={!isDraft} className="border-border" />
+                      <input type="radio" name="leadTrigger" checked={leadTrigger === 'on_reply'} onChange={() => { setLeadTrigger('on_reply'); saveAudience({ leadTrigger: 'on_reply' }); }} disabled={!isDraft} className="border-border" />
                       <span className="text-sm text-foreground">{t('campaigns.leadCreationOnReply')}</span>
                     </label>
                   </div>
@@ -392,7 +433,12 @@ export function CampaignAudienceSchedule({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationPipeline')}</label>
-                    <select value={leadPipelineId} onChange={(e) => { setLeadPipelineId(e.target.value); setLeadStageId(''); }} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
+                    <select value={leadPipelineId} onChange={(e) => {
+                      const v = e.target.value;
+                      setLeadPipelineId(v);
+                      setLeadStageId('');
+                      saveAudience({ leadPipelineId: v, leadStageId: '' });
+                    }} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-ring disabled:opacity-60">
                       <option value="">{t('campaigns.leadCreationSelectPipeline')}</option>
                       {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
@@ -400,7 +446,7 @@ export function CampaignAudienceSchedule({
                   {leadPipelineId && stages.length > 0 && (
                     <div>
                       <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationStage')}</label>
-                      <select value={leadStageId} onChange={(e) => setLeadStageId(e.target.value)} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
+                      <select value={leadStageId} onChange={(e) => { const v = e.target.value; setLeadStageId(v); saveAudience({ leadStageId: v }); }} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-ring disabled:opacity-60">
                         <option value="">{t('common.optional')}</option>
                         {stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                       </select>
@@ -409,7 +455,7 @@ export function CampaignAudienceSchedule({
                   {teamMembers.length > 0 && (
                     <div className="sm:col-span-2">
                       <label className="block text-sm font-medium text-foreground mb-1">{t('campaigns.leadCreationResponsible')}</label>
-                      <select value={leadResponsibleId} onChange={(e) => setLeadResponsibleId(e.target.value)} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
+                      <select value={leadResponsibleId} onChange={(e) => { const v = e.target.value; setLeadResponsibleId(v); saveAudience({ leadResponsibleId: v }); }} disabled={!isDraft} className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-ring disabled:opacity-60">
                         <option value="">{t('common.optional')}</option>
                         {teamMembers.map((m) => (
                           <option key={m.user_id} value={m.user_id}>
@@ -426,19 +472,13 @@ export function CampaignAudienceSchedule({
         )}
       </section>
 
-      {isDraft && (
-        <Button onClick={handleSave} disabled={saving}>
-          {saving ? t('campaigns.saving') : t('common.save')}
-        </Button>
-      )}
-
       {pickerOpen && (
         <ContactPickerModal
           initialSelectedIds={contactIds}
           onAccept={(ids) => {
             setContactIds(ids);
             setPickerOpen(false);
-            if (ids.length > 0) setOnlyNew(false);
+            saveAudience({ contactIds: ids });
           }}
           onClose={() => setPickerOpen(false)}
           t={t}
@@ -531,7 +571,7 @@ function ContactPickerModal({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder={t('campaigns.searchContacts')}
-            className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
           />
           <div className="flex flex-wrap gap-2 items-center">
             <span className="text-sm text-muted-foreground">{t('campaigns.filterByKeyword')}:</span>

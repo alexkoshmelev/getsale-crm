@@ -249,6 +249,36 @@ describe('Auth Router', () => {
         role: 'owner',
       });
     });
+
+    it('returns 200 with user when valid token provided in body (e.g. websocket-service)', async () => {
+      const accessToken = signAccessToken({
+        userId: TEST_USER_ID,
+        organizationId: TEST_ORG_ID,
+        role: 'owner',
+      });
+      pool.query.mockResolvedValueOnce({
+        rows: [{
+          id: TEST_USER_ID,
+          email: 'verify@example.com',
+          organization_id: TEST_ORG_ID,
+          role: 'owner',
+        }],
+        rowCount: 1,
+      });
+
+      const res = await request(app)
+        .post('/api/auth/verify')
+        .set('content-type', 'application/json')
+        .send({ token: accessToken });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        id: TEST_USER_ID,
+        email: 'verify@example.com',
+        organizationId: TEST_ORG_ID,
+        role: 'owner',
+      });
+    });
   });
 
   describe('POST /refresh', () => {

@@ -427,22 +427,27 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     const header = hasHeader ? rows[0] : [];
     const dataRows = hasHeader ? rows.slice(1) : rows;
     const col = (name: string) => {
-      const i = header.map((h) => h.toLowerCase().replace(/\s/g, '_')).indexOf(name);
+      const n = name.toLowerCase().replace(/\s/g, '_');
+      const i = header.map((h) => (h || '').toLowerCase().replace(/\s/g, '_')).indexOf(n);
       return i >= 0 ? i : -1;
     };
-    const idxTelegram = col('telegram_id') >= 0 ? col('telegram_id') : col('telegram') >= 0 ? col('telegram') : 0;
-    const idxFirst = col('first_name') >= 0 ? col('first_name') : col('name') >= 0 ? col('name') : 1;
-    const idxLast = col('last_name') >= 0 ? col('last_name') : 2;
+    const idxTelegram = col('telegram_id') >= 0 ? col('telegram_id') : col('telegram') >= 0 ? col('telegram') : -1;
+    const idxFirst = col('first_name') >= 0 ? col('first_name') : col('name') >= 0 ? col('name') : 0;
+    const idxLast = col('last_name') >= 0 ? col('last_name') : 1;
     const idxEmail = col('email') >= 0 ? col('email') : -1;
+    const idxUsername = col('username') >= 0 ? col('username') : -1;
+    const idxPhone = col('phone') >= 0 ? col('phone') : -1;
 
     const contactIds: string[] = [];
     let created = 0, matched = 0;
     for (const row of dataRows) {
-      const telegramId = (row[idxTelegram] || '').trim().replace(/^@/, '') || null;
+      const telegramId = idxTelegram >= 0 ? (row[idxTelegram] || '').trim().replace(/^@/, '') || null : null;
       const email = idxEmail >= 0 ? (row[idxEmail] || '').trim() || null : null;
-      const firstName = (row[idxFirst] || '').trim() || 'Contact';
-      const lastName = (row[idxLast] || '').trim() || null;
-      if (!telegramId && !email) continue;
+      const username = idxUsername >= 0 ? (row[idxUsername] || '').trim().replace(/^@/, '') || null : null;
+      const firstName = (idxFirst >= 0 ? (row[idxFirst] || '').trim() : '') || 'Contact';
+      const lastName = idxLast >= 0 ? (row[idxLast] || '').trim() || null : null;
+      const phone = idxPhone >= 0 ? (row[idxPhone] || '').trim() || null : null;
+      if (!telegramId && !email && !username) continue;
       let contact: { id: string } | null = null;
       if (telegramId) {
         const r = await pool.query(
@@ -458,15 +463,22 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
         );
         contact = r.rows[0] || null;
       }
+      if (!contact && username) {
+        const r = await pool.query(
+          'SELECT id FROM contacts WHERE organization_id = $1 AND username = $2 LIMIT 1',
+          [orgId, username]
+        );
+        contact = r.rows[0] || null;
+      }
       if (contact) {
         matched++;
         contactIds.push(contact.id);
       } else {
         const newId = randomUUID();
         await pool.query(
-          `INSERT INTO contacts (id, organization_id, first_name, last_name, email, telegram_id, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-          [newId, orgId, firstName, lastName || null, email || null, telegramId || null]
+          `INSERT INTO contacts (id, organization_id, first_name, last_name, email, phone, telegram_id, username, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
+          [newId, orgId, firstName, lastName || null, email || null, phone || null, telegramId || null, username || null]
         );
         created++;
         contactIds.push(newId);

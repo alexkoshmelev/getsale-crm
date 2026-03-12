@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
-import { MessageSquare, Loader2, User } from 'lucide-react';
+import { MessageSquare, Loader2, User, Trash2 } from 'lucide-react';
 import {
   fetchCampaignParticipantRows,
   type CampaignParticipantRow,
@@ -18,6 +18,8 @@ interface CampaignParticipantsTableProps {
   campaign?: CampaignWithDetails | null;
   isActive: boolean;
   onRefresh?: () => void;
+  onRemoveContact?: (contactId: string) => void;
+  onRemoveAll?: () => void;
 }
 
 const PHASE_KEYS: Record<CampaignParticipantPhase, string> = {
@@ -32,6 +34,8 @@ export function CampaignParticipantsTable({
   campaign,
   isActive,
   onRefresh,
+  onRemoveContact,
+  onRemoveAll,
 }: CampaignParticipantsTableProps) {
   const { t } = useTranslation();
   const [participants, setParticipants] = useState<CampaignParticipantRow[]>([]);
@@ -141,15 +145,27 @@ export function CampaignParticipantsTable({
       <div className="overflow-x-auto">
         {showSelectedOnly ? (
           <>
-            <p className="px-4 py-2 text-sm text-muted-foreground border-b border-border">
-              {t('campaigns.selectedContactsDraft', { count: selectedContacts.length, defaultValue: 'Выбрано контактов: {{count}}. Они станут участниками после запуска кампании.' })}
-            </p>
+            <div className="px-4 py-2 text-sm text-muted-foreground border-b border-border flex flex-wrap items-center justify-between gap-2">
+              <p className="mb-0">
+                {t('campaigns.selectedContactsDraft', { count: selectedContacts.length, defaultValue: 'Выбрано контактов: {{count}}. Они станут участниками после запуска кампании.' })}
+              </p>
+              {onRemoveAll && selectedContacts.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onRemoveAll()}
+                  className="text-destructive hover:underline text-sm font-medium"
+                >
+                  {t('campaigns.removeAllParticipants')}
+                </button>
+              )}
+            </div>
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border bg-muted/20">
                   <th className="text-left px-4 py-3 font-medium text-foreground">{t('campaigns.lead')}</th>
                   <th className="text-left px-4 py-3 font-medium text-foreground">Username</th>
                   <th className="text-left px-4 py-3 font-medium text-foreground">Telegram ID</th>
+                  {onRemoveContact && <th className="w-12 px-4 py-3" />}
                 </tr>
               </thead>
               <tbody>
@@ -167,6 +183,18 @@ export function CampaignParticipantsTable({
                     </td>
                     <td className="px-4 py-3 text-muted-foreground">{c.username ? `@${c.username.replace(/^@/, '')}` : '—'}</td>
                     <td className="px-4 py-3 text-muted-foreground font-mono text-xs">{c.telegram_id ?? '—'}</td>
+                    {onRemoveContact && (
+                      <td className="px-4 py-3">
+                        <button
+                          type="button"
+                          onClick={() => onRemoveContact(c.id)}
+                          className="p-2 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
+                          aria-label={t('common.delete')}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

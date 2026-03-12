@@ -260,7 +260,7 @@ export function DealFormModal({
             onChange={(e) => setComments(e.target.value)}
             placeholder={t('pipeline.dealFormDescriptionPlaceholder')}
             rows={2}
-            className="w-full px-4 py-2.5 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-ring focus:border-primary outline-none resize-y text-sm"
+            className="w-full px-4 py-2.5 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-ring focus:border-primary outline-hidden resize-y text-sm"
           />
         </div>
 
@@ -276,12 +276,12 @@ export function DealFormModal({
                 value={value}
                 onChange={(e) => setValue(e.target.value)}
                 placeholder="0"
-                className="min-w-0 flex-1 px-4 py-2.5 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-ring outline-none text-sm w-0"
+                className="min-w-0 flex-1 px-4 py-2.5 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-ring outline-hidden text-sm w-0"
               />
               <select
                 value={currency}
                 onChange={(e) => setCurrency(e.target.value)}
-                className="shrink-0 w-[5.5rem] px-2 py-2.5 rounded-xl border border-border bg-background text-foreground focus:ring-2 focus:ring-ring outline-none text-sm"
+                className="shrink-0 w-[5.5rem] px-2 py-2.5 rounded-xl border border-border bg-background text-foreground focus:ring-2 focus:ring-ring outline-hidden text-sm"
               >
                 <option value="USD">USD ({getCurrencySymbol('USD')})</option>
                 <option value="RUB">RUB ({getCurrencySymbol('RUB')})</option>

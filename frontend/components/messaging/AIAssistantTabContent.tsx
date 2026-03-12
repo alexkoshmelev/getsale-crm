@@ -260,7 +260,7 @@ export function AIAssistantTabContent({
             value={assistantQuery}
             onChange={(e) => setAssistantQuery(e.target.value)}
             placeholder={t('messaging.aiChatInputPlaceholder', 'Ask the assistant...')}
-            className="w-full px-3 py-2 rounded-xl border border-border bg-background text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            className="w-full px-3 py-2 rounded-xl border border-border bg-background text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
             disabled
           />
         </div>

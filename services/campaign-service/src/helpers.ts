@@ -164,7 +164,8 @@ export async function ensureLeadInPipeline(
   }
 }
 
-export function parseCsvLine(line: string): string[] {
+/** Splits a single CSV line by the given delimiter (respects quoted fields). */
+export function parseCsvLine(line: string, delimiter: string = ','): string[] {
   const out: string[] = [];
   let cur = '';
   let inQuotes = false;
@@ -172,7 +173,7 @@ export function parseCsvLine(line: string): string[] {
     const c = line[i];
     if (c === '"') {
       inQuotes = !inQuotes;
-    } else if ((c === ',' && !inQuotes) || c === '\r') {
+    } else if ((c === delimiter && !inQuotes) || c === '\r') {
       out.push(cur.trim());
       cur = '';
     } else {
@@ -183,9 +184,18 @@ export function parseCsvLine(line: string): string[] {
   return out;
 }
 
+/** Detects CSV delimiter from first line: use semicolon if it yields more columns than comma. */
+function detectCsvDelimiter(firstLine: string): string {
+  const byComma = parseCsvLine(firstLine, ',').length;
+  const bySemicolon = parseCsvLine(firstLine, ';').length;
+  return bySemicolon > byComma ? ';' : ',';
+}
+
 export function parseCsv(content: string): string[][] {
   const lines = content.split('\n').filter((l) => l.trim());
-  return lines.map((l) => parseCsvLine(l));
+  if (lines.length === 0) return [];
+  const delimiter = detectCsvDelimiter(lines[0]);
+  return lines.map((l) => parseCsvLine(l, delimiter));
 }
 
 export function substituteVariables(

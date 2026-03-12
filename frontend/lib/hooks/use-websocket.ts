@@ -4,11 +4,31 @@ import { useAuthStore } from '@/lib/stores/auth-store';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3004';
 
+/** Same-origin URL for ws-token so cookies are sent; Next.js rewrites /api/* to gateway. */
+const WS_TOKEN_URL = typeof window !== 'undefined' ? '/api/auth/ws-token' : '';
+
 /** Delay before disconnecting on cleanup (avoids double connection in React Strict Mode) */
 const DISCONNECT_DELAY_MS = 200;
 
+async function fetchWsToken(): Promise<string | null> {
+  if (!WS_TOKEN_URL) return null;
+  try {
+    const res = await fetch(WS_TOKEN_URL, { credentials: 'include', cache: 'no-store' });
+    if (!res.ok) {
+      console.warn('[WebSocket] ws-token request failed:', res.status, res.statusText);
+      return null;
+    }
+    const data = (await res.json()) as { token?: string };
+    return data.token ?? null;
+  } catch (e) {
+    console.warn('[WebSocket] ws-token fetch error:', e);
+    return null;
+  }
+}
+
 export function useWebSocket() {
   const socketRef = useRef<Socket | null>(null);
+  const connectingRef = useRef<boolean>(false);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { user } = useAuthStore();
@@ -26,6 +46,7 @@ export function useWebSocket() {
         socketRef.current = null;
         setIsConnected(false);
       }
+      connectingRef.current = false;
       return;
     }
 
@@ -39,16 +60,97 @@ export function useWebSocket() {
     const reuseSocket = socket && (socket.connected || (socket as Socket & { connecting?: boolean }).connecting);
 
     if (!reuseSocket) {
-      socket = io(WS_URL, {
-        withCredentials: true,
-        transports: ['websocket', 'polling'],
-        reconnection: true,
-        reconnectionDelay: 1000,
-        reconnectionDelayMax: 10000,
-        reconnectionAttempts: 100,
-      });
-      socketRef.current = socket;
+      if (connectingRef.current) return;
+      let cancelled = false;
+      connectingRef.current = true;
+      (async () => {
+        const token = await fetchWsToken();
+        if (cancelled) {
+          connectingRef.current = false;
+          return;
+        }
+        if (!token) {
+          setError('Failed to get WebSocket token');
+          connectingRef.current = false;
+          return;
+        }
+        // No auto-reconnect: avoid dozens of failed attempts with same token; we reconnect manually with fresh token
+        const newSocket = io(WS_URL, {
+          auth: { token },
+          withCredentials: true,
+          transports: ['websocket', 'polling'],
+          reconnection: false,
+        });
+        if (cancelled) {
+          newSocket.disconnect();
+          connectingRef.current = false;
+          return;
+        }
+        socketRef.current = newSocket;
+        connectingRef.current = false;
+        const onConnect = () => {
+          console.log('[WebSocket] Connected');
+          setIsConnected(true);
+          setError(null);
+          if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
+          }
+        };
+        const onConnected = (data: unknown) => {
+          console.log('[WebSocket] Connection confirmed:', data);
+        };
+        const onDisconnect = (reason: string) => {
+          console.log('[WebSocket] Disconnected:', reason);
+          setIsConnected(false);
+          if (reason === 'io server disconnect') {
+            reconnectTimeoutRef.current = setTimeout(async () => {
+              const freshToken = await fetchWsToken();
+              const current = socketRef.current;
+              if (freshToken && current) {
+                (current as Socket & { auth: Record<string, unknown> }).auth = { token: freshToken };
+                current.connect();
+              }
+            }, 2000);
+          }
+        };
+        const onConnectError = (err: Error) => {
+          console.error('[WebSocket] Connection error:', err);
+          setError(err.message);
+          setIsConnected(false);
+        };
+        const onPing = () => {
+          newSocket.emit('pong');
+        };
+        const onError = (data: { message: string }) => {
+          console.error('[WebSocket] Error:', data);
+          setError(data.message);
+        };
+        newSocket.on('connect', onConnect);
+        newSocket.on('connected', onConnected);
+        newSocket.on('disconnect', onDisconnect);
+        newSocket.on('connect_error', onConnectError);
+        newSocket.on('ping', onPing);
+        newSocket.on('error', onError);
+      })();
+      return () => {
+        cancelled = true;
+        connectingRef.current = false;
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
+        }
+        disconnectTimeoutRef.current = setTimeout(() => {
+          disconnectTimeoutRef.current = null;
+          if (socketRef.current) {
+            socketRef.current.disconnect();
+            socketRef.current = null;
+          }
+          setIsConnected(false);
+        }, DISCONNECT_DELAY_MS);
+      };
     }
+
     const s: Socket = socket as Socket;
 
     const onConnect = () => {
@@ -61,7 +163,7 @@ export function useWebSocket() {
       }
     };
 
-    const onConnected = (data: any) => {
+    const onConnected = (data: unknown) => {
       console.log('[WebSocket] Connection confirmed:', data);
     };
 
@@ -161,26 +263,36 @@ export function useWebSocket() {
     }
   }, [isConnected, user?.organizationId, user?.id, subscribe]);
 
-  // При возврате на вкладку — переподключаемся, если сокет отвалился (браузер мог закрыть соединение в фоне)
+  // При возврате на вкладку — переподключаемся с новым токеном, если сокет отвалился
   useEffect(() => {
     const onVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return;
       const s = socketRef.current;
       if (!s || !user) return;
       if (s.connected) return;
-      s.connect();
+      fetchWsToken().then((token) => {
+        if (token && socketRef.current) {
+          (socketRef.current as Socket & { auth: Record<string, unknown> }).auth = { token };
+          socketRef.current.connect();
+        }
+      });
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [user]);
 
-  // Периодическая попытка переподключения при длительном отключении (на случай исчерпания попыток Socket.IO или «тихого» обрыва)
+  // Периодическая попытка переподключения с новым токеном при длительном отключении
   useEffect(() => {
     if (!user) return;
     const interval = setInterval(() => {
       const s = socketRef.current;
       if (!s || s.connected || (s as Socket & { connecting?: boolean }).connecting) return;
-      s.connect();
+      fetchWsToken().then((token) => {
+        if (token && socketRef.current) {
+          (socketRef.current as Socket & { auth: Record<string, unknown> }).auth = { token };
+          socketRef.current.connect();
+        }
+      });
     }, 60000);
     return () => clearInterval(interval);
   }, [user]);

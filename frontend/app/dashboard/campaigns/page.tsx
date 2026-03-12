@@ -56,7 +56,7 @@ export default function CampaignsPage() {
       const created = await createCampaign({ name });
       setCreateModalOpen(false);
       setNewName('');
-      window.location.href = `/dashboard/campaigns/${created.id}?tab=sequence`;
+      window.location.href = `/dashboard/campaigns/${created.id}?tab=audience`;
     } catch (e) {
       console.error('Failed to create campaign', e);
     } finally {
@@ -263,7 +263,7 @@ function CreateCampaignModal({
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder={t('campaigns.campaignNamePlaceholder')}
-          className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
           autoFocus
         />
         <div className="flex justify-end gap-2 mt-6">

@@ -266,7 +266,7 @@ export default function CRMPage() {
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
                 className={clsx(
-                  'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-t-lg -mb-px',
+                  'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-t-lg -mb-px',
                   activeTab === tab.id
                     ? 'border-primary text-primary'
                     : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
@@ -613,7 +613,7 @@ export default function CRMPage() {
           />
           <label
             htmlFor="crm-import-csv"
-            className="inline-flex items-center justify-center font-medium rounded-lg border border-border hover:bg-accent text-foreground px-4 py-2 text-sm cursor-pointer transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            className="inline-flex items-center justify-center font-medium rounded-lg border border-border hover:bg-accent text-foreground px-4 py-2 text-sm cursor-pointer transition-all duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           >
             <FileUp className="w-4 h-4 mr-2" />
             {importFileContent ? t('crm.importChangeFile') : t('crm.importSelectFile')}

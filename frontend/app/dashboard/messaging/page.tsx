@@ -366,7 +366,7 @@ export default function MessagingPage() {
                       onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); actions.handleSendMessage(); } }}
                       disabled={!canWriteFromSelectedAccount}
                       rows={1}
-                      className="w-full min-h-[40px] max-h-[120px] py-2.5 px-3 pr-10 rounded-xl resize-none border border-input bg-background text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="w-full min-h-[40px] max-h-[120px] py-2.5 px-3 pr-10 rounded-xl resize-none border border-input bg-background text-sm placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     />
                     <button onClick={() => s.setShowCommandsMenu(!s.showCommandsMenu)} className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg transition-colors ${s.showCommandsMenu ? 'bg-blue-100 text-blue-600' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}`} title={t('messaging.crmCommands')}><Bot className="w-4 h-4" /></button>
                   </div>

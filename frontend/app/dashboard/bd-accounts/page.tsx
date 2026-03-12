@@ -1034,7 +1034,7 @@ export default function BDAccountsPage() {
                               onClick={() => setChatTypeFilter(key)}
                               className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
                                 chatTypeFilter === key
-                                  ? 'bg-card text-foreground shadow-sm'
+                                  ? 'bg-card text-foreground shadow-xs'
                                   : 'text-muted-foreground hover:text-foreground'
                               }`}
                             >

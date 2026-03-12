@@ -25,7 +25,7 @@ export function SearchInput({ label, className, id: idProp, onClear, ...props }:
         id={inputId}
         className={clsx(
           'w-full pl-10 pr-4 py-2.5 rounded-lg border border-input bg-background text-foreground placeholder:text-muted-foreground',
-          'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0 focus:border-transparent',
+          'focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-0 focus:border-transparent',
           'hover:border-input/80 transition-colors duration-150',
           className
         )}

@@ -411,7 +411,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
                     className={clsx(
                       'p-2 rounded-md transition-colors',
                       themeMode === opt.value
-                        ? 'bg-primary text-primary-foreground shadow-sm'
+                        ? 'bg-primary text-primary-foreground shadow-xs'
                         : 'text-muted-foreground hover:bg-accent hover:text-foreground'
                     )}
                   >
@@ -432,7 +432,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
                   className={clsx(
                     'px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors',
                     locale === loc
-                      ? 'bg-primary text-primary-foreground shadow-sm'
+                      ? 'bg-primary text-primary-foreground shadow-xs'
                       : 'text-muted-foreground hover:bg-accent hover:text-foreground'
                   )}
                 >

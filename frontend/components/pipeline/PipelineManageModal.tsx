@@ -240,7 +240,7 @@ export function PipelineManageModal({
               <select
                 value={activePipelineId ?? ''}
                 onChange={(e) => setActivePipelineId(e.target.value || null)}
-                className="w-full px-3 py-2 rounded-xl border border-border bg-background text-foreground focus:ring-2 focus:ring-ring outline-none text-sm"
+                className="w-full px-3 py-2 rounded-xl border border-border bg-background text-foreground focus:ring-2 focus:ring-ring outline-hidden text-sm"
               >
                 <option value="">— {t('pipeline.selectPipelineToConfigureStages')}</option>
                 {pipelines.map((p) => (

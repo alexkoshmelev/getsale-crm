@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
@@ -141,7 +141,8 @@ export default function CampaignDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
   const { t } = useTranslation();
-  const id = params?.id as string;
+  const rawId = params?.id;
+  const id = (Array.isArray(rawId) ? rawId[0] : rawId) ?? '';
   const tabFromUrl = (searchParams?.get('tab') || 'overview') as Tab;
   const [tab, setTab] = useState<Tab>(
     ['overview', 'sequence', 'audience', 'participants'].includes(tabFromUrl) ? tabFromUrl : 'overview'
@@ -154,6 +155,8 @@ export default function CampaignDetailPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [showPreLaunchModal, setShowPreLaunchModal] = useState(false);
   const [pendingStartAfterModal, setPendingStartAfterModal] = useState(false);
+  const campaignRef = useRef<CampaignWithDetails | null>(null);
+  campaignRef.current = campaign ?? null;
 
   const load = async () => {
     if (!id) return;
@@ -629,7 +632,7 @@ export default function CampaignDetailPage() {
                 id="analytics-days"
                 value={analyticsDays}
                 onChange={(e) => setAnalyticsDays(Number(e.target.value))}
-                className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
               >
                 <option value={7}>{t('campaigns.periodDays', { count: 7 })}</option>
                 <option value={14}>{t('campaigns.periodDays', { count: 14 })}</option>
@@ -673,6 +676,46 @@ export default function CampaignDetailPage() {
           campaign={campaign}
           isActive={isActive}
           onRefresh={load}
+          onRemoveContact={
+            id && (campaign?.status === 'draft' || campaign?.status === 'paused')
+              ? async (contactId) => {
+                  const c = campaignRef.current;
+                  if (!c?.target_audience) return;
+                  try {
+                    const current = Array.isArray(c.target_audience.contactIds) ? c.target_audience.contactIds : [];
+                    const next = current.filter((cid) => cid !== contactId);
+                    await updateCampaign(id, {
+                      targetAudience: {
+                        ...c.target_audience,
+                        contactIds: next.length > 0 ? next : [],
+                      },
+                    });
+                    await load();
+                  } catch (e) {
+                    console.error('Failed to remove participant', e);
+                  }
+                }
+              : undefined
+          }
+          onRemoveAll={
+            id && (campaign?.status === 'draft' || campaign?.status === 'paused') && (campaign.target_audience?.contactIds?.length ?? 0) > 0
+              ? async () => {
+                  const c = campaignRef.current;
+                  if (!c?.target_audience) return;
+                  try {
+                    await updateCampaign(id, {
+                      targetAudience: {
+                        ...c.target_audience,
+                        contactIds: [],
+                      },
+                    });
+                    await load();
+                  } catch (e) {
+                    console.error('Failed to remove all participants', e);
+                  }
+                }
+              : undefined
+          }
         />
       )}
 

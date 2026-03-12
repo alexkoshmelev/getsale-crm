@@ -145,7 +145,7 @@ export default function DashboardPage() {
           const Icon = stat.icon;
           const value = values[i];
           return (
-            <Link key={stat.titleKey} href={stat.href} className="block focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-xl">
+            <Link key={stat.titleKey} href={stat.href} className="block focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-xl">
               <Card
                 className="group cursor-pointer border-l-4 border-l-primary hover:shadow-soft-md hover:-translate-y-0.5 transition-all duration-200"
               >

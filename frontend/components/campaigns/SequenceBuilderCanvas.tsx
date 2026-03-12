@@ -564,7 +564,7 @@ function StepEditModal({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={t('campaigns.stepMessage')}
-              className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
             />
           </div>
           <div>
@@ -574,7 +574,7 @@ function StepEditModal({
             <select
               value={channel}
               onChange={(e) => setChannel(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
             >
               {CHANNELS.map((ch) => (
                 <option key={ch.value} value={ch.value}>
@@ -602,7 +602,7 @@ function StepEditModal({
                       }
                       e.target.value = '';
                     }}
-                    className="flex-1 px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    className="flex-1 px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
                   >
                     <option value="">{t('campaigns.selectPreset')}</option>
                     {presets.map((p) => (
@@ -647,7 +647,7 @@ function StepEditModal({
               onChange={(e) => setContent(e.target.value)}
               placeholder={t('campaigns.templateContentPlaceholder')}
               rows={5}
-              className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+              className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring resize-y"
             />
             <div className="flex items-center gap-2 mt-2">
               <input
@@ -676,9 +676,9 @@ function StepEditModal({
               ))}
             </div>
           </div>
-          <div className="space-y-3 border border-border rounded-lg p-3 bg-muted/20">
-            <div className="text-sm font-medium text-foreground">
-              {t('campaigns.conditionsSection', { defaultValue: 'Условия отправки' })}
+          <div className="space-y-4 border border-border rounded-lg p-4 bg-muted/20">
+            <div className="text-sm font-semibold text-foreground">
+              {t('campaigns.nextMessageSection')}
             </div>
             <div className="flex items-center gap-2">
               <input
@@ -693,127 +693,129 @@ function StepEditModal({
               </label>
             </div>
             <div>
-              <div className="text-xs font-medium text-muted-foreground mb-1.5">
-                {t('campaigns.conditionsContact', { defaultValue: 'Поле контакта' })}
+              <div className="text-sm font-medium text-foreground mb-2">
+                {t('campaigns.nextMessageWhen')}
               </div>
-              {contactConditions.map((rule, idx) => (
-                <div key={idx} className="flex flex-wrap items-center gap-2 mb-2">
-                  <select
-                    value={rule.field}
-                    onChange={(e) => setContactConditions((prev) => {
-                      const next = [...prev];
-                      next[idx] = { ...next[idx]!, field: e.target.value as ContactRule['field'] };
-                      return next;
-                    })}
-                    className="px-2 py-1.5 rounded border border-border bg-background text-foreground text-sm"
-                  >
-                    {CONTACT_FIELDS.map((f) => (
-                      <option key={f.value} value={f.value}>{t(f.labelKey)}</option>
-                    ))}
-                  </select>
-                  <select
-                    value={rule.op}
-                    onChange={(e) => setContactConditions((prev) => {
-                      const next = [...prev];
-                      next[idx] = { ...next[idx]!, op: e.target.value as ContactRule['op'] };
-                      return next;
-                    })}
-                    className="px-2 py-1.5 rounded border border-border bg-background text-foreground text-sm"
-                  >
-                    {CONTACT_OPS.map((o) => (
-                      <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
-                    ))}
-                  </select>
-                  {(rule.op !== 'empty' && rule.op !== 'not_empty') && (
-                    <input
-                      type="text"
-                      value={rule.value ?? ''}
+              <div className="flex flex-col gap-2">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="triggerType"
+                    checked={triggerType === 'delay'}
+                    onChange={() => setTriggerType('delay')}
+                    className="border-border"
+                  />
+                  <span className="text-sm text-foreground">{t('campaigns.stepTriggerDelay')}</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="triggerType"
+                    checked={triggerType === 'after_reply'}
+                    onChange={() => setTriggerType('after_reply')}
+                    className="border-border"
+                  />
+                  <span className="text-sm text-foreground">{t('campaigns.stepTriggerAfterReply')}</span>
+                </label>
+              </div>
+              {triggerType === 'delay' && (
+                <>
+                  <label className="block text-sm font-medium text-foreground mt-2 mb-1.5">
+                    {t('campaigns.stepDelay')}
+                  </label>
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <span className="text-xs text-muted-foreground block mb-1">{t('campaigns.stepDelayHoursLabel')}</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={8760}
+                        value={delayHours}
+                        onChange={(e) => setDelayHours(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                        className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <span className="text-xs text-muted-foreground block mb-1">{t('campaigns.stepDelayMinutesLabel')}</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={59}
+                        value={delayMinutes}
+                        onChange={(e) => setDelayMinutes(Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)))}
+                        className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+            <details className="mt-2">
+              <summary className="text-xs font-medium text-muted-foreground cursor-pointer hover:text-foreground">
+                {t('campaigns.conditionsContactExtra')}
+              </summary>
+              <div className="mt-2 space-y-2">
+                {contactConditions.map((rule, idx) => (
+                  <div key={idx} className="flex flex-wrap items-center gap-2 mb-2">
+                    <select
+                      value={rule.field}
                       onChange={(e) => setContactConditions((prev) => {
                         const next = [...prev];
-                        next[idx] = { ...next[idx]!, value: e.target.value };
+                        next[idx] = { ...next[idx]!, field: e.target.value as ContactRule['field'] };
                         return next;
                       })}
-                      placeholder={t('campaigns.conditionValue', { defaultValue: 'Значение' })}
-                      className="flex-1 min-w-[80px] px-2 py-1.5 rounded border border-border bg-background text-foreground text-sm"
-                    />
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => setContactConditions((prev) => prev.filter((_, i) => i !== idx))}
-                    className="p-1.5 rounded border border-border hover:bg-muted text-muted-foreground"
-                    aria-label={t('common.delete')}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
-              <button
-                type="button"
-                onClick={() => setContactConditions((prev) => [...prev, { field: 'first_name', op: 'equals', value: '' }])}
-                className="flex items-center gap-1 text-sm text-primary hover:underline"
-              >
-                <Plus className="w-4 h-4" />
-                {t('campaigns.conditionAddContact', { defaultValue: 'Добавить правило по полю' })}
-              </button>
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-foreground mb-1.5">
-              {t('campaigns.stepTriggerWhen')}
-            </label>
-            <div className="flex flex-col gap-2">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="triggerType"
-                  checked={triggerType === 'delay'}
-                  onChange={() => setTriggerType('delay')}
-                  className="border-border"
-                />
-                <span className="text-sm text-foreground">{t('campaigns.stepTriggerDelay')}</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="triggerType"
-                  checked={triggerType === 'after_reply'}
-                  onChange={() => setTriggerType('after_reply')}
-                  className="border-border"
-                />
-                <span className="text-sm text-foreground">{t('campaigns.stepTriggerAfterReply')}</span>
-              </label>
-            </div>
-            {triggerType === 'delay' && (
-              <>
-                <label className="block text-sm font-medium text-foreground mt-2 mb-1.5">
-                  {t('campaigns.stepDelay')}
-                </label>
-                <div className="flex gap-2">
-                  <div className="flex-1">
-                    <span className="text-xs text-muted-foreground block mb-1">Часы</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={8760}
-                      value={delayHours}
-                      onChange={(e) => setDelayHours(Math.max(0, parseInt(e.target.value, 10) || 0))}
-                      className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
+                      className="px-2 py-1.5 rounded border border-border bg-background text-foreground text-sm"
+                    >
+                      {CONTACT_FIELDS.map((f) => (
+                        <option key={f.value} value={f.value}>{t(f.labelKey)}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={rule.op}
+                      onChange={(e) => setContactConditions((prev) => {
+                        const next = [...prev];
+                        next[idx] = { ...next[idx]!, op: e.target.value as ContactRule['op'] };
+                        return next;
+                      })}
+                      className="px-2 py-1.5 rounded border border-border bg-background text-foreground text-sm"
+                    >
+                      {CONTACT_OPS.map((o) => (
+                        <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
+                      ))}
+                    </select>
+                    {(rule.op !== 'empty' && rule.op !== 'not_empty') && (
+                      <input
+                        type="text"
+                        value={rule.value ?? ''}
+                        onChange={(e) => setContactConditions((prev) => {
+                          const next = [...prev];
+                          next[idx] = { ...next[idx]!, value: e.target.value };
+                          return next;
+                        })}
+                        placeholder={t('campaigns.conditionValue', { defaultValue: 'Значение' })}
+                        className="flex-1 min-w-[80px] px-2 py-1.5 rounded border border-border bg-background text-foreground text-sm"
+                      />
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setContactConditions((prev) => prev.filter((_, i) => i !== idx))}
+                      className="p-1.5 rounded border border-border hover:bg-muted text-muted-foreground"
+                      aria-label={t('common.delete')}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
-                  <div className="flex-1">
-                    <span className="text-xs text-muted-foreground block mb-1">Минуты</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={59}
-                      value={delayMinutes}
-                      onChange={(e) => setDelayMinutes(Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)))}
-                      className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
-                  </div>
-                </div>
-              </>
-            )}
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setContactConditions((prev) => [...prev, { field: 'first_name', op: 'equals', value: '' }])}
+                  className="flex items-center gap-1 text-sm text-primary hover:underline"
+                >
+                  <Plus className="w-4 h-4" />
+                  {t('campaigns.conditionAddContact', { defaultValue: 'Добавить правило по полю' })}
+                </button>
+              </div>
+            </details>
           </div>
           <div className="border-t border-border pt-4">
             <label className="flex items-center gap-2 text-sm font-medium text-foreground mb-1.5">

@@ -30,7 +30,7 @@ export function Pagination({ page, totalPages, onPageChange, className }: Pagina
         type="button"
         onClick={() => onPageChange(page - 1)}
         disabled={page <= 1}
-        className="p-2 rounded-lg border border-border text-foreground hover:bg-accent disabled:opacity-50 disabled:pointer-events-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        className="p-2 rounded-lg border border-border text-foreground hover:bg-accent disabled:opacity-50 disabled:pointer-events-none transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
         aria-label={t('common.prevPage')}
       >
         <ChevronLeft className="w-5 h-5" />
@@ -56,7 +56,7 @@ export function Pagination({ page, totalPages, onPageChange, className }: Pagina
         type="button"
         onClick={() => onPageChange(page + 1)}
         disabled={page >= totalPages}
-        className="p-2 rounded-lg border border-border text-foreground hover:bg-accent disabled:opacity-50 disabled:pointer-events-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        className="p-2 rounded-lg border border-border text-foreground hover:bg-accent disabled:opacity-50 disabled:pointer-events-none transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
         aria-label={t('common.nextPage')}
       >
         <ChevronRight className="w-5 h-5" />
@@ -80,7 +80,7 @@ function PageButton({
       type="button"
       onClick={() => onPageChange(page)}
       className={clsx(
-        'min-w-[2.25rem] h-9 px-3 rounded-lg text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+        'min-w-[2.25rem] h-9 px-3 rounded-lg text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
         isCurrent
           ? 'bg-primary text-primary-foreground'
           : 'border border-border text-foreground hover:bg-accent'

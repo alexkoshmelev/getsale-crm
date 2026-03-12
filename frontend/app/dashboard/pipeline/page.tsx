@@ -340,7 +340,7 @@ export default function PipelinePage() {
             <select
               value={selectedPipelineId ?? ''}
               onChange={(e) => setSelectedPipelineId(e.target.value || null)}
-              className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground min-w-[180px] shadow-sm"
+              className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground min-w-[180px] shadow-xs"
               aria-label={t('pipeline.selectPipeline')}
             >
               <option value="">{t('pipeline.selectPipeline')}</option>
@@ -353,13 +353,13 @@ export default function PipelinePage() {
             <button
               type="button"
               onClick={() => setManageModalOpen(true)}
-              className="p-2 rounded-lg border border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground shadow-sm"
+              className="p-2 rounded-lg border border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground shadow-xs"
               title={t('pipeline.managePipelines')}
             >
               <Settings className="w-4 h-4" />
             </button>
             <Link href="/dashboard/crm">
-              <Button variant="outline" className="gap-2 shadow-sm">
+              <Button variant="outline" className="gap-2 shadow-xs">
                 <Plus className="w-4 h-4" />
                 {t('pipeline.noLeadsCta', 'Контакты')}
               </Button>
@@ -419,7 +419,7 @@ export default function PipelinePage() {
         )}
       </div>
 
-      <div className="flex-1 min-h-0 rounded-xl border border-border bg-card shadow-sm overflow-hidden flex flex-col">
+      <div className="flex-1 min-h-0 rounded-xl border border-border bg-card shadow-xs overflow-hidden flex flex-col">
       {!selectedPipelineId ? (
         <div className="flex-1 flex items-center justify-center py-16 text-muted-foreground text-sm">
           {t('pipeline.selectPipeline')}

@@ -17,7 +17,7 @@ export function Input({ label, error, className, ...props }: InputProps) {
       <input
         className={clsx(
           'w-full px-3.5 py-2.5 border rounded-lg bg-background text-foreground placeholder:text-muted-foreground',
-          'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0 focus:border-transparent',
+          'focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-0 focus:border-transparent',
           'hover:border-input/80 transition-colors duration-150 border-input',
           error && 'border-destructive focus:ring-destructive/50',
           className

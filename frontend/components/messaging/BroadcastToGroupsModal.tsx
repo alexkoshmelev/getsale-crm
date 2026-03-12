@@ -95,7 +95,7 @@ export function BroadcastToGroupsModal({ accountId, accountName, onClose }: Broa
                   onChange={(e) => setText(e.target.value)}
                   placeholder={t('messaging.typeMessage', 'Введите текст...')}
                   rows={4}
-                  className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-none"
+                  className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-ring resize-none"
                 />
               </div>
               {result && (

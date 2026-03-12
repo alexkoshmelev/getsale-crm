@@ -109,7 +109,7 @@ function SignupForm() {
         <div className="mt-6 text-center">
           <p className="text-sm text-muted-foreground">
             {t('auth.hasAccount')}{' '}
-            <Link href="/auth/login" className="text-primary hover:underline font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded">
+            <Link href="/auth/login" className="text-primary hover:underline font-medium focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded">
               {t('auth.loginLink')}
             </Link>
           </p>

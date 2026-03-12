@@ -153,7 +153,7 @@ export default function AIAssistantWindow({
                   className={`max-w-[80%] rounded-2xl px-4 py-2 ${
                     message.role === 'user'
                       ? 'bg-blue-600 text-white rounded-br-md'
-                      : 'bg-white text-gray-900 rounded-bl-md shadow-sm border border-gray-200'
+                      : 'bg-white text-gray-900 rounded-bl-md shadow-xs border border-gray-200'
                   }`}
                 >
                   <div className="text-sm whitespace-pre-wrap break-words">
@@ -174,7 +174,7 @@ export default function AIAssistantWindow({
             
             {isLoading && (
               <div className="flex justify-start">
-                <div className="bg-white rounded-2xl rounded-bl-md px-4 py-2 shadow-sm border border-gray-200">
+                <div className="bg-white rounded-2xl rounded-bl-md px-4 py-2 shadow-xs border border-gray-200">
                   <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
                 </div>
               </div>

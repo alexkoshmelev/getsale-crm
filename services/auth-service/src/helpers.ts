@@ -32,6 +32,11 @@ export function signAccessToken(payload: { userId: string; organizationId: strin
   return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 }
 
+/** Short-lived token for WebSocket handshake (same secret as access, 5 min). Accepted by /api/auth/verify. */
+export function signWsToken(payload: { userId: string; organizationId: string; role: string }): string {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '5m' });
+}
+
 export function signRefreshToken(userId: string): string {
   return jwt.sign({ userId }, JWT_REFRESH_SECRET, { expiresIn: REFRESH_EXPIRES_IN });
 }

@@ -103,7 +103,7 @@ export function CompanyFormModal({ isOpen, onClose, onSuccess, edit }: CompanyFo
           <select
             value={size}
             onChange={(e) => setSize(e.target.value)}
-            className="w-full px-4 py-2.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary outline-none"
+            className="w-full px-4 py-2.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary outline-hidden"
           >
             {SIZE_OPTIONS.map((o) => (
               <option key={o.value || 'empty'} value={o.value}>{o.label}</option>
@@ -116,7 +116,7 @@ export function CompanyFormModal({ isOpen, onClose, onSuccess, edit }: CompanyFo
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             rows={3}
-            className="w-full px-4 py-2.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary outline-none resize-none"
+            className="w-full px-4 py-2.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary outline-hidden resize-none"
             placeholder="Краткое описание компании"
           />
         </div>

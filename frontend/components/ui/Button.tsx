@@ -18,7 +18,7 @@ export default function Button({
     <button
       className={clsx(
         'inline-flex items-center justify-center font-medium rounded-lg transition-all duration-150',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+        'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
         'active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none disabled:active:scale-100',
         {
           'bg-primary hover:bg-primary/90 text-primary-foreground shadow-soft': variant === 'primary',

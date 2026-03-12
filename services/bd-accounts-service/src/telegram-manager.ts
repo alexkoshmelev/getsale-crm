@@ -1,6 +1,6 @@
 // @ts-nocheck — telegram (GramJS) types are incomplete; remove when @types/telegram or package types are used
 import { TelegramClient, Api } from 'telegram';
-import { NewMessage, Raw, EditedMessage } from 'telegram/events';
+import { NewMessage, Raw } from 'telegram/events';
 import { StringSession } from 'telegram/sessions';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
@@ -1097,54 +1097,57 @@ export class TelegramManager {
         // UpdateDeleteChannelMessages may not exist in some GramJS versions
       }
 
-      // EditedMessage — редактирование сообщения
+      // Edited message — use Raw(UpdateEditMessage | UpdateEditChannelMessage); EditedMessage from telegram/events is not a constructor in some GramJS builds
       try {
-        client.addEventHandler(
-          async (event: any) => {
-            try {
-              if (!client.connected) return;
-              const message = event?.message;
-              if (!message?.id) return;
-              let channelId = '';
-              if (message.peerId) {
-                if (message.peerId instanceof Api.PeerUser) channelId = String(message.peerId.userId);
-                else if (message.peerId instanceof Api.PeerChat) channelId = String(message.peerId.chatId);
-                else if (message.peerId instanceof Api.PeerChannel) channelId = String(message.peerId.channelId);
+        const EditTypes = [Api.UpdateEditMessage, Api.UpdateEditChannelMessage].filter(Boolean);
+        if (EditTypes.length > 0) {
+          client.addEventHandler(
+            async (update: any) => {
+              try {
+                if (!client.connected) return;
+                const message = update?.message;
+                if (!message?.id) return;
+                let channelId = '';
+                if (message.peerId) {
+                  if (message.peerId instanceof Api.PeerUser) channelId = String(message.peerId.userId);
+                  else if (message.peerId instanceof Api.PeerChat) channelId = String(message.peerId.chatId);
+                  else if (message.peerId instanceof Api.PeerChannel) channelId = String(message.peerId.channelId);
+                }
+                const content = getMessageText(message) || '';
+                const res = await this.pool.query(
+                  `UPDATE messages SET content = $1, updated_at = NOW(), telegram_entities = $2, telegram_media = $3
+                   WHERE bd_account_id = $4 AND channel_id = $5 AND telegram_message_id = $6
+                   RETURNING id, organization_id`,
+                  [
+                    content,
+                    message.entities ? JSON.stringify(message.entities) : null,
+                    message.media ? JSON.stringify((message.media as any).toJSON?.() ?? message.media) : null,
+                    accountId,
+                    channelId,
+                    message.id,
+                  ]
+                );
+                if (res.rows.length > 0) {
+                  const row = res.rows[0];
+                  const ev: MessageEditedEvent = {
+                    id: randomUUID(),
+                    type: EventType.MESSAGE_EDITED,
+                    timestamp: new Date(),
+                    organizationId: row.organization_id,
+                    data: { messageId: row.id, bdAccountId: accountId, channelId, content, telegramMessageId: message.id },
+                  };
+                  await this.rabbitmq.publishEvent(ev);
+                }
+              } catch (err: any) {
+                if (err?.message?.includes('builder.resolve')) return;
+                this.log.error({ message: `EditedMessage handler error for ${accountId}`, error: err?.message });
               }
-              const content = getMessageText(message) || '';
-              const res = await this.pool.query(
-                `UPDATE messages SET content = $1, updated_at = NOW(), telegram_entities = $2, telegram_media = $3
-                 WHERE bd_account_id = $4 AND channel_id = $5 AND telegram_message_id = $6
-                 RETURNING id, organization_id`,
-                [
-                  content,
-                  message.entities ? JSON.stringify(message.entities) : null,
-                  message.media ? JSON.stringify((message.media as any).toJSON?.() ?? message.media) : null,
-                  accountId,
-                  channelId,
-                  message.id,
-                ]
-              );
-              if (res.rows.length > 0) {
-                const row = res.rows[0];
-                const ev: MessageEditedEvent = {
-                  id: randomUUID(),
-                  type: EventType.MESSAGE_EDITED,
-                  timestamp: new Date(),
-                  organizationId: row.organization_id,
-                  data: { messageId: row.id, bdAccountId: accountId, channelId, content, telegramMessageId: message.id },
-                };
-                await this.rabbitmq.publishEvent(ev);
-              }
-            } catch (err: any) {
-              if (err?.message?.includes('builder.resolve')) return;
-              this.log.error({ message: `EditedMessage handler error for ${accountId}`, error: err?.message });
-            }
-          },
-          new EditedMessage({})
-        );
+            },
+            new Raw({ types: EditTypes, func: () => true })
+          );
+        }
       } catch (err: any) {
-        this.log.warn({ message: `Could not set up EditedMessage for ${accountId}`, error: err?.message });
+        this.log.warn({ message: `Could not set up edited-message handler for ${accountId}`, error: err?.message });
       }
 
       // Telegram presence/UI updates: typing, user status, read receipt, draft — только для чатов из sync list, публикуем в RabbitMQ → WebSocket.

@@ -5,6 +5,7 @@ import {
   substituteVariables,
   delayHoursFromStep,
   parseCsvLine,
+  parseCsv,
   dateInTz,
   isWithinScheduleAt,
   type Schedule,
@@ -80,8 +81,30 @@ describe('parseCsvLine', () => {
     expect(parseCsvLine('a,b,c')).toEqual(['a', 'b', 'c']);
   });
 
+  it('splits by semicolon when given as delimiter', () => {
+    expect(parseCsvLine('a;b;c', ';')).toEqual(['a', 'b', 'c']);
+  });
+
   it('handles quoted fields', () => {
     expect(parseCsvLine('"a,b",c')).toEqual(['a,b', 'c']);
+  });
+});
+
+describe('parseCsv', () => {
+  it('auto-detects semicolon delimiter from first line', () => {
+    const content = 'First Name;Last Name;Username\nJohn;Doe;johndoe';
+    const rows = parseCsv(content);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual(['First Name', 'Last Name', 'Username']);
+    expect(rows[1]).toEqual(['John', 'Doe', 'johndoe']);
+  });
+
+  it('uses comma when comma yields more columns', () => {
+    const content = 'a,b,c\n1,2,3';
+    const rows = parseCsv(content);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual(['a', 'b', 'c']);
+    expect(rows[1]).toEqual(['1', '2', '3']);
   });
 });
 

@@ -8,7 +8,7 @@ import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, ServiceHttpClient } from '@getsale/service-core';
 import { randomUUID } from 'crypto';
 import {
-  signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken, hashRefreshToken,
+  signAccessToken, signRefreshToken, signWsToken, verifyAccessToken, verifyRefreshToken, hashRefreshToken,
 } from '../helpers';
 import {
   AUTH_COOKIE_ACCESS,
@@ -283,7 +283,10 @@ export function authRouter({ pool, rabbitmq, log, redis, pipelineClient }: Deps)
   }));
 
   router.post('/verify', asyncHandler(async (req, res) => {
-    const token = req.cookies?.[AUTH_COOKIE_ACCESS] || req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
+    const token =
+      (req.body as { token?: string } | undefined)?.token ||
+      req.cookies?.[AUTH_COOKIE_ACCESS] ||
+      req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
     if (!token) throw new AppError(400, 'Token required', ErrorCodes.BAD_REQUEST);
 
     const decoded = verifyAccessToken(token);
@@ -295,6 +298,59 @@ export function authRouter({ pool, rabbitmq, log, redis, pipelineClient }: Deps)
     const role = decoded.role ?? user.role;
 
     res.json({ id: user.id, email: user.email, organization_id: organizationId, organizationId, role });
+  }));
+
+  /** Short-lived token for WebSocket handshake (e.g. 5 min). Call with credentials; returns { token } for socket.io auth. */
+  router.get('/ws-token', asyncHandler(async (req, res) => {
+    const accessToken = req.cookies?.[AUTH_COOKIE_ACCESS] || req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
+    let payload: { userId: string; organizationId: string; role: string } | null = null;
+
+    if (accessToken) {
+      try {
+        const decoded = verifyAccessToken(accessToken);
+        const row = await pool.query('SELECT organization_id, role FROM users WHERE id = $1', [decoded.userId]);
+        if (row.rows.length > 0) {
+          const u = row.rows[0];
+          payload = {
+            userId: decoded.userId,
+            organizationId: decoded.organizationId ?? u.organization_id,
+            role: decoded.role ?? u.role ?? '',
+          };
+        }
+      } catch {
+        // access expired or invalid, try refresh
+      }
+    }
+
+    if (!payload) {
+      const refreshToken = req.cookies?.[AUTH_COOKIE_REFRESH];
+      if (!refreshToken) throw new AppError(401, 'Not authenticated', ErrorCodes.UNAUTHORIZED);
+      await checkRateLimit(redis, {
+        keyPrefix: 'auth_rate:ws_token',
+        clientId: getClientIp(req),
+        limit: REFRESH_RATE_LIMIT,
+        windowMs: REFRESH_RATE_WINDOW,
+        message: 'Too many ws-token attempts',
+      });
+      let decoded: { userId: string };
+      try {
+        decoded = verifyRefreshToken(refreshToken);
+      } catch {
+        throw new AppError(401, 'Invalid or expired refresh token', ErrorCodes.UNAUTHORIZED);
+      }
+      const tokenHash = hashRefreshToken(refreshToken);
+      const tokenCheck = await pool.query('SELECT * FROM refresh_tokens WHERE token = $1 OR token = $2', [tokenHash, refreshToken]);
+      if (tokenCheck.rows.length === 0) throw new AppError(401, 'Invalid refresh token', ErrorCodes.UNAUTHORIZED);
+      const userResult = await pool.query('SELECT id, organization_id, role FROM users WHERE id = $1', [decoded.userId]);
+      if (userResult.rows.length === 0) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
+      const u = userResult.rows[0];
+      payload = { userId: u.id, organizationId: u.organization_id, role: u.role ?? '' };
+    }
+
+    const token = signWsToken(payload);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.json({ token });
   }));
 
   router.post('/refresh', asyncHandler(async (req, res) => {

@@ -4,6 +4,8 @@ const path = require('path');
 const nextConfig = {
   output: 'standalone',
   reactStrictMode: true,
+  // Next.js 16: Turbopack is default for dev; we keep webpack for build (form-data alias). Empty config silences the warning.
+  turbopack: {},
   env: {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000',
     NEXT_PUBLIC_WS_URL: process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3004',
