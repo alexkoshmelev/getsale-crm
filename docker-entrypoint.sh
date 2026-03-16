@@ -36,19 +36,7 @@ if [ ! -d "/app/shared/types/dist" ] || [ ! -d "/app/shared/events/dist" ] || [ 
     fi
   fi
   
-  # Build utils (depends on events)
-  echo "Building @getsale/utils..."
-  if ! npm run build --workspace=shared/utils; then
-    echo "⚠️  Warning: Failed to build @getsale/utils"
-    if [ ! -d "/app/shared/utils/dist" ]; then
-      echo "❌ Error: @getsale/utils dist directory missing and build failed"
-      exit 1
-    else
-      echo "ℹ️  Using existing @getsale/utils build"
-    fi
-  fi
-
-  # Build logger (depends on nothing special)
+  # Build logger (no shared deps)
   echo "Building @getsale/logger..."
   if ! npm run build --workspace=shared/logger; then
     echo "⚠️  Warning: Failed to build @getsale/logger"
@@ -57,6 +45,18 @@ if [ ! -d "/app/shared/types/dist" ] || [ ! -d "/app/shared/events/dist" ] || [ 
       exit 1
     else
       echo "ℹ️  Using existing @getsale/logger build"
+    fi
+  fi
+
+  # Build utils (depends on events, logger)
+  echo "Building @getsale/utils..."
+  if ! npm run build --workspace=shared/utils; then
+    echo "⚠️  Warning: Failed to build @getsale/utils"
+    if [ ! -d "/app/shared/utils/dist" ]; then
+      echo "❌ Error: @getsale/utils dist directory missing and build failed"
+      exit 1
+    else
+      echo "ℹ️  Using existing @getsale/utils build"
     fi
   fi
 

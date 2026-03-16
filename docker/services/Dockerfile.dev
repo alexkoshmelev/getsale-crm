@@ -18,11 +18,11 @@ COPY ${SERVICE_PATH}/package*.json ./${SERVICE_PATH}/
 # Install all dependencies (workspaces will resolve local packages)
 RUN npm install
 
-# Build shared packages in dependency order: types -> events -> utils -> logger -> service-core
+# Build shared packages in dependency order: types -> events -> logger -> utils -> service-core
 RUN npm run build --workspace=shared/types && \
     npm run build --workspace=shared/events && \
-    npm run build --workspace=shared/utils && \
     npm run build --workspace=shared/logger && \
+    npm run build --workspace=shared/utils && \
     npm run build --workspace=shared/service-core
 
 # Copy service source code
