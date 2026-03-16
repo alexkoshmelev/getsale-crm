@@ -4797,7 +4797,11 @@ export class TelegramManager {
         this.reconnectIntervals.delete(accountId);
       }
     }
-    await this.releaseLock(accountId);
+    try {
+      await this.releaseLock(accountId);
+    } catch (error: unknown) {
+      this.log.warn({ message: `Failed to release lock for account ${accountId} (proceeding)`, error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   /**

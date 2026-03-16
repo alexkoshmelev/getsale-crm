@@ -27,6 +27,32 @@ docker/
 
 Скрипт `docker-entrypoint.sh` для dev-сервисов остаётся в корне репозитория (копируется в образ из контекста).
 
+### Порядок сборки shared-пакетов
+
+Сборка shared-воркспейсов **обязательно** выполняется в порядке зависимостей. Неверный порядок приводит к падению `tsc` (exit code 2), т.к. пакет не найдёт собранные `dist/` у зависимостей.
+
+**Канонический порядок:** `types` → `events` → `logger` → `utils` → `service-core`.
+
+| Пакет          | Зависимости (shared)   |
+|----------------|------------------------|
+| shared/types   | —                      |
+| shared/events  | types                  |
+| shared/logger  | —                      |
+| shared/utils   | events, logger         |
+| shared/service-core | events, logger, utils |
+
+Этот порядок зафиксирован в:
+- [docker/Dockerfile.service](Dockerfile.service) (prod-образы сервисов)
+- [docker/services/Dockerfile.dev](services/Dockerfile.dev) (dev-образы)
+- [docker-entrypoint.sh](../docker-entrypoint.sh) (сборка при старте dev-контейнера)
+
+Локальная проверка из корня репозитория:
+```bash
+npm run build --workspace=shared/types && npm run build --workspace=shared/events && npm run build --workspace=shared/logger && npm run build --workspace=shared/utils && npm run build --workspace=shared/service-core
+```
+
+Подробнее: [ai_docs/develop/architecture/shared-build-order.md](../ai_docs/develop/architecture/shared-build-order.md).
+
 ## Продакшн на сервере (docker-compose.server.yml)
 
 **Важно:** на сервере должен быть **актуальный** `docker-compose.server.yml` из репозитория. Образы указываются как один репозиторий с тегами: `getsale-crm:api-gateway`, `getsale-crm:auth-service` и т.д. (не `getsale-crm-api-gateway:latest`). Если на сервере старая версия compose — будет ошибка `unauthorized` при pull.

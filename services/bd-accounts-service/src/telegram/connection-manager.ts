@@ -253,7 +253,11 @@ export class ConnectionManager {
         this.reconnectIntervals.delete(accountId);
       }
     }
-    await this.releaseLock(accountId);
+    try {
+      await this.releaseLock(accountId);
+    } catch (error: unknown) {
+      this.log.warn({ message: `Failed to release lock for account ${accountId} (proceeding)`, error: getErrorMessage(error) });
+    }
   }
 
   async updateAccountStatus(accountId: string, status: string, message?: string): Promise<void> {

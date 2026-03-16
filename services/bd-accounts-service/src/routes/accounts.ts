@@ -322,6 +322,11 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager, messaging
       throw new AppError(403, 'No permission to delete account', ErrorCodes.FORBIDDEN);
     }
 
+    // Mark inactive before disconnect so reconnect logic (TIMEOUT → scheduleReconnectAll) does not re-add this account
+    await pool.query(
+      'UPDATE bd_accounts SET is_active = false WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId]
+    );
     await telegramManager.disconnectAccount(id);
 
     // S2/A1: messaging-service owns messages; orphan via internal API instead of direct UPDATE
