@@ -38,8 +38,7 @@ async function main() {
     }
     if (msg === 'TIMEOUT' || String(msg).includes('TIMEOUT')) {
       if (stack?.includes('updates.js')) {
-        telegramManager.scheduleReconnectAllAfterTimeout();
-        log.warn({ message: 'Update loop TIMEOUT (GramJS), reconnecting clients — expected under load or idle connection' });
+        log.warn({ message: 'Update loop TIMEOUT (GramJS) — per-account reconnect handled by ConnectionManager' });
       }
       return;
     }
@@ -55,8 +54,7 @@ async function main() {
     }
     if (err.message === 'TIMEOUT' || err.message?.includes?.('TIMEOUT')) {
       if (err.stack?.includes('updates.js')) {
-        telegramManager.scheduleReconnectAllAfterTimeout();
-        log.warn({ message: 'Update loop TIMEOUT (GramJS), reconnecting clients — expected under load or idle connection' });
+        log.warn({ message: 'Update loop TIMEOUT (GramJS) — per-account reconnect handled by ConnectionManager' });
       }
       return;
     }

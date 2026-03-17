@@ -92,30 +92,47 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       if (!bdAccountId) {
         return res.status(400).json({ error: 'bdAccountId is required for Telegram messages' });
       }
-      try {
-        const body: Record<string, string> = {
-          chatId: channelId,
-          text: captionOrContent,
-        };
-        if (fileBase64 && typeof fileBase64 === 'string') {
-          body.fileBase64 = fileBase64;
-          body.fileName = typeof fileName === 'string' ? fileName : 'file';
-        }
-        if (replyToTgId) {
-          body.replyToMessageId = replyToTgId;
-        }
-        const resJson = await bdAccountsClient.post<{
+      const body: Record<string, string> = {
+        chatId: channelId,
+        text: captionOrContent,
+      };
+      if (fileBase64 && typeof fileBase64 === 'string') {
+        body.fileBase64 = fileBase64;
+        body.fileName = typeof fileName === 'string' ? fileName : 'file';
+      }
+      if (replyToTgId) {
+        body.replyToMessageId = replyToTgId;
+      }
+      const doSend = () =>
+        bdAccountsClient.post<{
           messageId?: string;
           date?: number;
           telegram_media?: Record<string, unknown> | null;
           telegram_entities?: Record<string, unknown>[] | null;
-        }>(
-          `/api/bd-accounts/${bdAccountId}/send`,
-          body,
-          undefined,
-          { userId, organizationId }
-        );
+        }>(`/api/bd-accounts/${bdAccountId}/send`, body, undefined, { userId, organizationId });
 
+      let resJson: Awaited<ReturnType<typeof doSend>> | null = null;
+      let lastError: unknown = null;
+      try {
+        resJson = await doSend();
+      } catch (error: unknown) {
+        const isNotConnected =
+          error instanceof ServiceCallError &&
+          error.statusCode === 400 &&
+          /not connected|account is not connected/i.test(String(error.message));
+        if (isNotConnected) {
+          await new Promise((r) => setTimeout(r, 2500));
+          try {
+            resJson = await doSend();
+          } catch (retryErr: unknown) {
+            lastError = retryErr;
+          }
+        } else {
+          lastError = error;
+        }
+      }
+
+      if (resJson != null) {
         const tgMessageId = resJson.messageId != null ? String(resJson.messageId).trim() : null;
         const tgDate = resJson.date != null ? new Date(resJson.date * 1000) : null;
         const hasMedia = resJson.telegram_media != null && typeof resJson.telegram_media === 'object';
@@ -139,7 +156,8 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
           );
         }
         sent = true;
-      } catch (error: unknown) {
+      } else {
+        const error = lastError;
         const errMsg = error instanceof Error ? error.message : String(error);
         log.error({ message: 'Error sending Telegram message', error: errMsg });
         await pool.query('UPDATE messages SET status = $1, metadata = $2 WHERE id = $3', [
@@ -152,7 +170,6 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
         if (is413) {
           return res.status(413).json({ error: 'File too large', message: 'File too large' });
         }
-        // Propagate 4xx from bd-accounts (e.g. 400 "BD account is not connected") so clients get a proper error and circuit breaker is not tripped
         if (error instanceof ServiceCallError && error.statusCode >= 400 && error.statusCode < 500) {
           return res.status(error.statusCode).json({
             error: errMsg || 'Bad request',

@@ -214,9 +214,11 @@ export function CampaignParticipantsTable({
               <tr className="border-b border-border bg-muted/20">
                 <th className="text-left px-4 py-3 font-medium text-foreground">{t('campaigns.lead')}</th>
                 <th className="text-left px-4 py-3 font-medium text-foreground">{t('campaigns.status')}</th>
+                <th className="text-left px-4 py-3 font-medium text-foreground hidden sm:table-cell">{t('campaigns.stepShort')}</th>
                 <th className="text-left px-4 py-3 font-medium text-foreground hidden sm:table-cell">Pipeline</th>
                 <th className="text-left px-4 py-3 font-medium text-foreground hidden md:table-cell">{t('campaigns.sent')}</th>
                 <th className="text-left px-4 py-3 font-medium text-foreground hidden md:table-cell">{t('campaigns.replied')}</th>
+                <th className="text-left px-4 py-3 font-medium text-foreground hidden md:table-cell">{t('campaigns.nextSendAt')}</th>
                 <th className="w-24 px-4 py-3" />
               </tr>
             </thead>
@@ -246,9 +248,20 @@ export function CampaignParticipantsTable({
                       {t(PHASE_KEYS[p.status_phase])}
                     </span>
                   </td>
+                  <td className="px-4 py-3 text-muted-foreground text-xs hidden sm:table-cell">
+                    {typeof p.sequence_total_steps === 'number' && p.sequence_total_steps > 0
+                      ? t('campaigns.stepOfTotal', {
+                          current: (p.current_step ?? 0) + 1,
+                          total: p.sequence_total_steps,
+                        })
+                      : '—'}
+                  </td>
                   <td className="px-4 py-3 text-muted-foreground hidden sm:table-cell">{p.pipeline_stage_name ?? '—'}</td>
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell">{formatDate(p.sent_at)}</td>
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell">{formatDate(p.replied_at)}</td>
+                  <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell" title={p.next_send_at ?? undefined}>
+                    {p.next_send_at ? formatDate(p.next_send_at) : '—'}
+                  </td>
                   <td className="px-4 py-3">
                     {chatLink(p) ? (
                       <Link

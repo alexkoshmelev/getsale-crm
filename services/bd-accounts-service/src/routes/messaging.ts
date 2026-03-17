@@ -289,7 +289,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     res.json({ success: true });
   }));
 
-  // POST /:id/typing — send typing indicator
+  // POST /:id/typing — send typing indicator (no-op if account not connected, so campaign human sim does not fail)
   router.post('/:id/typing', validate(ChatIdBodySchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
@@ -297,14 +297,13 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
 
     await getAccountOr404(pool, id, organizationId, 'id');
     if (!telegramManager.isConnected(id)) {
-      throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
+      return res.json({ success: true });
     }
-
     await telegramManager.setTyping(id, String(chatId));
     res.json({ success: true });
   }));
 
-  // POST /:id/read — mark messages as read
+  // POST /:id/read — mark messages as read (no-op if account not connected, so campaign human sim does not fail)
   router.post('/:id/read', validate(ChatIdBodySchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
@@ -312,9 +311,8 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
 
     await getAccountOr404(pool, id, organizationId, 'id');
     if (!telegramManager.isConnected(id)) {
-      throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
+      return res.json({ success: true });
     }
-
     await telegramManager.markAsRead(id, String(chatId));
     res.json({ success: true });
   }));

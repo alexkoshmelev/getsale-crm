@@ -30,9 +30,11 @@ export class ConnectionManager {
   private readonly CLEANUP_INTERVAL = 60000;
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
   private readonly RECONNECT_DELAY = 5000;
-  private readonly UPDATE_KEEPALIVE_MS = 60 * 1000;
+  private readonly UPDATE_KEEPALIVE_MS = 30 * 1000;
   private reconnectAllTimeout: NodeJS.Timeout | null = null;
   private readonly RECONNECT_ALL_DEBOUNCE_MS = 12000;
+  private readonly reconnectAfterTimeoutTimeouts = new Map<string, NodeJS.Timeout>();
+  private readonly RECONNECT_AFTER_TIMEOUT_DEBOUNCE_MS = 8000;
 
   private sessionManager!: SessionManager;
   private eventHandlerSetup!: EventHandlerSetup;
@@ -178,7 +180,7 @@ export class ConnectionManager {
         const msg = getErrorMessage(err);
         if (msg === 'TIMEOUT' || msg.includes('TIMEOUT')) {
           this.log.warn({ message: 'Update loop TIMEOUT (GramJS), scheduling reconnect', accountId });
-          this.scheduleReconnectAllAfterTimeout();
+          this.scheduleReconnectAfterTimeout(accountId);
         } else {
           this.log.error({ message: 'Telegram client error', accountId, error: msg });
         }
@@ -235,6 +237,11 @@ export class ConnectionManager {
   }
 
   async disconnectAccount(accountId: string): Promise<void> {
+    const pendingReconnect = this.reconnectAfterTimeoutTimeouts.get(accountId);
+    if (pendingReconnect) {
+      clearTimeout(pendingReconnect);
+      this.reconnectAfterTimeoutTimeouts.delete(accountId);
+    }
     this.stopUpdateKeepalive(accountId);
     this.stopLockHeartbeat(accountId);
     const clientInfo = this.clients.get(accountId);
@@ -281,6 +288,49 @@ export class ConnectionManager {
   }
 
   // --- Reconnect ---
+  scheduleReconnectAfterTimeout(accountId: string): void {
+    const existing = this.reconnectAfterTimeoutTimeouts.get(accountId);
+    if (existing) {
+      clearTimeout(existing);
+      this.reconnectAfterTimeoutTimeouts.delete(accountId);
+    }
+    const timeout = setTimeout(() => {
+      this.reconnectAfterTimeoutTimeouts.delete(accountId);
+      this.reconnectOneAccountAfterTimeout(accountId).catch((err) => {
+        this.log.error({ message: 'reconnectOneAccountAfterTimeout failed', accountId, error: String(err) });
+      });
+    }, this.RECONNECT_AFTER_TIMEOUT_DEBOUNCE_MS);
+    this.reconnectAfterTimeoutTimeouts.set(accountId, timeout);
+    this.log.info({ message: 'TIMEOUT from update loop — scheduled reconnect of account in N s', accountId, debounceSec: this.RECONNECT_AFTER_TIMEOUT_DEBOUNCE_MS / 1000 });
+  }
+
+  private async reconnectOneAccountAfterTimeout(accountId: string): Promise<void> {
+    const info = this.clients.get(accountId);
+    if (!info) return;
+    try {
+      const row = await this.pool.query(
+        'SELECT organization_id, phone_number, api_id, api_hash, session_string, session_encrypted FROM bd_accounts WHERE id = $1',
+        [accountId]
+      );
+      if (row.rows.length === 0 || !row.rows[0].session_string) return;
+      const acc = row.rows[0];
+      const decApiHash = decryptIfNeeded(acc.api_hash, acc.session_encrypted) || acc.api_hash;
+      const decSession = decryptIfNeeded(acc.session_string, acc.session_encrypted) || acc.session_string;
+      await this.disconnectAccount(accountId);
+      await this.connectAccount(
+        accountId,
+        acc.organization_id || info.organizationId,
+        info.userId,
+        acc.phone_number || info.phoneNumber,
+        parseInt(acc.api_id, 10),
+        decApiHash,
+        decSession
+      );
+    } catch (err: unknown) {
+      this.log.error({ message: '[TelegramManager] Reconnect after TIMEOUT failed for account', accountId, error: getErrorMessage(err) });
+    }
+  }
+
   scheduleReconnectAllAfterTimeout(): void {
     if (this.reconnectAllTimeout != null) return;
     this.reconnectAllTimeout = setTimeout(() => {

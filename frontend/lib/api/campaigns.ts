@@ -138,6 +138,12 @@ export interface CampaignParticipantRow {
   sent_at: string | null;
   replied_at: string | null;
   shared_chat_created_at: string | null;
+  /** Current sequence step index (0-based; next message to send). */
+  current_step?: number;
+  /** When the next message in the sequence is scheduled (ISO string or null if waiting for reply). */
+  next_send_at?: string | null;
+  /** Total number of steps in the campaign sequence. */
+  sequence_total_steps?: number;
 }
 
 export interface CampaignStats {

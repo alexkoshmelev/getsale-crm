@@ -112,7 +112,15 @@ export class FileHandler {
       if (!buffer || !(buffer instanceof Buffer)) return null;
       return { buffer, mimeType: 'image/jpeg' };
     } catch (e: any) {
-      this.log.warn({ message: `downloadChatProfilePhoto ${accountId}/${chatId}`, error: e?.message });
+      const msg = e?.message ?? '';
+      const isEntityMissing =
+        typeof msg === 'string' &&
+        (msg.includes('Could not find the input entity') || msg.includes('PeerUser'));
+      if (isEntityMissing) {
+        this.log.info({ message: `downloadChatProfilePhoto ${accountId}/${chatId}`, error: msg });
+      } else {
+        this.log.warn({ message: `downloadChatProfilePhoto ${accountId}/${chatId}`, error: msg });
+      }
       return null;
     }
   }

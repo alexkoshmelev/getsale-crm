@@ -44,15 +44,33 @@ async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
   }
 
   const contactId = event.data?.contactId;
-  if (!contactId) return;
+  if (!contactId) {
+    log.info({ message: 'MESSAGE_RECEIVED skipped: no contactId', eventId: event.id });
+    return;
+  }
+
+  const bdAccountId = event.data?.bdAccountId ?? null;
+  const channelId = event.data?.channelId ?? null;
 
   const participants = await pool.query(
     `SELECT cp.id, cp.campaign_id, cp.current_step, cp.next_send_at, cp.bd_account_id, cp.channel_id
      FROM campaign_participants cp
      JOIN campaigns c ON c.id = cp.campaign_id
-     WHERE cp.contact_id = $1 AND c.status IN ('active', 'completed') AND cp.status IN ('pending', 'sent', 'completed')`,
-    [contactId]
+     WHERE cp.contact_id = $1 AND c.status IN ('active', 'completed') AND cp.status IN ('pending', 'sent', 'completed')
+     AND (($2::text IS NULL AND $3::text IS NULL) OR (cp.bd_account_id = $2 AND cp.channel_id = $3))`,
+    [contactId, bdAccountId, channelId]
   );
+
+  if (participants.rows.length === 0 && (bdAccountId || channelId)) {
+    log.info({
+      message: 'MESSAGE_RECEIVED skipped: no matching participant for chat',
+      contactId,
+      bdAccountId,
+      channelId,
+      eventId: event.id,
+    });
+    return;
+  }
 
   for (const p of participants.rows) {
     const stepsRes = await pool.query(
@@ -73,11 +91,24 @@ async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
         `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
         [nextSendAt, p.id]
       );
+      log.info({
+        message: 'Campaign participant next_send_at set after reply',
+        participantId: p.id,
+        campaignId: p.campaign_id,
+        contactId,
+        nextSendAt: nextSendAt.toISOString(),
+      });
     } else {
       await pool.query(
         `UPDATE campaign_participants SET status = 'replied', updated_at = NOW() WHERE id = $1`,
         [p.id]
       );
+      log.info({
+        message: 'Campaign participant marked replied',
+        participantId: p.id,
+        campaignId: p.campaign_id,
+        contactId,
+      });
 
       const camp = await pool.query(
         'SELECT organization_id, pipeline_id, lead_creation_settings FROM campaigns WHERE id = $1',

@@ -95,7 +95,9 @@ export async function createServiceApp(config: ServiceConfig): Promise<ServiceCo
     const secret = process.env.INTERNAL_AUTH_SECRET?.trim();
     if (!secret || secret === 'dev_internal_auth_secret') {
       throw new Error(
-        'INTERNAL_AUTH_SECRET must be set to a non-default value in production. Do not use dev_internal_auth_secret.'
+        'INTERNAL_AUTH_SECRET must be set to a non-default value in production. ' +
+          'Add to your .env (same value for API Gateway and all backend services): INTERNAL_AUTH_SECRET=<secret>. ' +
+          'Generate a secret: openssl rand -hex 32. See docs/DEPLOYMENT.md.'
       );
     }
   }

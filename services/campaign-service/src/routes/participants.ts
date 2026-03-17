@@ -223,6 +223,9 @@ export function participantsRouter({ pool, log }: Deps): Router {
          cp.bd_account_id,
          cp.channel_id,
          cp.status AS participant_status,
+         cp.current_step,
+         cp.next_send_at,
+         (SELECT COUNT(*)::int FROM campaign_sequences WHERE campaign_id = cp.campaign_id) AS sequence_total_steps,
          cp.created_at AS participant_created_at,
          cp.updated_at AS participant_updated_at,
          COALESCE(NULLIF(TRIM(c.display_name), ''), NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), ''), c.username, c.telegram_id::text) AS contact_name,
@@ -261,6 +264,9 @@ export function participantsRouter({ pool, log }: Deps): Router {
         sent_at: r.sent_at instanceof Date ? r.sent_at.toISOString() : r.sent_at,
         replied_at: r.replied_at instanceof Date ? r.replied_at.toISOString() : r.replied_at,
         shared_chat_created_at: r.shared_chat_created_at instanceof Date ? r.shared_chat_created_at.toISOString() : r.shared_chat_created_at,
+        current_step: r.current_step ?? 0,
+        next_send_at: r.next_send_at instanceof Date ? r.next_send_at.toISOString() : r.next_send_at,
+        sequence_total_steps: r.sequence_total_steps ?? 0,
       };
     });
     res.json(rows);

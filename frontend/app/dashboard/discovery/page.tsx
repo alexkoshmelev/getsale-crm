@@ -62,6 +62,7 @@ interface Campaign {
 type TabType = 'tasks' | 'new_search' | 'new_parse';
 
 const TASKS_PAGE_SIZE = 10;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export default function ContactDiscoveryPage() {
   const { t, i18n } = useTranslation();
@@ -274,21 +275,23 @@ export default function ContactDiscoveryPage() {
      if (task.type !== 'search') return;
      const groups = task.results?.groups || [];
      if (groups.length === 0) return setError(t('discovery.errors.noGroupsInTask'));
+     const bdAccountId = task.params?.bdAccountId ?? task.params?.accountId;
+     if (!bdAccountId) return setError(t('discovery.errors.noBdAccountInTask'));
      setSelectedChatsForParse(groups);
-     setParseAccountId(task.params.bdAccountId);
+     setParseAccountId(bdAccountId);
      setParseName(`Parse from: ${task.name}`);
      setResolvedSources(
        groups.map((g: any) => ({
          input: g.chatId,
-         chatId: g.chatId,
-         title: g.title || g.chatId,
+         chatId: String(g.chatId ?? ''),
+         title: g.title != null ? String(g.title) : String(g.chatId ?? ''),
          type: (g.peerType === 'channel' ? 'channel' : 'public_group') as ResolvedSource['type'],
          canGetMembers: true,
          canGetMessages: true,
        }))
      );
-     setParseResolveAccountId(task.params.bdAccountId);
-     setParseAccountIds([task.params.bdAccountId]);
+     setParseResolveAccountId(bdAccountId);
+     setParseAccountIds([bdAccountId]);
      setParseStep(2);
      setActiveTab('new_parse');
      setSelectedTask(null);
@@ -303,14 +306,28 @@ export default function ContactDiscoveryPage() {
 
   const handleParseStart = async () => {
     const valid = resolvedSources.filter((s) => !s.error && s.chatId);
-    if (valid.length === 0 || parseAccountIds.length === 0) return;
+    const accountIds = parseAccountIds.filter((id): id is string => typeof id === 'string' && UUID_REGEX.test(id));
+    if (valid.length === 0 || accountIds.length === 0) {
+      if (parseAccountIds.length > 0 && accountIds.length === 0) setError(t('discovery.errors.selectBdAccount'));
+      return;
+    }
     setParseStarting(true);
     setError(null);
     try {
       const { taskId } = await parseStart({
-        sources: valid,
+        sources: valid.map((s) => ({
+          input: String(s.input ?? s.chatId ?? ''),
+          type: s.type,
+          title: String(s.title ?? ''),
+          username: s.username != null ? String(s.username) : undefined,
+          chatId: String(s.chatId),
+          membersCount: s.membersCount,
+          linkedChatId: s.linkedChatId,
+          canGetMembers: Boolean(s.canGetMembers),
+          canGetMessages: Boolean(s.canGetMessages),
+        })),
         settings: { depth: parseDepth, excludeAdmins: parseExcludeAdmins },
-        accountIds: parseAccountIds,
+        accountIds,
         listName: parseListName.trim() || undefined,
         ...(parseCreateCampaign && parseListName.trim() ? { campaignName: parseListName.trim() } : {}),
       });
@@ -318,7 +335,11 @@ export default function ContactDiscoveryPage() {
       setParseStep(3);
       loadTasks();
     } catch (e: any) {
-      setError(e?.response?.data?.error ?? e?.message ?? t('discovery.errors.parseStartError'));
+      const data = e?.response?.data;
+      const details = Array.isArray(data?.details) ? data.details : [];
+      const firstDetail = details[0];
+      const detailMsg = firstDetail?.message ? `${firstDetail.path ? `${firstDetail.path}: ` : ''}${firstDetail.message}` : null;
+      setError(detailMsg ?? data?.error ?? e?.message ?? t('discovery.errors.parseStartError'));
     } finally {
       setParseStarting(false);
     }

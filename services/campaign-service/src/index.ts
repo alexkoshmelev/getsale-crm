@@ -12,6 +12,7 @@ async function main() {
   const ctx = await createServiceApp({
     name: 'campaign-service',
     port: parseInt(process.env.PORT || '3012', 10),
+    poolConfig: { max: 20 },
   });
   const { pool, rabbitmq, log } = ctx;
 

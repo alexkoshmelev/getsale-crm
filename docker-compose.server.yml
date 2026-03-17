@@ -165,6 +165,8 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET}
+      - BD_ACCOUNTS_SERVICE_URL=http://bd-accounts-service:3007
+      - CAMPAIGN_SERVICE_URL=http://campaign-service:3012
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -193,6 +195,8 @@ services:
     networks:
       - default
 
+  # WebSocket (Socket.IO): CORS_ORIGIN must match frontend origin. For long-lived connections,
+  # ensure Traefik entrypoint has readTimeout=0, writeTimeout=0 (or high) and idleTimeout large.
   websocket-service:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:websocket-service
     container_name: getsale-crm-websocket-service
@@ -218,6 +222,8 @@ services:
       - "traefik.http.routers.getsale-crm-ws.tls.certresolver=myresolver"
       - "traefik.http.routers.getsale-crm-ws.middlewares=security-headers"
       - "traefik.http.services.getsale-crm-ws.loadbalancer.server.port=3004"
+      # Flush WebSocket/Socket.IO frames immediately (avoids buffering and timeouts behind proxy)
+      - "traefik.http.services.getsale-crm-ws.loadbalancer.responseForwarding.flushInterval=1ms"
 
   ai-service:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:ai-service

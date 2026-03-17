@@ -1,7 +1,7 @@
 import { Pool, PoolClient } from 'pg';
 import { Logger } from '@getsale/logger';
 import { CampaignStatus } from '@getsale/types';
-import { ServiceHttpClient } from '@getsale/service-core';
+import { ServiceHttpClient, ServiceCallError } from '@getsale/service-core';
 import {
   Schedule, StepConditions,
   evaluateStepConditions, isWithinSchedule, nextSendAtWithSchedule,
@@ -152,6 +152,15 @@ async function advanceToNextStep(
   }
 }
 
+const NOT_CONNECTED_BACKOFF_MS = 15000;
+const NOT_CONNECTED_EXTRA_RETRIES = 2;
+
+function isNotConnectedError(err: unknown): boolean {
+  if (!(err instanceof ServiceCallError) || err.statusCode !== 400) return false;
+  const msg = typeof err.message === 'string' ? err.message : String(err);
+  return /not connected|account is not connected/i.test(msg);
+}
+
 async function sendMessageWithRetry(
   messagingClient: ServiceHttpClient,
   payload: { contactId: string; channelId: string; content: string; bdAccountId: string },
@@ -160,6 +169,7 @@ async function sendMessageWithRetry(
   log: Logger
 ): Promise<{ id?: string }> {
   let lastErr: unknown;
+  let notConnectedRetries = 0;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await messagingClient.post<{ id?: string }>('/api/messaging/send', {
@@ -172,6 +182,14 @@ async function sendMessageWithRetry(
       }, undefined, { userId: headers.userId, organizationId: headers.organizationId });
     } catch (err) {
       lastErr = err;
+      const isNotConnected = isNotConnectedError(err);
+      if (isNotConnected && notConnectedRetries < NOT_CONNECTED_EXTRA_RETRIES) {
+        notConnectedRetries++;
+        log.info({ message: 'Campaign send: BD account not connected, waiting for reconnect', backoffMs: NOT_CONNECTED_BACKOFF_MS, extraAttempt: notConnectedRetries });
+        await new Promise((r) => setTimeout(r, NOT_CONNECTED_BACKOFF_MS));
+        attempt -= 1;
+        continue;
+      }
       if (attempt < maxRetries) {
         const backoff = attempt * 2000;
         log.info({ message: 'Campaign send retry', attempt, backoffMs: backoff });
@@ -183,20 +201,37 @@ async function sendMessageWithRetry(
 }
 
 async function markCompletedCampaigns(pool: Pool, campaignIds: Set<string>): Promise<void> {
-  if (campaignIds.size === 0) return;
-
   const ids = Array.from(campaignIds);
-  const completed = await pool.query(
+  if (ids.length > 0) {
+    const completed = await pool.query(
+      `SELECT c.id FROM campaigns c
+       WHERE c.id = ANY($1::uuid[]) AND c.status = $2
+       AND NOT EXISTS (
+         SELECT 1 FROM campaign_participants cp
+         WHERE cp.campaign_id = c.id AND cp.status NOT IN ('completed', 'replied', 'failed')
+       )
+       AND EXISTS (SELECT 1 FROM campaign_participants cp WHERE cp.campaign_id = c.id)`,
+      [ids, CampaignStatus.ACTIVE]
+    );
+    for (const r of completed.rows) {
+      await pool.query(
+        "UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2",
+        [CampaignStatus.COMPLETED, r.id]
+      );
+    }
+  }
+  // Also mark any active campaign as completed when all participants are done (no one has pending/sent)
+  const allDone = await pool.query(
     `SELECT c.id FROM campaigns c
-     WHERE c.id = ANY($1::uuid[]) AND c.status = $2
+     WHERE c.status = $1
      AND NOT EXISTS (
        SELECT 1 FROM campaign_participants cp
        WHERE cp.campaign_id = c.id AND cp.status NOT IN ('completed', 'replied', 'failed')
      )
      AND EXISTS (SELECT 1 FROM campaign_participants cp WHERE cp.campaign_id = c.id)`,
-    [ids, CampaignStatus.ACTIVE]
+    [CampaignStatus.ACTIVE]
   );
-  for (const r of completed.rows) {
+  for (const r of allDone.rows) {
     await pool.query(
       "UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2",
       [CampaignStatus.COMPLETED, r.id]
@@ -296,8 +331,9 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
     const processedCampaignIds = new Set<string>();
 
     for (let i = 0; i < CAMPAIGN_BATCH_SIZE; i++) {
-      const client = await pool.connect();
+      let client: PoolClient | null = null;
       try {
+        client = await pool.connect();
         await client.query('BEGIN');
 
         const row = await fetchDueParticipant(client);
@@ -345,10 +381,14 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
 
         await processParticipant(client, pool, row, step, steps, meta, sentMap, deps);
       } catch (e) {
-        await client.query('ROLLBACK').catch(() => {});
-        throw e;
+        await client?.query('ROLLBACK').catch(() => {});
+        log.warn({
+          message: 'Campaign iteration error, continuing with next participant',
+          error: e instanceof Error ? e.message : String(e),
+          participantId: (e as { participantId?: string })?.participantId,
+        });
       } finally {
-        client.release();
+        client?.release();
       }
     }
 

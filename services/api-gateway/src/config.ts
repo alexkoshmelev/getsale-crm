@@ -14,7 +14,9 @@ export const INTERNAL_AUTH_SECRET = process.env.INTERNAL_AUTH_SECRET?.trim() || 
 if (process.env.NODE_ENV === 'production') {
   if (!INTERNAL_AUTH_SECRET || INTERNAL_AUTH_SECRET === 'dev_internal_auth_secret') {
     throw new Error(
-      'INTERNAL_AUTH_SECRET must be set to a non-default value in production. Do not use dev_internal_auth_secret.'
+      'INTERNAL_AUTH_SECRET must be set to a non-default value in production. ' +
+        'Add to your .env (same value for API Gateway and all backends): INTERNAL_AUTH_SECRET=<secret>. ' +
+        'Generate: openssl rand -hex 32. See docs/DEPLOYMENT.md.'
     );
   }
 }
