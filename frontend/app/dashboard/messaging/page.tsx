@@ -66,6 +66,9 @@ export default function MessagingPage() {
 
   const { convId, isLead, isLeadPanelOpen } = data;
   const canWriteFromSelectedAccount = currentUser?.role?.toLowerCase() !== 'bidi' || actions.isSelectedAccountMine === true;
+  const selectedAccountDisplayName = s.selectedAccountId && s.accounts.length > 0
+    ? (() => { const a = s.accounts.find((ac) => ac.id === s.selectedAccountId); return a ? getAccountDisplayName(a) : null; })()
+    : null;
 
   const handleContextMenuMessage = useCallback((e: React.MouseEvent, msg: Message) => {
     s.setChatContextMenu(null);
@@ -193,7 +196,14 @@ export default function MessagingPage() {
         />
       </div>
 
-      <SharedChatModal isOpen={s.createSharedChatModalOpen} onClose={() => s.setCreateSharedChatModalOpen(false)} leadContext={s.leadContext} onSuccess={(ctx) => { s.setLeadContext(ctx); s.setCreateSharedChatModalOpen(false); }} />
+      <SharedChatModal
+        isOpen={s.createSharedChatModalOpen}
+        onClose={() => s.setCreateSharedChatModalOpen(false)}
+        leadContext={s.leadContext}
+        selectedAccountId={s.selectedAccountId}
+        selectedAccountName={selectedAccountDisplayName}
+        onSuccess={(ctx) => { s.setLeadContext(ctx); s.setCreateSharedChatModalOpen(false); data.fetchChats(); }}
+      />
       <MarkDealWonModal isOpen={s.markWonModalOpen} onClose={() => s.setMarkWonModalOpen(false)} leadContext={s.leadContext} onSuccess={(ctx) => { s.setLeadContext(ctx); s.setMarkWonModalOpen(false); }} />
       <MarkDealLostModal isOpen={s.markLostModalOpen} onClose={() => s.setMarkLostModalOpen(false)} leadContext={s.leadContext} onSuccess={(ctx) => { s.setLeadContext(ctx); s.setMarkLostModalOpen(false); }} />
 

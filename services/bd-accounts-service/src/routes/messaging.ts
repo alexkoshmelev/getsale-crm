@@ -41,6 +41,7 @@ const DeleteMessageSchema = z.object({
 const CreateSharedChatSchema = z.object({
   title: z.string().min(1).max(255).trim(),
   lead_telegram_user_id: z.coerce.number().int().positive().optional().nullable(),
+  lead_username: z.string().max(128).trim().optional().nullable(),
   extra_usernames: z.array(z.string().max(128).trim()).optional(),
 });
 
@@ -223,7 +224,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   router.post('/:id/create-shared-chat', validate(CreateSharedChatSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id: accountId } = req.params;
-    const { title, lead_telegram_user_id: leadTelegramUserId, extra_usernames: extraUsernamesRaw } = req.body;
+    const { title, lead_telegram_user_id: leadTelegramUserId, lead_username: leadUsername, extra_usernames: extraUsernamesRaw } = req.body;
 
     await getAccountOr404(pool, accountId, organizationId, 'id');
     if (!telegramManager.isConnected(accountId)) {
@@ -232,21 +233,32 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
 
     const leadId = leadTelegramUserId != null ? Number(leadTelegramUserId) : undefined;
     const extraUsernames = extraUsernamesRaw ?? [];
+    const leadUser = leadUsername && String(leadUsername).trim() ? String(leadUsername).trim().replace(/^@/, '') : undefined;
+
+    log.info({
+      message: 'create-shared-chat request',
+      accountId,
+      leadTelegramUserId: leadId ?? null,
+      extraUsernamesCount: extraUsernames.length,
+    });
 
     const result = await telegramManager.createSharedChat(accountId, {
       title: title.trim().slice(0, 255),
       leadTelegramUserId: leadId && Number.isInteger(leadId) && leadId > 0 ? leadId : undefined,
+      leadUsername: leadUser,
       extraUsernames,
     });
 
-    // Добавить созданный общий чат в bd_account_sync_chats, чтобы он сразу появлялся в списке чатов аккаунта.
-    const chatIdStr = String(result.channelId ?? '').trim();
-    if (chatIdStr) {
+    // Добавить созданный общий чат в bd_account_sync_chats (с access_hash для отправки без кэша).
+    const rawId = Number(result.channelId);
+    const fullChannelId = Number.isInteger(rawId) && rawId > 0 ? String(-1000000000 - rawId) : String(result.channelId ?? '').trim();
+    const accessHash = (result as { accessHash?: string }).accessHash ?? null;
+    if (fullChannelId) {
       await pool.query(
-        `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
-         VALUES ($1, $2, $3, 'chat', false, NULL)
-         ON CONFLICT (bd_account_id, telegram_chat_id) DO UPDATE SET title = EXCLUDED.title`,
-        [accountId, chatIdStr, (result.title ?? title.trim()).slice(0, 500)]
+        `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id, access_hash)
+         VALUES ($1, $2, $3, 'chat', false, NULL, $4)
+         ON CONFLICT (bd_account_id, telegram_chat_id) DO UPDATE SET title = EXCLUDED.title, access_hash = COALESCE(EXCLUDED.access_hash, bd_account_sync_chats.access_hash)`,
+        [accountId, fullChannelId, (result.title ?? title.trim()).slice(0, 500), accessHash]
       );
     }
 

@@ -365,26 +365,46 @@ export class MessageSync {
       throw new Error(`Account ${accountId} is not connected`);
     }
 
-    let exhaustedRow = await this.pool.query(
-      'SELECT history_exhausted FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
-      [accountId, chatId]
-    );
-    if (exhaustedRow.rows.length === 0) {
+    const tryIds: string[] = [chatId];
+    const fullIdNum = Number(chatId);
+    if (!Number.isNaN(fullIdNum)) {
+      if (fullIdNum > 0) tryIds.push(String(-1000000000 - fullIdNum));
+      else if (fullIdNum < 0 && fullIdNum > -1000000000) tryIds.push(String(-1000000000 + fullIdNum));
+    }
+    let syncRow: { telegram_chat_id: string; history_exhausted?: boolean; access_hash?: string | null } | null = null;
+    for (const tid of tryIds) {
+      const r = await this.pool.query(
+        'SELECT telegram_chat_id, history_exhausted, access_hash FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+        [accountId, tid]
+      );
+      if (r.rows.length > 0) {
+        syncRow = r.rows[0] as any;
+        break;
+      }
+    }
+    if (syncRow == null) {
       await this.pool.query(
         `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
          VALUES ($1, $2, '', 'user', false, null)
          ON CONFLICT (bd_account_id, telegram_chat_id) DO NOTHING`,
         [accountId, chatId]
       );
-      exhaustedRow = await this.pool.query(
-        'SELECT history_exhausted FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
-        [accountId, chatId]
-      );
+      for (const tid of tryIds) {
+        const r = await this.pool.query(
+          'SELECT telegram_chat_id, history_exhausted, access_hash FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+          [accountId, tid]
+        );
+        if (r.rows.length > 0) {
+          syncRow = r.rows[0] as any;
+          break;
+        }
+      }
     }
-    if (exhaustedRow.rows.length === 0) {
+    if (syncRow == null) {
       return { added: 0, exhausted: true };
     }
-    if ((exhaustedRow.rows[0] as any).history_exhausted === true) {
+    const storedChatId = syncRow.telegram_chat_id;
+    if (syncRow.history_exhausted === true) {
       return { added: 0, exhausted: true };
     }
 
@@ -413,11 +433,11 @@ export class MessageSync {
     }
 
     const limit = 100;
+    const peerInput = Number.isNaN(fullIdNum) ? chatId : fullIdNum;
+    const accessHashRaw = syncRow.access_hash;
 
-    try {
-      // Use string chatId so GramJS resolves from session cache; if entity not in cache, return empty instead of 503
-      const peer = await client.getInputEntity(chatId);
-      const result = await client.invoke(
+    const doGetHistory = async (peer: any) =>
+      client.invoke(
         new Api.messages.GetHistory({
           peer,
           limit,
@@ -430,11 +450,46 @@ export class MessageSync {
         })
       );
 
+    let result: any;
+    let peer: any;
+    if (accessHashRaw != null && accessHashRaw !== '') {
+      const storedFull = Number(storedChatId);
+      const rawChannelId = Number.isNaN(storedFull) ? 0 : -1000000000 - storedFull;
+      peer = new Api.InputPeerChannel({ channelId: rawChannelId, accessHash: BigInt(accessHashRaw) });
+    } else {
+      peer = await client.getInputEntity(peerInput);
+    }
+    try {
+      result = await doGetHistory(peer);
+    } catch (firstErr: any) {
+      const msg = firstErr?.message ?? String(firstErr);
+      if (msg.includes('PEER_ID_INVALID')) {
+        try {
+          await client.getDialogs({ limit: 100 });
+          if (accessHashRaw != null && accessHashRaw !== '') {
+            const storedFull = Number(storedChatId);
+            const rawChannelId = Number.isNaN(storedFull) ? 0 : -1000000000 - storedFull;
+            peer = new Api.InputPeerChannel({ channelId: rawChannelId, accessHash: BigInt(accessHashRaw) });
+          } else {
+            peer = await client.getInputEntity(peerInput);
+          }
+          result = await doGetHistory(peer);
+        } catch (retryErr: any) {
+          this.log.warn({ message: `fetchOlderMessagesFromTelegram failed for ${accountId}/${chatId}`, error: retryErr?.message ?? String(retryErr) });
+          return { added: 0, exhausted: true };
+        }
+      } else {
+        throw firstErr;
+      }
+    }
+
+    try {
+
       const rawMessages = (result as any).messages;
       if (!Array.isArray(rawMessages)) {
         await this.pool.query(
           'UPDATE bd_account_sync_chats SET history_exhausted = true WHERE bd_account_id = $1 AND telegram_chat_id = $2',
-          [accountId, chatId]
+          [accountId, storedChatId]
         );
         return { added: 0, exhausted: true };
       }
@@ -474,7 +529,7 @@ export class MessageSync {
       if (exhausted) {
         await this.pool.query(
           'UPDATE bd_account_sync_chats SET history_exhausted = true WHERE bd_account_id = $1 AND telegram_chat_id = $2',
-          [accountId, chatId]
+          [accountId, storedChatId]
         );
       }
 

@@ -6,7 +6,7 @@ import { X, Loader2 } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
-import { createSharedChat, fetchLeadContext } from '@/lib/api/messaging';
+import { createSharedChat, fetchLeadContext, fetchLeadContextByLeadId } from '@/lib/api/messaging';
 import { reportError } from '@/lib/error-reporter';
 import type { LeadContext } from '@/app/dashboard/messaging/types';
 
@@ -14,10 +14,14 @@ interface SharedChatModalProps {
   isOpen: boolean;
   onClose: () => void;
   leadContext: LeadContext | null;
+  /** Selected BD account in UI (used when conversation has no bd_account_id). */
+  selectedAccountId?: string | null;
+  /** Display name of the selected BD account (shown in participants for clarity). */
+  selectedAccountName?: string | null;
   onSuccess: (updatedContext: LeadContext) => void;
 }
 
-export function SharedChatModal({ isOpen, onClose, leadContext, onSuccess }: SharedChatModalProps) {
+export function SharedChatModal({ isOpen, onClose, leadContext, selectedAccountId, selectedAccountName, onSuccess }: SharedChatModalProps) {
   const { t } = useTranslation();
   const [title, setTitle] = useState('');
   const [extraUsernames, setExtraUsernames] = useState<string[]>([]);
@@ -43,20 +47,34 @@ export function SharedChatModal({ isOpen, onClose, leadContext, onSuccess }: Sha
 
   const handleSubmit = async () => {
     if (!leadContext || !title.trim()) return;
+    const convId = leadContext.conversation_id ?? null;
+    const leadId = leadContext.lead_id ?? null;
+    if (!convId && !leadId) {
+      reportError(new Error('No conversation or lead to create shared chat for'), { component: 'SharedChatModal', action: 'createSharedChat' });
+      return;
+    }
+    if (!convId && leadId && !selectedAccountId && !leadContext.bd_account_id) {
+      reportError(new Error('Select a BD account to create shared chat for this lead'), { component: 'SharedChatModal', action: 'createSharedChat' });
+      return;
+    }
     setSubmitting(true);
     try {
-      await createSharedChat({
-        conversation_id: leadContext.conversation_id,
+      const result = await createSharedChat({
+        ...(convId ? { conversation_id: convId } : { lead_id: leadId, bd_account_id: selectedAccountId ?? leadContext.bd_account_id ?? undefined }),
         title: title.trim() || undefined,
         participant_usernames: extraUsernames,
+        bd_account_id: selectedAccountId ?? leadContext.bd_account_id ?? undefined,
       });
-      const updatedContext = await fetchLeadContext(leadContext.conversation_id);
-      onSuccess(updatedContext as LeadContext);
+      const updatedContext = result.conversation_id
+        ? await fetchLeadContext(result.conversation_id)
+        : (leadId ? await fetchLeadContextByLeadId(leadId) : null);
+      if (updatedContext) onSuccess(updatedContext as LeadContext);
     } catch (e: unknown) {
       const status = (e as { response?: { status?: number } })?.response?.status;
       if (status === 409) {
-        const updatedContext = await fetchLeadContext(leadContext.conversation_id);
-        onSuccess(updatedContext as LeadContext);
+        const convId2 = leadContext.conversation_id ?? (e as { response?: { data?: { conversation_id?: string } } })?.response?.data?.conversation_id;
+        const updatedContext = convId2 ? await fetchLeadContext(convId2) : (leadId ? await fetchLeadContextByLeadId(leadId) : null);
+        if (updatedContext) onSuccess(updatedContext as LeadContext);
       } else {
         reportError(e, { component: 'SharedChatModal', action: 'createSharedChat' });
       }
@@ -95,6 +113,16 @@ export function SharedChatModal({ isOpen, onClose, leadContext, onSuccess }: Sha
             {t('messaging.sharedChatParticipants', 'Участники')}
           </label>
           <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-2">
+            {selectedAccountName && (
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground shrink-0">
+                  {t('messaging.sharedChatBdParticipant', 'BD')}:
+                </span>
+                <span className="font-medium text-foreground truncate">
+                  {selectedAccountName}
+                </span>
+              </div>
+            )}
             <div className="flex items-center gap-2 text-sm">
               <span className="text-muted-foreground shrink-0">
                 {t('messaging.sharedChatLeadParticipant', 'Лид')}:

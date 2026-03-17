@@ -9,7 +9,8 @@ import { ensureConversation, MAX_FILE_SIZE_BYTES } from '../helpers';
 import type { MessagesRouterDeps } from './messages-deps';
 
 const SendMessageSchema = z.object({
-  contactId: z.string().uuid(),
+  /** Optional for group/channel chats (e.g. shared chat); required for 1-1. */
+  contactId: z.union([z.string().uuid(), z.literal(''), z.null()]).optional().nullable().transform((v) => (v === '' || v == null ? null : v)),
   channel: z.string().min(1).max(64),
   channelId: z.string().min(1).max(128),
   content: z.string().max(100_000).optional(),
@@ -40,12 +41,15 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       }
     }
 
-    const contactResult = await pool.query(
-      'SELECT id, organization_id, telegram_id, first_name, last_name, username FROM contacts WHERE id = $1 AND organization_id = $2',
-      [contactId, organizationId]
-    );
-    if (contactResult.rows.length === 0) {
-      throw new AppError(404, 'Contact not found', ErrorCodes.NOT_FOUND);
+    const contactIdOrNull = contactId ?? null;
+    if (contactIdOrNull) {
+      const contactResult = await pool.query(
+        'SELECT id, organization_id, telegram_id, first_name, last_name, username FROM contacts WHERE id = $1 AND organization_id = $2',
+        [contactIdOrNull, organizationId]
+      );
+      if (contactResult.rows.length === 0) {
+        throw new AppError(404, 'Contact not found', ErrorCodes.NOT_FOUND);
+      }
     }
 
     const captionOrContent = typeof content === 'string' ? content : '';
@@ -57,7 +61,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       bdAccountId: bdAccountId || null,
       channel,
       channelId,
-      contactId,
+      contactId: contactIdOrNull,
     });
 
     const result = await pool.query(
@@ -68,7 +72,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
         bdAccountId || null,
         channel,
         channelId,
-        contactId,
+        contactIdOrNull,
         MessageDirection.OUTBOUND,
         contentForDb,
         MessageStatus.PENDING,
@@ -200,7 +204,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       data: {
         messageId: message.id,
         channel,
-        contactId,
+        contactId: contactIdOrNull ?? undefined,
         bdAccountId,
         channelId: updatedRow ? String(updatedRow.channel_id ?? '') : undefined,
         content: updatedRow && typeof updatedRow.content === 'string' ? updatedRow.content : undefined,

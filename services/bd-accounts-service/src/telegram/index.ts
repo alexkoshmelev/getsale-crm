@@ -203,7 +203,7 @@ export class TelegramManager {
   async pushFoldersToTelegram(accountId: string) { return this.chatSync.pushFoldersToTelegram(accountId); }
   async getDialogsByFolder(accountId: string, folderId: number) { return this.chatSync.getDialogsByFolder(accountId, folderId); }
   async tryAddChatFromSelectedFolders(accountId: string, chatId: string): Promise<boolean> { return this.chatSync.tryAddChatFromSelectedFolders(accountId, chatId); }
-  async createSharedChat(accountId: string, params: { title: string; leadTelegramUserId?: number; extraUsernames?: string[] }) {
+  async createSharedChat(accountId: string, params: { title: string; leadTelegramUserId?: number; leadUsername?: string; extraUsernames?: string[] }) {
     return this.chatSync.createSharedChat(accountId, params);
   }
   async deleteMessageInTelegram(accountId: string, channelId: string, telegramMessageId: number): Promise<void> {

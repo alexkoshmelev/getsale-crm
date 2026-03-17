@@ -13,6 +13,7 @@ import {
 } from '@getsale/service-core';
 import { z } from 'zod';
 import { getLeadConversationOrThrow } from '../queries/conversation-queries';
+import { ensureConversation } from '../helpers';
 import { SYSTEM_MESSAGES } from '../system-messages';
 
 const SharedChatSettingsSchema = z.object({
@@ -21,9 +22,15 @@ const SharedChatSettingsSchema = z.object({
 });
 
 const CreateSharedChatSchema = z.object({
-  conversation_id: z.string().uuid(),
+  conversation_id: z.string().uuid().nullable().optional(),
+  lead_id: z.string().uuid().nullable().optional(),
   title: z.string().max(255).optional(),
   participant_usernames: z.array(z.string().max(255)).max(50).optional(),
+  /** BD account to use when conversation has none or when creating by lead_id. */
+  bd_account_id: z.string().uuid().optional(),
+}).refine((d) => (d.conversation_id != null && d.conversation_id !== '') || (d.lead_id != null && d.lead_id !== ''), {
+  message: 'Provide conversation_id or lead_id',
+  path: ['conversation_id'],
 });
 
 const MarkSharedChatSchema = z.object({
@@ -83,24 +90,81 @@ export function sharedChatsRouter({ pool, log, bdAccountsClient, conflicts409Tot
 
   router.post('/create-shared-chat', validate(CreateSharedChatSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
-    const { conversation_id: conversationId, title: titleOverride, participant_usernames: participantUsernamesOverride } = req.body ?? {};
-    const conv = await getLeadConversationOrThrow<{
-      id: string; bd_account_id: string | null; channel_id: string; contact_id: string | null;
-      shared_chat_created_at: Date | null;
-    }>(pool, conversationId, organizationId, 'id, bd_account_id, channel_id, contact_id, shared_chat_created_at');
-    const contactName = conv.contact_id
-      ? (await pool.query(
-          `SELECT COALESCE(NULLIF(TRIM(display_name), ''), NULLIF(TRIM(CONCAT(COALESCE(first_name,''), ' ', COALESCE(last_name,''))), ''), username, telegram_id::text) AS contact_name FROM contacts WHERE id = $1 AND organization_id = $2`,
-          [conv.contact_id, organizationId]
-        )).rows[0]?.contact_name ?? null
-      : null;
+    const { conversation_id: bodyConversationId, lead_id: bodyLeadId, title: titleOverride, participant_usernames: participantUsernamesOverride, bd_account_id: requestBdAccountId } = req.body ?? {};
+    let conversationId: string;
+    let conv: { id: string; bd_account_id: string | null; channel_id: string; contact_id: string | null; shared_chat_created_at: Date | null };
+
+    if (bodyConversationId && String(bodyConversationId).trim()) {
+      conversationId = String(bodyConversationId).trim();
+      conv = await getLeadConversationOrThrow<typeof conv>(pool, conversationId, organizationId, 'id, bd_account_id, channel_id, contact_id, shared_chat_created_at');
+    } else if (bodyLeadId && String(bodyLeadId).trim() && requestBdAccountId) {
+      const leadId = String(bodyLeadId).trim();
+      const leadRow = await pool.query(
+        `SELECT l.contact_id, c2.telegram_id FROM leads l
+         JOIN contacts c2 ON c2.id = l.contact_id AND c2.organization_id = l.organization_id
+         WHERE l.id = $1 AND l.organization_id = $2`,
+        [leadId, organizationId]
+      );
+      if (leadRow.rows.length === 0) {
+        throw new AppError(404, 'Lead not found', ErrorCodes.NOT_FOUND);
+      }
+      const contactId = (leadRow.rows[0] as { contact_id: string }).contact_id;
+      const telegramId = (leadRow.rows[0] as { telegram_id: string | number | null }).telegram_id;
+      if (contactId == null || telegramId == null) {
+        throw new AppError(400, 'Lead contact has no Telegram id', ErrorCodes.BAD_REQUEST);
+      }
+      const channelId = String(telegramId);
+      await ensureConversation(pool, {
+        organizationId,
+        bdAccountId: requestBdAccountId,
+        channel: 'telegram',
+        channelId,
+        contactId,
+      });
+      const convRow = await pool.query(
+        `SELECT id, bd_account_id, channel_id, contact_id, shared_chat_created_at
+         FROM conversations WHERE organization_id = $1 AND bd_account_id = $2 AND channel = 'telegram' AND channel_id = $3`,
+        [organizationId, requestBdAccountId, channelId]
+      );
+      if (convRow.rows.length === 0) {
+        throw new AppError(500, 'Conversation not created', ErrorCodes.INTERNAL_ERROR);
+      }
+      conv = convRow.rows[0] as typeof conv;
+      conversationId = conv.id;
+    } else {
+      throw new AppError(400, 'Provide conversation_id or (lead_id and bd_account_id)', ErrorCodes.VALIDATION);
+    }
+    let contactName: string | null = null;
+    let leadUsername: string | null = null;
+    if (conv.contact_id) {
+      const contactRow = await pool.query(
+        `SELECT COALESCE(NULLIF(TRIM(display_name), ''), NULLIF(TRIM(CONCAT(COALESCE(first_name,''), ' ', COALESCE(last_name,''))), ''), username, telegram_id::text) AS contact_name, username AS contact_username FROM contacts WHERE id = $1 AND organization_id = $2`,
+        [conv.contact_id, organizationId]
+      );
+      const row = contactRow.rows[0] as { contact_name?: string; contact_username?: string | null } | undefined;
+      contactName = row?.contact_name ?? null;
+      leadUsername = row?.contact_username && String(row.contact_username).trim() ? String(row.contact_username).trim().replace(/^@/, '') : null;
+    }
     if (conv.shared_chat_created_at != null) {
       conflicts409Total.inc({ endpoint: 'create-shared-chat' });
       log.warn({ message: 'conflict_409 create-shared-chat already created', correlation_id: req.correlationId, endpoint: 'POST /create-shared-chat', conversationId, event: 'conflict_409' });
       throw new AppError(409, 'Shared chat already created for this conversation', ErrorCodes.CONFLICT);
     }
-    if (!conv.bd_account_id) {
-      throw new AppError(400, 'Conversation has no BD account', ErrorCodes.BAD_REQUEST);
+
+    let effectiveBdAccountId: string;
+    if (conv.bd_account_id) {
+      effectiveBdAccountId = conv.bd_account_id;
+    } else if (requestBdAccountId) {
+      const accountRow = await pool.query(
+        `SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2`,
+        [requestBdAccountId, organizationId]
+      );
+      if (accountRow.rows.length === 0) {
+        throw new AppError(400, 'BD account not found or not in organization', ErrorCodes.BAD_REQUEST);
+      }
+      effectiveBdAccountId = requestBdAccountId;
+    } else {
+      throw new AppError(400, 'Conversation has no BD account. Pass bd_account_id (e.g. selected account).', ErrorCodes.BAD_REQUEST);
     }
 
     let title: string;
@@ -128,19 +192,27 @@ export function sharedChatsRouter({ pool, log, bdAccountsClient, conflicts409Tot
       extraUsernames = Array.isArray(v?.extraUsernames) ? v.extraUsernames.filter((u: unknown) => typeof u === 'string').map((u: string) => String(u).trim().replace(/^@/, '')) : [];
     }
 
-    const leadTelegramUserId = conv.channel_id ? parseInt(conv.channel_id, 10) : undefined;
-    if (!leadTelegramUserId || !Number.isInteger(leadTelegramUserId)) {
-      throw new AppError(400, 'Lead Telegram user id (channel_id) is missing or invalid', ErrorCodes.BAD_REQUEST);
+    // For DMs, channel_id is the Telegram user id (positive). Do not treat negative/zero as valid user id.
+    const parsedLeadId = conv.channel_id ? parseInt(conv.channel_id, 10) : NaN;
+    const leadTelegramUserId =
+      Number.isInteger(parsedLeadId) && parsedLeadId > 0 ? parsedLeadId : undefined;
+    if (leadTelegramUserId == null && !leadUsername) {
+      throw new AppError(
+        400,
+        'Lead Telegram user id (channel_id) is missing or invalid, or provide contact username',
+        ErrorCodes.BAD_REQUEST
+      );
     }
 
     const externalCallStart = Date.now();
     let created: { channelId?: string; title?: string; inviteLink?: string | null };
     try {
       created = await bdAccountsClient.post<{ channelId?: string; title?: string; inviteLink?: string | null }>(
-        `/api/bd-accounts/${conv.bd_account_id}/create-shared-chat`,
+        `/api/bd-accounts/${effectiveBdAccountId}/create-shared-chat`,
         {
           title,
-          lead_telegram_user_id: leadTelegramUserId,
+          lead_telegram_user_id: leadTelegramUserId ?? undefined,
+          lead_username: leadUsername ?? undefined,
           extra_usernames: extraUsernames,
         },
         undefined,
@@ -164,7 +236,7 @@ export function sharedChatsRouter({ pool, log, bdAccountsClient, conflicts409Tot
     const externalCallMs = Date.now() - externalCallStart;
     externalCallDuration.observe({ target: 'bd-accounts' }, externalCallMs / 1000);
     if (externalCallMs > 5000) {
-      log.warn({ message: 'create-shared-chat slow external call', correlation_id: req.correlationId, endpoint: 'POST /create-shared-chat', durationMs: externalCallMs, conversationId, bdAccountId: conv.bd_account_id, event: 'slow_external_call' });
+      log.warn({ message: 'create-shared-chat slow external call', correlation_id: req.correlationId, endpoint: 'POST /create-shared-chat', durationMs: externalCallMs, conversationId, bdAccountId: effectiveBdAccountId, event: 'slow_external_call' });
     }
 
     const channelIdRaw = created.channelId;
@@ -187,7 +259,7 @@ export function sharedChatsRouter({ pool, log, bdAccountsClient, conflicts409Tot
          VALUES ($1, $2, 'telegram', $3, $4, $5, $6, $7, false, $8)`,
         [
           organizationId,
-          conv.bd_account_id,
+          effectiveBdAccountId,
           conv.channel_id,
           conv.contact_id,
           MessageDirection.OUTBOUND,

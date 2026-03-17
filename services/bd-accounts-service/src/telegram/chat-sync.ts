@@ -1460,16 +1460,35 @@ export class ChatSync {
     return true;
   }
 
+  /** Resolve @username to InputUser via contacts.ResolveUsername (reliable for inviting to channel). */
+  private async resolveUsernameToInputUser(client: TelegramClient, username: string): Promise<Api.InputUser | null> {
+    const u = (username ?? '').trim().replace(/^@/, '');
+    if (!u) return null;
+    try {
+      const result = await client.invoke(
+        new Api.contacts.ResolveUsername({ username: u })
+      ) as { users?: Array<{ id?: bigint; accessHash?: bigint; className?: string }> };
+      const users = result?.users ?? [];
+      const user = users.find((x) => x?.className === 'User' || (x as any)?._ === 'user') as Api.User | undefined;
+      if (user?.id != null) {
+        return new Api.InputUser({ userId: user.id, accessHash: user.accessHash ?? BigInt(0) });
+      }
+    } catch (e: unknown) {
+      this.log.warn('[ChatSync] createSharedChat: could not resolve username', u, getErrorMessage(e));
+    }
+    return null;
+  }
+
   async createSharedChat(
     accountId: string,
-    params: { title: string; leadTelegramUserId?: number; extraUsernames?: string[] }
+    params: { title: string; leadTelegramUserId?: number; leadUsername?: string; extraUsernames?: string[] }
   ): Promise<{ channelId: string; title: string; inviteLink?: string }> {
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo?.isConnected || !clientInfo.client) {
       throw new Error('BD account not connected');
     }
     const client = clientInfo.client;
-    const { title, leadTelegramUserId, extraUsernames = [] } = params;
+    const { title, leadTelegramUserId, leadUsername, extraUsernames = [] } = params;
 
     const updates = await client.invoke(
       new Api.channels.CreateChannel({
@@ -1495,30 +1514,131 @@ export class ChatSync {
     }
 
     const inputUsers: Api.InputUser[] = [];
-    if (leadTelegramUserId != null && leadTelegramUserId > 0) {
+    const seenIds = new Set<string>();
+
+    // Resolve lead: try username first (does not depend on cache), then by id, then from dialogs
+    let leadAdded = false;
+    if (leadUsername) {
+      const inputUser = await this.resolveUsernameToInputUser(client, leadUsername);
+      if (inputUser && !seenIds.has(String((inputUser as any).userId))) {
+        seenIds.add(String((inputUser as any).userId));
+        inputUsers.push(inputUser);
+        leadAdded = true;
+      }
+    }
+    if (!leadAdded && leadTelegramUserId != null && leadTelegramUserId > 0) {
       try {
         const peer = await client.getInputEntity(leadTelegramUserId);
         const entity = await client.getEntity(peer);
         if (entity && ((entity as any).className === 'User' || (entity as any)._ === 'user')) {
           const u = entity as Api.User;
-          inputUsers.push(new Api.InputUser({ userId: u.id, accessHash: u.accessHash ?? BigInt(0) }));
+          const key = String(u.id);
+          if (!seenIds.has(key)) {
+            seenIds.add(key);
+            inputUsers.push(new Api.InputUser({ userId: u.id, accessHash: u.accessHash ?? BigInt(0) }));
+            leadAdded = true;
+          }
         }
       } catch (e: unknown) {
-        this.log.warn('[ChatSync] createSharedChat: could not resolve lead user', leadTelegramUserId, getErrorMessage(e));
+        this.log.warn({ message: 'createSharedChat: could not resolve lead by id', accountId, leadTelegramUserId, error: getErrorMessage(e) });
       }
     }
-    for (const username of extraUsernames) {
-      const u = (username ?? '').trim().replace(/^@/, '');
-      if (!u) continue;
+    // Fallback: find lead in contacts (does not require entity cache)
+    if (!leadAdded && leadTelegramUserId != null && leadTelegramUserId > 0) {
       try {
-        const entity = await client.getEntity(u);
-        if (entity && ((entity as any).className === 'User' || (entity as any)._ === 'user')) {
-          const user = entity as Api.User;
-          inputUsers.push(new Api.InputUser({ userId: user.id, accessHash: user.accessHash ?? BigInt(0) }));
+        const contactsResult = await client.invoke(
+          new Api.contacts.GetContacts({ hash: BigInt(0) })
+        ) as { users?: Array<{ id?: number | bigint; accessHash?: bigint; className?: string }> };
+        const users = contactsResult?.users ?? [];
+        const leadIdStr = String(leadTelegramUserId);
+        const contactUser = users.find(
+          (x) => x && (x.className === 'User' || (x as any)?._ === 'user') && String(x.id) === leadIdStr
+        ) as Api.User | undefined;
+        if (contactUser?.id != null) {
+          const key = String(contactUser.id);
+          if (!seenIds.has(key)) {
+            seenIds.add(key);
+            inputUsers.push(new Api.InputUser({ userId: contactUser.id, accessHash: contactUser.accessHash ?? BigInt(0) }));
+            leadAdded = true;
+            this.log.info({ message: 'createSharedChat: lead resolved from contacts', accountId, leadTelegramUserId });
+          }
         }
       } catch (e: unknown) {
-        this.log.warn('[ChatSync] createSharedChat: could not resolve username', u, getErrorMessage(e));
+        this.log.warn({ message: 'createSharedChat: contacts fallback failed', accountId, leadTelegramUserId, error: getErrorMessage(e) });
       }
+    }
+    if (!leadAdded && leadTelegramUserId != null && leadTelegramUserId > 0) {
+      try {
+        const leadIdStr = String(leadTelegramUserId);
+        const folders = [0, 1] as const;
+        let dialogsChecked = 0;
+        for (const folderId of folders) {
+          let dialogs: any[];
+          try {
+            dialogs = await client.getDialogs({ limit: 250, folderId });
+          } catch (folderErr) {
+            this.log.warn({ message: 'createSharedChat: getDialogs failed for folder', accountId, folderId, error: getErrorMessage(folderErr) });
+            continue;
+          }
+          dialogsChecked += dialogs.length;
+          for (const d of dialogs) {
+            const ent = (d as any).entity;
+            const dialogIdRaw = (d as any).id;
+            const dialogUserId =
+              typeof dialogIdRaw === 'object' && dialogIdRaw != null
+                ? (dialogIdRaw.userId ?? dialogIdRaw.user_id ?? (dialogIdRaw as any).userId)
+                : dialogIdRaw;
+            const entIdStr = ent != null ? String((ent as any).id ?? (ent as any).userId ?? '') : '';
+            const entityIsUser = ent && ((ent as any).className === 'User' || (ent as any)._ === 'user');
+            const idMatches =
+              entityIsUser &&
+              (entIdStr === leadIdStr || String(dialogUserId) === leadIdStr);
+            if (idMatches) {
+              const u = ent as Api.User;
+              const key = String(u.id);
+              if (!seenIds.has(key)) {
+                seenIds.add(key);
+                inputUsers.push(new Api.InputUser({ userId: u.id, accessHash: u.accessHash ?? BigInt(0) }));
+                this.log.info({ message: 'createSharedChat: lead resolved from dialogs', accountId, leadTelegramUserId, folderId });
+                leadAdded = true;
+                break;
+              }
+            }
+          }
+          if (leadAdded) break;
+        }
+        if (!leadAdded) {
+          this.log.warn({
+            message: 'createSharedChat: lead not found in dialogs',
+            accountId,
+            leadTelegramUserId,
+            dialogsChecked,
+          });
+        }
+      } catch (e: unknown) {
+        this.log.warn({ message: 'createSharedChat: dialogs fallback failed', accountId, leadTelegramUserId, error: getErrorMessage(e) });
+      }
+    }
+
+    for (const username of extraUsernames) {
+      const inputUser = await this.resolveUsernameToInputUser(client, username);
+      if (inputUser && !seenIds.has(String((inputUser as any).userId))) {
+        seenIds.add(String((inputUser as any).userId));
+        inputUsers.push(inputUser);
+      }
+    }
+
+    if (inputUsers.length === 0) {
+      this.log.warn({
+        message: 'createSharedChat: no participants resolved',
+        accountId,
+        leadTelegramUserId: leadTelegramUserId ?? null,
+        leadUsername: leadUsername ?? null,
+        extraUsernamesCount: extraUsernames.length,
+      });
+      throw new Error(
+        'Could not resolve any participant to invite. Add contact @username or ensure the lead is in this account\'s Telegram dialogs.'
+      );
     }
 
     if (inputUsers.length > 0) {
@@ -1526,10 +1646,10 @@ export class ChatSync {
       await client.invoke(new Api.channels.InviteToChannel({ channel: inputChannel, users: inputUsers }));
     }
 
+    // Используем InputPeerChannel напрямую: getInputEntity только что созданного канала может дать PEER_ID_INVALID.
     let inviteLink: string | undefined;
     try {
-      const fullChannelId = -1000000000 - Number(channelId);
-      const peer = await client.getInputEntity(fullChannelId);
+      const peer = new Api.InputPeerChannel({ channelId, accessHash });
       const exported = await client.invoke(
         new Api.messages.ExportChatInvite({
           peer,
@@ -1543,7 +1663,7 @@ export class ChatSync {
       this.log.warn({ message: "createSharedChat: could not export invite link", error: getErrorMessage(e) });
     }
 
-    return { channelId: String(channelId), title, inviteLink };
+    return { channelId: String(channelId), title, inviteLink, accessHash: accessHash != null ? String(accessHash) : undefined };
   }
 
   async deleteMessageInTelegram(accountId: string, channelId: string, telegramMessageId: number): Promise<void> {

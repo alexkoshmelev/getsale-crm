@@ -52,6 +52,36 @@ export class FileHandler {
     return { buffer, mimeType };
   }
 
+  /** Numeric peer ids (e.g. -1000012345) must be passed as number to avoid PEER_ID_INVALID. */
+  private peerInput(chatId: string): number | string {
+    const n = Number(chatId);
+    return Number.isNaN(n) ? chatId : n;
+  }
+
+  /** Use InputPeerChannel from sync_chats when access_hash present (e.g. newly created shared chat). Supports full/raw/-raw chatId. */
+  private async resolvePeer(accountId: string, chatId: string): Promise<Api.TypeInputPeer | number | string> {
+    const fullId = Number(chatId);
+    const tryIds: string[] = [chatId];
+    if (!Number.isNaN(fullId)) {
+      if (fullId > 0) tryIds.push(String(-1000000000 - fullId));
+      else if (fullId < 0 && fullId > -1000000000) tryIds.push(String(-1000000000 + fullId));
+    }
+    for (const tid of tryIds) {
+      const r = await this.pool.query(
+        'SELECT telegram_chat_id, access_hash FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+        [accountId, tid]
+      );
+      const row = r.rows[0] as { telegram_chat_id?: string; access_hash?: string | null } | undefined;
+      const accessHashRaw = row?.access_hash;
+      if (accessHashRaw != null && accessHashRaw !== '' && row?.telegram_chat_id != null) {
+        const storedFull = Number(row.telegram_chat_id);
+        const rawChannelId = Number.isNaN(storedFull) ? 0 : -1000000000 - storedFull;
+        return new Api.InputPeerChannel({ channelId: rawChannelId, accessHash: BigInt(accessHashRaw) });
+      }
+    }
+    return this.peerInput(chatId);
+  }
+
   async sendFile(
     accountId: string,
     chatId: string,
@@ -67,7 +97,8 @@ export class FileHandler {
         name: opts.filename || 'file',
       });
       const client = clientInfo.client as any;
-      const message = await client.sendFile(chatId, {
+      const peer = await this.resolvePeer(accountId, chatId);
+      const message = await client.sendFile(peer, {
         file,
         caption: opts.caption || '',
         ...(opts.replyTo != null ? { replyTo: opts.replyTo } : {}),

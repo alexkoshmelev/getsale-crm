@@ -68,9 +68,14 @@ export async function fetchLeadContext(conversationId: string): Promise<LeadCont
 // Shared Chats
 
 export interface CreateSharedChatParams {
-  conversation_id: string;
+  /** When opening from a chat with conversation — pass this. */
+  conversation_id?: string | null;
+  /** When lead has no conversation yet (e.g. opened by lead_id) — pass lead_id and bd_account_id. */
+  lead_id?: string | null;
   title?: string;
   participant_usernames?: string[];
+  /** BD account to use when conversation has none or when creating by lead_id. */
+  bd_account_id?: string;
 }
 
 export interface SharedChatResult {

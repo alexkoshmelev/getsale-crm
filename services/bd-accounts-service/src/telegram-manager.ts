@@ -154,6 +154,9 @@ export class TelegramManager {
   /** Debounce: reconnect all clients after TIMEOUT from update loop (restart loops) */
   private reconnectAllTimeout: NodeJS.Timeout | null = null;
   private readonly RECONNECT_ALL_DEBOUNCE_MS = 12000; // 12 sec — не чаще раза в 12 сек
+  /** Per-account debounce: reconnect only the account that hit TIMEOUT (avoid killing other accounts' long requests) */
+  private reconnectOneAfterTimeoutTimeouts: Map<string, NodeJS.Timeout> = new Map();
+  private readonly RECONNECT_ONE_DEBOUNCE_MS = 8000;
 
   private cleanupInterval: NodeJS.Timeout | null = null;
   private readonly CLEANUP_INTERVAL = 60000; // 1 minute
@@ -795,11 +798,12 @@ export class TelegramManager {
       await client.connect();
       this.log.info({ message: `Connected account ${accountId} (${phoneNumber})` });
 
-      // Catch GramJS update-loop errors (e.g. TIMEOUT) so they don't become unhandledRejection
+      // Catch GramJS update-loop errors (e.g. TIMEOUT) so they don't become unhandledRejection.
+      // Reconnect only this account — otherwise reconnect-all would disconnect others mid-request (e.g. GetDialogs).
       (client as any)._errorHandler = async (err: any) => {
         if (err?.message === 'TIMEOUT' || err?.message?.includes?.('TIMEOUT')) {
           this.log.warn({ message: 'Update loop TIMEOUT (GramJS), scheduling reconnect', accountId });
-          this.scheduleReconnectAllAfterTimeout();
+          this.scheduleReconnectOneAfterTimeout(accountId);
         } else {
           this.log.error({ message: 'Telegram client error', accountId, error: err?.message || String(err) });
         }
@@ -4246,11 +4250,11 @@ export class TelegramManager {
       await client.invoke(new Api.channels.InviteToChannel({ channel: inputChannel, users: inputUsers }));
     }
 
-    // Получить инвайт-ссылку (формат t.me/+XXX), она работает; t.me/c/ID для супергрупп часто не открывается
+    // Получить инвайт-ссылку (формат t.me/+XXX). Используем InputPeerChannel напрямую:
+    // getInputEntity только что созданного канала может дать PEER_ID_INVALID (канал ещё не в кэше).
     let inviteLink: string | undefined;
     try {
-      const fullChannelId = -1000000000 - Number(channelId);
-      const peer = await client.getInputEntity(fullChannelId);
+      const peer = new Api.InputPeerChannel({ channelId, accessHash });
       const exported = await client.invoke(
         new Api.messages.ExportChatInvite({
           peer,
@@ -4264,7 +4268,7 @@ export class TelegramManager {
       this.log.warn({ message: "createSharedChat: could not export invite link", error: e?.message });
     }
 
-    return { channelId: String(channelId), title, inviteLink };
+    return { channelId: String(channelId), title, inviteLink, accessHash: accessHash != null ? String(accessHash) : undefined };
   }
 
   /**
@@ -4381,27 +4385,46 @@ export class TelegramManager {
       throw new Error(`Account ${accountId} is not connected`);
     }
 
-    let exhaustedRow = await this.pool.query(
-      'SELECT history_exhausted FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
-      [accountId, chatId]
-    );
-    if (exhaustedRow.rows.length === 0) {
-      // Чат мог попасть в UI из папки без полного sync — добавляем в sync_chats и пробуем загрузить
+    const tryIds: string[] = [chatId];
+    const fullIdNum = Number(chatId);
+    if (!Number.isNaN(fullIdNum)) {
+      if (fullIdNum > 0) tryIds.push(String(-1000000000 - fullIdNum));
+      else if (fullIdNum < 0 && fullIdNum > -1000000000) tryIds.push(String(-1000000000 + fullIdNum));
+    }
+    let syncRow: { telegram_chat_id: string; history_exhausted?: boolean; access_hash?: string | null } | null = null;
+    for (const tid of tryIds) {
+      const r = await this.pool.query(
+        'SELECT telegram_chat_id, history_exhausted, access_hash FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+        [accountId, tid]
+      );
+      if (r.rows.length > 0) {
+        syncRow = r.rows[0] as any;
+        break;
+      }
+    }
+    if (syncRow == null) {
       await this.pool.query(
         `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
          VALUES ($1, $2, '', 'user', false, null)
          ON CONFLICT (bd_account_id, telegram_chat_id) DO NOTHING`,
         [accountId, chatId]
       );
-      exhaustedRow = await this.pool.query(
-        'SELECT history_exhausted FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
-        [accountId, chatId]
-      );
+      for (const tid of tryIds) {
+        const r = await this.pool.query(
+          'SELECT telegram_chat_id, history_exhausted, access_hash FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+          [accountId, tid]
+        );
+        if (r.rows.length > 0) {
+          syncRow = r.rows[0] as any;
+          break;
+        }
+      }
     }
-    if (exhaustedRow.rows.length === 0) {
+    if (syncRow == null) {
       return { added: 0, exhausted: true };
     }
-    if ((exhaustedRow.rows[0] as any).history_exhausted === true) {
+    const storedChatId = syncRow.telegram_chat_id;
+    if (syncRow.history_exhausted === true) {
       return { added: 0, exhausted: true };
     }
 
@@ -4414,9 +4437,16 @@ export class TelegramManager {
     );
 
     const client = clientInfo.client;
-    const peerIdNum = Number(chatId);
-    const peerInput = Number.isNaN(peerIdNum) ? chatId : peerIdNum;
-    const peer = await client.getInputEntity(peerInput);
+    let peer: any;
+    const accessHashRaw = syncRow.access_hash;
+    if (accessHashRaw != null && accessHashRaw !== '') {
+      const storedFull = Number(storedChatId);
+      const rawChannelId = Number.isNaN(storedFull) ? 0 : -1000000000 - storedFull;
+      peer = new Api.InputPeerChannel({ channelId: rawChannelId, accessHash: BigInt(accessHashRaw) });
+    } else {
+      const peerInput = Number.isNaN(fullIdNum) ? chatId : fullIdNum;
+      peer = await client.getInputEntity(peerInput);
+    }
 
     let offsetId = 0;
     let offsetDate = 0;
@@ -4433,13 +4463,12 @@ export class TelegramManager {
       }
     }
 
-    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const limit = 100;
 
-    try {
-      const result = await client.invoke(
+    const doGetHistory = async (p: any) =>
+      client.invoke(
         new Api.messages.GetHistory({
-          peer,
+          peer: p,
           limit,
           offsetId,
           offsetDate,
@@ -4450,11 +4479,37 @@ export class TelegramManager {
         })
       );
 
+    let result: any;
+    try {
+      result = await doGetHistory(peer);
+    } catch (firstErr: any) {
+      const msg = firstErr?.message ?? '';
+      if (msg.includes('PEER_ID_INVALID')) {
+        try {
+          await client.getDialogs({ limit: 100 });
+          if (accessHashRaw != null && accessHashRaw !== '') {
+            const storedFull = Number(storedChatId);
+            const rawChannelId = Number.isNaN(storedFull) ? 0 : -1000000000 - storedFull;
+            peer = new Api.InputPeerChannel({ channelId: rawChannelId, accessHash: BigInt(accessHashRaw) });
+          } else {
+            peer = await client.getInputEntity(Number.isNaN(fullIdNum) ? chatId : fullIdNum);
+          }
+          result = await doGetHistory(peer);
+        } catch (retryErr: any) {
+          this.log.warn({ message: `fetchOlderMessagesFromTelegram failed for ${accountId}/${chatId}`, error: retryErr?.message });
+          return { added: 0, exhausted: true };
+        }
+      } else {
+        throw firstErr;
+      }
+    }
+
+    try {
       const rawMessages = (result as any).messages;
       if (!Array.isArray(rawMessages)) {
         await this.pool.query(
           'UPDATE bd_account_sync_chats SET history_exhausted = true WHERE bd_account_id = $1 AND telegram_chat_id = $2',
-          [accountId, chatId]
+          [accountId, storedChatId]
         );
         return { added: 0, exhausted: true };
       }
@@ -4490,7 +4545,7 @@ export class TelegramManager {
       if (exhausted) {
         await this.pool.query(
           'UPDATE bd_account_sync_chats SET history_exhausted = true WHERE bd_account_id = $1 AND telegram_chat_id = $2',
-          [accountId, chatId]
+          [accountId, storedChatId]
         );
       }
 
@@ -4900,6 +4955,52 @@ export class TelegramManager {
   }
 
   /**
+   * Schedule reconnect of only the account that hit TIMEOUT (debounced).
+   * Prevents one account's update-loop TIMEOUT from disconnecting others (e.g. during long GetDialogs).
+   */
+  scheduleReconnectOneAfterTimeout(accountId: string): void {
+    const existing = this.reconnectOneAfterTimeoutTimeouts.get(accountId);
+    if (existing != null) {
+      clearTimeout(existing);
+    }
+    const timeout = setTimeout(() => {
+      this.reconnectOneAfterTimeoutTimeouts.delete(accountId);
+      this.reconnectOneClientAfterTimeout(accountId).catch((err) => {
+        this.log.error({ message: 'reconnectOneClientAfterTimeout failed', accountId, error: String(err) });
+      });
+    }, this.RECONNECT_ONE_DEBOUNCE_MS);
+    this.reconnectOneAfterTimeoutTimeouts.set(accountId, timeout);
+    this.log.info({ message: 'TIMEOUT from update loop — scheduled reconnect of account in N s', accountId, debounceSec: this.RECONNECT_ONE_DEBOUNCE_MS / 1000 });
+  }
+
+  private async reconnectOneClientAfterTimeout(accountId: string): Promise<void> {
+    const info = this.clients.get(accountId);
+    if (!info) return;
+    try {
+      const row = await this.pool.query(
+        `SELECT id, organization_id, phone_number, api_id, api_hash, session_string, session_encrypted FROM bd_accounts WHERE id = $1 AND is_active = true`,
+        [accountId]
+      ).then((r: any) => r.rows[0]);
+      if (!row) return;
+      await this.disconnectAccount(accountId);
+      const apiHash = decryptIfNeeded(row.api_hash, row.session_encrypted) || row.api_hash;
+      const sessionStr = decryptIfNeeded(row.session_string, row.session_encrypted) || row.session_string;
+      await this.connectAccount(
+        row.id,
+        row.organization_id,
+        row.organization_id,
+        row.phone_number,
+        parseInt(row.api_id),
+        apiHash,
+        sessionStr
+      );
+      this.log.info({ message: 'Reconnected account after TIMEOUT', accountId });
+    } catch (err) {
+      this.log.error({ message: 'Failed to reconnect account after TIMEOUT', accountId, error: String(err) });
+    }
+  }
+
+  /**
    * Schedule reconnect of all clients after TIMEOUT from update loop (debounced).
    * Call from process unhandledRejection when reason.message === 'TIMEOUT'.
    */
@@ -5191,6 +5292,12 @@ export class TelegramManager {
    * Cleanup on shutdown
    */
   async shutdown(): Promise<void> {
+    if (this.reconnectAllTimeout != null) {
+      clearTimeout(this.reconnectAllTimeout);
+      this.reconnectAllTimeout = null;
+    }
+    for (const t of this.reconnectOneAfterTimeoutTimeouts.values()) clearTimeout(t);
+    this.reconnectOneAfterTimeoutTimeouts.clear();
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
