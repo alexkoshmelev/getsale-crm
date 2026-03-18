@@ -1460,6 +1460,23 @@ export class ChatSync {
     return true;
   }
 
+  /** User id from GramJS dialog.id (number, PeerUser, or object with userId). */
+  private static dialogIdToUserIdStr(dialogIdRaw: unknown): string | null {
+    if (dialogIdRaw == null) return null;
+    if (typeof dialogIdRaw === 'object') {
+      const o = dialogIdRaw as Record<string, unknown>;
+      const cn = (o as { className?: string; _?: string }).className ?? (o as { _?: string })._;
+      if (cn === 'PeerUser' || cn === 'peerUser') {
+        const uid = o.userId ?? o.user_id;
+        if (uid != null) return String(uid);
+      }
+      const uid = o.userId ?? o.user_id;
+      if (uid != null) return String(uid);
+    }
+    if (typeof dialogIdRaw === 'bigint' || typeof dialogIdRaw === 'number') return String(dialogIdRaw);
+    return String(dialogIdRaw).trim() || null;
+  }
+
   /** Resolve @username to InputUser via contacts.ResolveUsername (reliable for inviting to channel). */
   private async resolveUsernameToInputUser(client: TelegramClient, username: string): Promise<Api.InputUser | null> {
     const u = (username ?? '').trim().replace(/^@/, '');
@@ -1575,7 +1592,7 @@ export class ChatSync {
         for (const folderId of folders) {
           let dialogs: any[];
           try {
-            dialogs = await client.getDialogs({ limit: 250, folderId });
+            dialogs = await client.getDialogs({ limit: 500, folderId });
           } catch (folderErr) {
             this.log.warn({ message: 'createSharedChat: getDialogs failed for folder', accountId, folderId, error: getErrorMessage(folderErr) });
             continue;
@@ -1584,15 +1601,14 @@ export class ChatSync {
           for (const d of dialogs) {
             const ent = (d as any).entity;
             const dialogIdRaw = (d as any).id;
-            const dialogUserId =
-              typeof dialogIdRaw === 'object' && dialogIdRaw != null
-                ? (dialogIdRaw.userId ?? dialogIdRaw.user_id ?? (dialogIdRaw as any).userId)
-                : dialogIdRaw;
+            const dialogUserIdStr = ChatSync.dialogIdToUserIdStr(dialogIdRaw);
             const entIdStr = ent != null ? String((ent as any).id ?? (ent as any).userId ?? '') : '';
             const entityIsUser = ent && ((ent as any).className === 'User' || (ent as any)._ === 'user');
             const idMatches =
               entityIsUser &&
-              (entIdStr === leadIdStr || String(dialogUserId) === leadIdStr);
+              (entIdStr === leadIdStr ||
+                dialogUserIdStr === leadIdStr ||
+                (dialogUserIdStr != null && String(Number(dialogUserIdStr)) === leadIdStr));
             if (idMatches) {
               const u = ent as Api.User;
               const key = String(u.id);
@@ -1641,9 +1657,40 @@ export class ChatSync {
       );
     }
 
-    if (inputUsers.length > 0) {
-      const inputChannel = new Api.InputChannel({ channelId, accessHash });
-      await client.invoke(new Api.channels.InviteToChannel({ channel: inputChannel, users: inputUsers }));
+    const inputChannel = new Api.InputChannel({ channelId, accessHash });
+    const inviteDelayMs = 300;
+    for (let i = 0; i < inputUsers.length; i++) {
+      const user = inputUsers[i];
+      try {
+        await client.invoke(new Api.channels.InviteToChannel({ channel: inputChannel, users: [user] }));
+      } catch (e: unknown) {
+        const code = getErrorCode(e);
+        const msg = getErrorMessage(e);
+        const knownInviteErrors = [
+          'USER_PRIVACY_RESTRICTED',
+          'USER_NOT_MUTUAL_CONTACT',
+          'USER_KICKED',
+          'CHAT_MEMBER_ADD_FAILED',
+          'USER_CHANNELS_TOO_MUCH',
+          'USER_BOT',
+          'USER_ID_INVALID',
+          'INPUT_USER_DEACTIVATED',
+          'USER_BLOCKED',
+          'USER_BANNED_IN_CHANNEL',
+        ];
+        const isKnown = knownInviteErrors.some((c) => code === c || (typeof msg === 'string' && msg.includes(c)));
+        this.log.warn({
+          message: 'createSharedChat: InviteToChannel failed for one participant',
+          accountId,
+          userId: (user as any).userId?.toString?.() ?? 'unknown',
+          errorCode: code ?? null,
+          error: msg,
+          knownInviteError: isKnown,
+        });
+      }
+      if (i < inputUsers.length - 1 && inviteDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, inviteDelayMs));
+      }
     }
 
     // Используем InputPeerChannel напрямую: getInputEntity только что созданного канала может дать PEER_ID_INVALID.

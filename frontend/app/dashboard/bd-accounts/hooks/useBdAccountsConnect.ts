@@ -6,6 +6,17 @@ import { apiClient } from '@/lib/api/client';
 import { reportError } from '@/lib/error-reporter';
 import type { FolderWithDialogs, SyncChatRow } from '../types';
 
+/** Timeout for dialogs-by-folders?refresh=1 (many chats + flood wait can take 3–5+ min) */
+const DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS = 300000; // 5 min
+
+function getDialogsLoadErrorMessage(e: unknown): string {
+  const err = e as { code?: string; response?: { data?: { error?: string } } };
+  if (err?.code === 'ECONNABORTED') {
+    return 'Загрузка заняла слишком много времени. Нажмите «Повторить».';
+  }
+  return err?.response?.data?.error || 'Ошибка загрузки';
+}
+
 export type ConnectStep = 'credentials' | 'qr' | 'code' | 'password' | 'select-chats';
 
 export interface UseBdAccountsConnectOptions {
@@ -93,7 +104,7 @@ export function useBdAccountsConnect({
     setLoadingDialogs(true);
     router.replace('/dashboard/bd-accounts');
     Promise.all([
-      apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders?refresh=1`, { timeout: 120000 }).then((res) => (res.data?.folders ?? []) as FolderWithDialogs[]),
+      apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders?refresh=1`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS }).then((res) => (res.data?.folders ?? []) as FolderWithDialogs[]),
       apiClient.get(`/api/bd-accounts/${accountId}/sync-chats`).then((res) => (Array.isArray(res.data) ? res.data : []) as SyncChatRow[]),
     ])
       .then(([folders, syncList]) => {
@@ -107,7 +118,7 @@ export function useBdAccountsConnect({
         setDialogsByFolders([]);
         setSyncChatsList([]);
         setSelectedChatIds(new Set());
-        setError(e?.response?.data?.error || 'Ошибка загрузки');
+        setError(getDialogsLoadErrorMessage(e));
       })
       .finally(() => setLoadingDialogs(false));
   }, [searchParams, router]);
@@ -225,7 +236,7 @@ export function useBdAccountsConnect({
       setLoadingDialogs(true);
       try {
         const [foldersRes, syncRes] = await Promise.all([
-          apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?refresh=1`, { timeout: 120000 }),
+          apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?refresh=1`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS }),
           apiClient.get(`/api/bd-accounts/${connectingAccountId}/sync-chats`),
         ]);
         const folders = (foldersRes.data as { folders?: FolderWithDialogs[] })?.folders ?? [];
@@ -233,9 +244,10 @@ export function useBdAccountsConnect({
         setDialogsByFolders(folders);
         setSyncChatsList(syncList);
         setExpandedFolderId(null);
-      } catch {
+      } catch (e) {
         setDialogsByFolders([]);
         setSyncChatsList([]);
+        setError(getDialogsLoadErrorMessage(e));
       } finally {
         setLoadingDialogs(false);
       }
@@ -311,7 +323,7 @@ export function useBdAccountsConnect({
             setConnectStep('select-chats');
             setLoadingDialogs(true);
             setSelectChatsSearch('');
-            apiClient.get(`/api/bd-accounts/${data.accountId}/dialogs-by-folders?refresh=1`, { timeout: 120000 })
+            apiClient.get(`/api/bd-accounts/${data.accountId}/dialogs-by-folders?refresh=1`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS })
               .then((r) => (r.data?.folders ?? []) as FolderWithDialogs[])
               .then((folders) => {
                 setDialogsByFolders(folders);
@@ -319,11 +331,12 @@ export function useBdAccountsConnect({
                 setExpandedFolderId(null);
                 setSelectedChatIds(new Set());
               })
-              .catch(() => {
+              .catch((e) => {
                 setDialogsByFolders([]);
                 setSyncChatsList([]);
                 setExpandedFolderId(null);
                 setSelectedChatIds(new Set());
+                setError(getDialogsLoadErrorMessage(e));
               })
               .finally(() => setLoadingDialogs(false));
           }, 1800);
@@ -451,14 +464,34 @@ export function useBdAccountsConnect({
     setRefetchFoldersLoading(true);
     setError(null);
     try {
-      const res = await apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?refresh=1`, { timeout: 120000 });
+      const res = await apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?refresh=1`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS });
       setDialogsByFolders((res.data?.folders ?? []) as FolderWithDialogs[]);
     } catch (err: unknown) {
-      const res = err as { response?: { data?: { message?: string; error?: string } } };
-      setError(res?.response?.data?.message || res?.response?.data?.error || 'Не удалось обновить папки и чаты');
+      setError(getDialogsLoadErrorMessage(err));
     } finally {
       setRefetchFoldersLoading(false);
     }
+  }, [connectingAccountId]);
+
+  const handleRetryLoadDialogs = useCallback(() => {
+    if (!connectingAccountId) return;
+    setError(null);
+    setLoadingDialogs(true);
+    Promise.all([
+      apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?refresh=1`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS }).then((res) => (res.data?.folders ?? []) as FolderWithDialogs[]),
+      apiClient.get(`/api/bd-accounts/${connectingAccountId}/sync-chats`).then((res) => (Array.isArray(res.data) ? res.data : []) as SyncChatRow[]),
+    ])
+      .then(([folders, syncList]) => {
+        setDialogsByFolders(folders);
+        setSyncChatsList(syncList);
+        setExpandedFolderId(null);
+        setSelectedChatIds(new Set(syncList.map((c) => String(c.telegram_chat_id))));
+      })
+      .catch((e) => {
+        reportError(e, { component: 'useBdAccountsConnect', action: 'retryLoadDialogs' });
+        setError(getDialogsLoadErrorMessage(e));
+      })
+      .finally(() => setLoadingDialogs(false));
   }, [connectingAccountId]);
 
   return {
@@ -511,5 +544,6 @@ export function useBdAccountsConnect({
     handleBackFromQr,
     handleRetryQr,
     handleRefetchFolders,
+    handleRetryLoadDialogs,
   };
 }

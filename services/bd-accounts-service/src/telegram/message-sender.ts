@@ -79,7 +79,10 @@ export class MessageSender {
     };
 
     try {
-      const peer = await this.resolvePeer(accountId, chatId);
+      let peer: Api.TypeInputPeer | number | string = await this.resolvePeer(accountId, chatId);
+      if (typeof peer === 'string' && peer.length > 0 && Number.isNaN(Number(peer))) {
+        peer = await client.getInputEntity(peer);
+      }
       const message = await client.sendMessage(peer, params);
       clientInfo.lastActivity = new Date();
       await this.pool.query(
@@ -98,7 +101,10 @@ export class MessageSender {
       if (isEntityNotFound) {
         try {
           await client.getDialogs({ limit: 100 });
-          const peerRetry = await this.resolvePeer(accountId, chatId);
+          let peerRetry: Api.TypeInputPeer | number | string = await this.resolvePeer(accountId, chatId);
+          if (typeof peerRetry === 'string' && peerRetry.length > 0 && Number.isNaN(Number(peerRetry))) {
+            peerRetry = await client.getInputEntity(peerRetry);
+          }
           const message = await client.sendMessage(peerRetry, params);
           clientInfo.lastActivity = new Date();
           await this.pool.query(

@@ -6,7 +6,7 @@ import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { TelegramManager } from '../telegram';
 import { serializeMessage } from '../telegram-serialize';
-import { MAX_FILE_SIZE_BYTES, BULK_SEND_DELAY_MS, getAccountOr404, requireBidiCanWriteAccount } from '../helpers';
+import { MAX_FILE_SIZE_BYTES, BULK_SEND_DELAY_MS, getAccountOr404, getErrorMessage, requireBidiCanWriteAccount } from '../helpers';
 
 const SendMessageSchema = z.object({
   chatId: z.string().min(1).max(256),
@@ -248,6 +248,51 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
       leadUsername: leadUser,
       extraUsernames,
     });
+
+    const inviteLinkTrimmed = typeof result.inviteLink === 'string' ? result.inviteLink.trim() : '';
+    const inviteMessage = inviteLinkTrimmed ? `Присоединяйтесь к группе:\n${inviteLinkTrimmed}` : '';
+    if (inviteMessage) {
+      let leadDmSent = false;
+      if (leadId != null && Number.isInteger(leadId) && leadId > 0) {
+        try {
+          await telegramManager.sendMessage(accountId, String(leadId), inviteMessage);
+          leadDmSent = true;
+        } catch (sendErr: unknown) {
+          log.warn({
+            message: 'create-shared-chat: failed to send invite link to lead DM',
+            accountId,
+            leadId,
+            error: getErrorMessage(sendErr),
+          });
+        }
+      }
+      if (!leadDmSent && leadUser) {
+        try {
+          await telegramManager.sendMessage(accountId, leadUser, inviteMessage);
+        } catch (sendErr: unknown) {
+          log.warn({
+            message: 'create-shared-chat: failed to send invite link to lead DM by username',
+            accountId,
+            leadUsername: leadUser,
+            error: getErrorMessage(sendErr),
+          });
+        }
+      }
+      for (const username of extraUsernames) {
+        const u = (username ?? '').trim().replace(/^@/, '');
+        if (!u) continue;
+        try {
+          await telegramManager.sendMessage(accountId, u, inviteMessage);
+        } catch (sendErr: unknown) {
+          log.warn({
+            message: 'create-shared-chat: failed to send invite link to extra participant DM',
+            accountId,
+            username: u,
+            error: getErrorMessage(sendErr),
+          });
+        }
+      }
+    }
 
     // Добавить созданный общий чат в bd_account_sync_chats (с access_hash для отправки без кэша).
     const rawId = Number(result.channelId);

@@ -30,6 +30,11 @@ export function ConnectModal(c: ConnectModalProps) {
         {c.error && (
           <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3 mb-4 shrink-0">
             <p className="text-sm text-red-800 dark:text-red-200">{c.error}</p>
+            {c.connectStep === 'select-chats' && c.handleRetryLoadDialogs && (
+              <Button type="button" variant="outline" size="sm" className="mt-2 border-red-300 dark:border-red-700 text-red-800 dark:text-red-200 hover:bg-red-100 dark:hover:bg-red-900/30" onClick={c.handleRetryLoadDialogs} disabled={c.loadingDialogs}>
+                Повторить
+              </Button>
+            )}
           </div>
         )}
 
@@ -208,7 +213,7 @@ export function ConnectModal(c: ConnectModalProps) {
                 <div className="flex flex-col items-center justify-center py-12 flex-1">
                   <Loader2 className="w-10 h-10 animate-spin text-primary mb-3" />
                   <p className="text-sm text-muted-foreground">Загружаем папки и чаты…</p>
-                  <p className="text-xs text-muted-foreground mt-1">При большом числе чатов загрузка может занять 1–2 минуты</p>
+                  <p className="text-xs text-muted-foreground mt-1">При большом числе чатов загрузка может занять 3–5 минут</p>
                 </div>
               ) : (
                 <>

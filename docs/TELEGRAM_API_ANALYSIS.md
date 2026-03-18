@@ -96,3 +96,12 @@
 | post_author, grouped_id, via_bot_id, silent, noforwards, mentioned, media_unread | ✅ | telegram_extra |
 
 Синхронизация: при сохранении сообщения из Telegram всегда вызываются `serializeMessage` и `saveMessageToDb`, так что все перечисленные поля попадают в БД. На фронте: превью ответа, реакции, скролл к сообщению по клику на reply, порядок чатов по закреплённым (user_chat_pins) и по last_message_at.
+
+---
+
+## 7. Таймауты при деплое
+
+Запрос **GET `/api/bd-accounts/:id/dialogs-by-folders?refresh=1`** при большом числе чатов может выполняться **3–5+ минут** (пагинация GetDialogs, flood wait Telegram). При деплое нужно соблюдать согласованные таймауты:
+
+- **api-gateway** (proxies): для bd-accounts задан таймаут 5 мин (300000 ms). Меньший лимит приведёт к обрыву ответа и «Ошибка загрузки» на клиенте.
+- **Traefik** (или другой reverse proxy перед api-gateway): при настройке `transport.respondingTimeouts` не задавать для маршрута к API значение меньше 5 мин, иначе долгий ответ dialogs-by-folders будет обрезан.

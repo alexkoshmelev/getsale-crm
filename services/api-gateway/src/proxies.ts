@@ -100,12 +100,14 @@ export function createProxies(log: Logger) {
     onError,
   });
 
+  // Long-running: dialogs-by-folders?refresh=1 can take 3–5+ min (flood wait, many chats)
+  const BD_ACCOUNTS_PROXY_TIMEOUT_MS = 300000; // 5 min
   const bdAccountsProxy = createProxyMiddleware({
     target: serviceUrls.bdAccounts,
     changeOrigin: true,
     pathRewrite: { '^/api/bd-accounts': '/api/bd-accounts' },
-    timeout: 120000,
-    proxyTimeout: 120000,
+    timeout: BD_ACCOUNTS_PROXY_TIMEOUT_MS,
+    proxyTimeout: BD_ACCOUNTS_PROXY_TIMEOUT_MS,
     logLevel: 'debug',
     onProxyReq: (proxyReq, req) => {
       addCorrelationToProxyReq(proxyReq, req as Request);
