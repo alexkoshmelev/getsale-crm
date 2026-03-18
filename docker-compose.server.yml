@@ -143,6 +143,8 @@ services:
       - "traefik.http.routers.getsale-crm-api.tls.certresolver=myresolver"
       - "traefik.http.routers.getsale-crm-api.middlewares=security-headers"
       - "traefik.http.services.getsale-crm-api.loadbalancer.server.port=8000"
+      # Long responses: dialogs-by-folders?refresh=1 can take 3–5+ min
+      - "traefik.http.services.getsale-crm-api.transport.respondingTimeouts.readTimeout=5m"
 
   auth-service:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:auth-service

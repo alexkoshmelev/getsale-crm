@@ -96,7 +96,8 @@ export class MessageSender {
         typeof errMsg === 'string' &&
         (errMsg.includes('Could not find the input entity') ||
           errMsg.includes('input entity') ||
-          errMsg.includes('PEER_ID_INVALID'));
+          errMsg.includes('PEER_ID_INVALID') ||
+          errMsg.includes('CHAT_ID_INVALID'));
       // Созданный общий чат не в кэше; getDialogs() подгрузит его (как при синхронизации), после ретрая отправка работает.
       if (isEntityNotFound) {
         try {

@@ -135,24 +135,36 @@ export class FileHandler {
     if (!clientInfo || !clientInfo.isConnected) {
       return null;
     }
-    try {
-      const peerIdNum = Number(chatId);
-      const peerInput = Number.isNaN(peerIdNum) ? chatId : peerIdNum;
-      const peer = await clientInfo.client.getInputEntity(peerInput);
-      const buffer = await clientInfo.client.downloadProfilePhoto(peer as any, { isBig: false });
-      if (!buffer || !(buffer instanceof Buffer)) return null;
-      return { buffer, mimeType: 'image/jpeg' };
-    } catch (e: any) {
-      const msg = e?.message ?? '';
-      const isEntityMissing =
-        typeof msg === 'string' &&
-        (msg.includes('Could not find the input entity') || msg.includes('PeerUser'));
-      if (isEntityMissing) {
-        this.log.info({ message: `downloadChatProfilePhoto ${accountId}/${chatId}`, error: msg });
-      } else {
-        this.log.warn({ message: `downloadChatProfilePhoto ${accountId}/${chatId}`, error: msg });
+    const peerIdNum = Number(chatId);
+    const peerInput = Number.isNaN(peerIdNum) ? chatId : peerIdNum;
+    const tryFullForm =
+      typeof peerInput === 'number' &&
+      peerInput < 0 &&
+      peerInput > -1000000000;
+    for (let attempt = 0; attempt < (tryFullForm ? 2 : 1); attempt++) {
+      try {
+        const input = attempt === 1 ? -1000000000 + (peerInput as number) : peerInput;
+        const peer = await clientInfo.client.getInputEntity(input);
+        const buffer = await clientInfo.client.downloadProfilePhoto(peer as any, { isBig: false });
+        if (!buffer || !(buffer instanceof Buffer)) return null;
+        return { buffer, mimeType: 'image/jpeg' };
+      } catch (e: any) {
+        const msg = e?.message ?? '';
+        const isChatIdInvalid = typeof msg === 'string' && msg.includes('CHAT_ID_INVALID');
+        if (attempt === 0 && tryFullForm && isChatIdInvalid) {
+          continue;
+        }
+        const isEntityMissing =
+          typeof msg === 'string' &&
+          (msg.includes('Could not find the input entity') || msg.includes('PeerUser'));
+        if (isEntityMissing) {
+          this.log.info({ message: `downloadChatProfilePhoto ${accountId}/${chatId}`, error: msg });
+        } else {
+          this.log.warn({ message: `downloadChatProfilePhoto ${accountId}/${chatId}`, error: msg });
+        }
+        return null;
       }
-      return null;
     }
+    return null;
   }
 }

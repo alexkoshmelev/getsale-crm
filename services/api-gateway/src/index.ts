@@ -95,6 +95,10 @@ const server = app.listen(PORT, () => {
   log.info({ message: 'API Gateway running', port: PORT });
 });
 
+// Long proxy responses (e.g. dialogs-by-folders?refresh=1) can take 3–5+ min; Node default headersTimeout is 60s
+server.headersTimeout = 330_000; // 5.5 min
+server.requestTimeout = 330_000; // 5.5 min
+
 async function shutdown(): Promise<void> {
   log.info({ message: 'API Gateway shutting down gracefully' });
   server.close(() => {
