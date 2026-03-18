@@ -2683,11 +2683,13 @@ export class TelegramManager {
    * Fetch all dialogs for a folder using iterDialogs (paginated by GramJS) with delay between batches to reduce flood wait.
    * Yields to the event loop every yieldEveryN dialogs so other accounts' update loops and keepalive can run (reduces TIMEOUT on other accounts).
    * Returns only users and groups (no channels) — for client communication (DMs and group chats), channels don't affect deals.
+   * Optional minActivityDate (unix timestamp): only include dialogs whose last message is >= this date (e.g. now - 90 days).
+   * We do NOT pass this to iterDialogs (offset_date there means "older than", which would skip recent dialogs). We iterate from newest and stop when dialog date < minActivityDate.
    */
   async getDialogsAll(
     accountId: string,
     folderId: number,
-    options?: { maxDialogs?: number; delayEveryN?: number; delayMs?: number; yieldEveryN?: number }
+    options?: { maxDialogs?: number; delayEveryN?: number; delayMs?: number; yieldEveryN?: number; offsetDate?: number }
   ): Promise<any[]> {
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo || !clientInfo.isConnected) {
@@ -2696,7 +2698,8 @@ export class TelegramManager {
     const maxDialogs = options?.maxDialogs ?? 3000;
     const delayEveryN = options?.delayEveryN ?? 100;
     const delayMs = options?.delayMs ?? 600;
-    const yieldEveryN = options?.yieldEveryN ?? 50;
+    const yieldEveryN = options?.yieldEveryN ?? 25;
+    const minActivityDate = options?.offsetDate; // unix sec: only include dialogs with message.date >= this (e.g. now - 90 days)
     const result: any[] = [];
     let count = 0;
     const client = clientInfo.client as any;
@@ -2706,6 +2709,11 @@ export class TelegramManager {
     try {
       const iter = client.iterDialogs({ folder: folderId, limit: maxDialogs });
       for await (const dialog of iter) {
+        if (minActivityDate != null) {
+          const msgDate = dialog.message?.date;
+          const msgDateSec = typeof msgDate === 'number' ? (msgDate > 1e10 ? Math.floor(msgDate / 1000) : msgDate) : (msgDate instanceof Date ? Math.floor(msgDate.getTime() / 1000) : 0);
+          if (msgDateSec > 0 && msgDateSec < minActivityDate) break; // dialogs are newest-first; we've left the window
+        }
         if (dialog.isUser || dialog.isGroup) {
           result.push(TelegramManager.mapDialogToItem(dialog));
           count++;

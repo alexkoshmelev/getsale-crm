@@ -100,16 +100,20 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
   }));
 
   // GET /:id/dialogs-by-folders
-  // Optional ?limit=N when refresh=1: max dialogs to fetch per folder (default 3000, clamp 100–3000) to reduce event-loop load and first-response time.
+  // Optional ?limit=N when refresh=1: max dialogs to fetch per folder (default 1000, clamp 100–3000). Optional ?days=N: only dialogs with activity in last N days (reduces load).
   router.get('/:id/dialogs-by-folders', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const forceRefresh = req.query.refresh === '1';
     const limitRaw = req.query.limit;
-    const maxDialogsFolder0 = forceRefresh && limitRaw != null
-      ? Math.min(3000, Math.max(100, Number(limitRaw)) || 3000)
+    const daysRaw = req.query.days;
+    const DEFAULT_MAX_DIALOGS = 1000;
+    const maxDialogsFolder0 = forceRefresh
+      ? (limitRaw != null ? Math.min(3000, Math.max(100, Number(limitRaw)) || DEFAULT_MAX_DIALOGS) : DEFAULT_MAX_DIALOGS)
       : 3000;
     const maxDialogsFolder1 = Math.min(2000, maxDialogsFolder0);
+    const days = daysRaw != null ? Math.max(1, Math.min(365, Number(daysRaw) || 0)) : 0;
+    const offsetDate = days > 0 ? Math.floor(Date.now() / 1000) - days * 24 * 3600 : undefined;
 
     const account = await getAccountOr404<{ id: string; telegram_id?: string | null }>(pool, id, organizationId, 'id, telegram_id');
     const accountTelegramId = account.telegram_id != null ? String(account.telegram_id).trim() : null;
@@ -174,10 +178,35 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     }
 
     const filters = await telegramManager.getDialogFilters(id);
-    const [allDialogs0, allDialogs1] = await Promise.all([
-      telegramManager.getDialogsAll(id, 0, { maxDialogs: maxDialogsFolder0, delayEveryN: 100, delayMs: 600 }),
-      telegramManager.getDialogsAll(id, 1, { maxDialogs: maxDialogsFolder1, delayEveryN: 100, delayMs: 600 }).catch(() => []),
-    ]);
+    const opts = {
+      maxDialogs: maxDialogsFolder0,
+      delayEveryN: 100,
+      delayMs: 600,
+      ...(offsetDate != null && { offsetDate }),
+    };
+    const opts1 = {
+      maxDialogs: maxDialogsFolder1,
+      delayEveryN: 100,
+      delayMs: 600,
+      ...(offsetDate != null && { offsetDate }),
+    };
+    let allDialogs0: any[];
+    let allDialogs1: any[];
+    try {
+      [allDialogs0, allDialogs1] = await Promise.all([
+        telegramManager.getDialogsAll(id, 0, opts),
+        telegramManager.getDialogsAll(id, 1, opts1).catch(() => []),
+      ]);
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err);
+      if (msg === 'TIMEOUT' || msg.includes('TIMEOUT')) {
+        return res.status(503).json({
+          error: 'TELEGRAM_UPDATE_TIMEOUT',
+          message: 'Telegram update loop timed out. Try again or use a lower limit (e.g. ?limit=1000).',
+        });
+      }
+      throw err;
+    }
     const mergedById = new Map<string, any>();
     for (const d of [...allDialogs0, ...allDialogs1] as { id: unknown }[]) {
       if (!mergedById.has(String(d.id))) mergedById.set(String(d.id), d);
@@ -201,7 +230,14 @@ export function syncRouter({ pool, log, telegramManager }: Deps): Router {
     }
     const pinned_chat_ids = allDialogs0.filter((d: any) => d.pinned === true).map((d: any) => String(d.id));
     const hasMore = allDialogs0.length >= maxDialogsFolder0 || allDialogs1.length >= maxDialogsFolder1;
-    res.json({ folders: folderList, pinned_chat_ids, hasMore });
+    res.json({
+      folders: folderList,
+      pinned_chat_ids,
+      hasMore,
+      truncated: hasMore,
+      maxDialogsPerFolder: maxDialogsFolder0,
+      ...(days > 0 && { days }),
+    });
   }));
 
   // GET /:id/sync-folders

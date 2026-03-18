@@ -9,7 +9,7 @@
 
 | API / метод | Где вызывается | Частота | Нагрузка | Оптимизация |
 |-------------|----------------|---------|----------|-------------|
-| **messages.GetDialogs** (iterDialogs/getDialogs) | getDialogsAll, getDialogs | При открытии списка диалогов, refresh, sync | Высокая (много пагинаций) | ✅ dialogs-by-folders из БД по умолчанию; GET /dialogs из БД; refresh только по кнопке; в getDialogsAll — setImmediate каждые N диалогов (yield event loop), чтобы не глушить update loop других аккаунтов |
+| **messages.GetDialogs** (iterDialogs/getDialogs) | getDialogsAll, getDialogs | При открытии списка диалогов, refresh, sync | Высокая (много пагинаций) | ✅ dialogs-by-folders из БД по умолчанию; refresh с limit=1000 и days=90; в getDialogsAll — setImmediate каждые 25 диалогов (yield event loop); опционально offsetDate для выборки по дате |
 | **messages.GetDialogFilters** | getDialogFilters, getDialogFilterRaw, getDialogFilterPeerIds | GET /folders, refresh=1, refreshChatsFromFolders (на каждый кастомный фильтр) | Средняя (лёгкий запрос, но дублируется) | ✅ Кэш в TelegramManager (TTL 90s); GET /folders из БД по умолчанию |
 | **messages.GetHistory** | syncHistoryForChat, fetchOlderMessagesFromTelegram, начальный sync | При скролле вверх, при новом чате, после коннекта | Высокая при активной подгрузке | Частично: только нужные чаты; лимиты и пагинация уже есть |
 | **getEntity / getInputEntity** | tryAddChatFromSelectedFolders, downloadMedia, deleteMessage, sendMessage, syncHistory | На новое сообщение (добавление чата), отправка, удаление, подгрузка истории | Низкая | ✅ tryAddChatFromSelectedFolders уже без GetDialogs (только getEntity) |
@@ -29,7 +29,7 @@
 | GET `/api/bd-accounts/:id/folders` | Всегда getDialogFilters → GetDialogFilters | По умолчанию: из `bd_account_sync_folders` + дефолт «Все чаты». `?refresh=1` — Telegram. |
 | GET `/api/bd-accounts/:id/sync-folders` | Из БД; при пустом списке папок не было | По умолчанию из БД; **при первичной загрузке** (пустой список и аккаунт подключён) — один раз GetDialogFilters → сохранение в БД → ответ. Дальше всегда из БД. |
 | POST `/api/bd-accounts/:id/folders-refetch` | — | По кнопке «Обновить папки и чаты» в диалоге синхронизации: то же, что при первой синхронизации — GetDialogFilters → сохранение папок в БД → refreshChatsFromFolders (подтягивание чатов по папкам). |
-| GET `/api/bd-accounts/:id/dialogs-by-folders` | Уже: по умолчанию из БД, `?refresh=1` — Telegram | Без изменений. |
+| GET `/api/bd-accounts/:id/dialogs-by-folders` | По умолчанию из БД; `?refresh=1` — Telegram (лимит 1000 по умолчанию, опционально `?limit=N`, `?days=N`). При TIMEOUT — 503. | Лимит по умолчанию 1000; опция `days` (offsetDate); 503 при TIMEOUT. |
 | POST `.../sync-folders-refresh` | refreshChatsFromFolders: GetDialogFilters + GetDialogs 0 + 1 + GetDialogFilterPeerIds на каждую папку | GetDialogFilters один раз (кэш в TM); GetDialogs только здесь и по кнопке. |
 | GET `/api/bd-accounts` | Только БД | Без изменений. |
 
@@ -101,7 +101,7 @@
 
 ## 7. Таймауты при деплое
 
-Запрос **GET `/api/bd-accounts/:id/dialogs-by-folders?refresh=1`** при большом числе чатов может выполняться **3–5+ минут** (пагинация GetDialogs, flood wait Telegram). При деплое нужно соблюдать согласованные таймауты:
+Запрос **GET `/api/bd-accounts/:id/dialogs-by-folders?refresh=1`** при большом числе чатов может выполняться долго (пагинация GetDialogs, flood wait Telegram). По умолчанию фронт запрашивает `?refresh=1&limit=1000&days=90`, что сокращает время ответа; при TIMEOUT сервис возвращает **503** (TELEGRAM_UPDATE_TIMEOUT). При деплое нужно соблюдать согласованные таймауты:
 
 - **api-gateway** (proxies): для bd-accounts задан таймаут 5 мин (300000 ms). Меньший лимит приведёт к обрыву ответа и «Ошибка загрузки» на клиенте.
 - **Traefik** (или другой reverse proxy перед api-gateway): при настройке `transport.respondingTimeouts` не задавать для маршрута к API значение меньше 5 мин, иначе долгий ответ dialogs-by-folders будет обрезан.

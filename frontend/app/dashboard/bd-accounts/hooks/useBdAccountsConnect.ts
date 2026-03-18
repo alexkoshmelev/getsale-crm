@@ -9,12 +9,23 @@ import type { FolderWithDialogs, SyncChatRow } from '../types';
 /** Timeout for dialogs-by-folders?refresh=1 (many chats + flood wait can take 3–5+ min) */
 const DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS = 300000; // 5 min
 
+/** Allowed "days" options for dialogs refresh (filter by last N days). Default 90. */
+export const SYNC_DAYS_OPTIONS = [30, 90, 180, 360] as const;
+export const SYNC_DAYS_DEFAULT = 90;
+
+function getDialogsRefreshParams(days: number): string {
+  return `refresh=1&limit=1000&days=${days}`;
+}
+
 function getDialogsLoadErrorMessage(e: unknown): string {
-  const err = e as { code?: string; response?: { data?: { error?: string } } };
+  const err = e as { code?: string; response?: { status?: number; data?: { error?: string; message?: string } } };
   if (err?.code === 'ECONNABORTED') {
     return 'Загрузка заняла слишком много времени. Нажмите «Повторить».';
   }
-  return err?.response?.data?.error || 'Ошибка загрузки';
+  if (err?.response?.status === 503 && (err?.response?.data?.error === 'TELEGRAM_UPDATE_TIMEOUT' || err?.response?.data?.message)) {
+    return err.response.data.message || 'Таймаут Telegram. Нажмите «Повторить» или обновите папки позже.';
+  }
+  return err?.response?.data?.message || err?.response?.data?.error || 'Ошибка загрузки';
 }
 
 export type ConnectStep = 'credentials' | 'qr' | 'code' | 'password' | 'select-chats';
@@ -65,6 +76,10 @@ export function useBdAccountsConnect({
   const [dialogsByFolders, setDialogsByFolders] = useState<FolderWithDialogs[]>([]);
   const [syncChatsList, setSyncChatsList] = useState<SyncChatRow[]>([]);
   const [loadingDialogs, setLoadingDialogs] = useState(false);
+  const [dialogsTruncated, setDialogsTruncated] = useState(false);
+  const [dialogsDays, setDialogsDays] = useState<number | undefined>(undefined);
+  const [maxDialogsPerFolder, setMaxDialogsPerFolder] = useState<number | undefined>(undefined);
+  const [syncDaysFilter, setSyncDaysFilter] = useState<number>(SYNC_DAYS_DEFAULT);
   const [sendingCode, setSendingCode] = useState(false);
   const [verifyingCode, setVerifyingCode] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -104,11 +119,15 @@ export function useBdAccountsConnect({
     setLoadingDialogs(true);
     router.replace('/dashboard/bd-accounts');
     Promise.all([
-      apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders?refresh=1`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS }).then((res) => (res.data?.folders ?? []) as FolderWithDialogs[]),
+      apiClient.get(`/api/bd-accounts/${accountId}/dialogs-by-folders?${getDialogsRefreshParams(syncDaysFilter)}`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS }).then((res) => res.data as { folders?: FolderWithDialogs[]; truncated?: boolean; days?: number; maxDialogsPerFolder?: number }),
       apiClient.get(`/api/bd-accounts/${accountId}/sync-chats`).then((res) => (Array.isArray(res.data) ? res.data : []) as SyncChatRow[]),
     ])
-      .then(([folders, syncList]) => {
+      .then(([data, syncList]) => {
+        const folders = data?.folders ?? [];
         setDialogsByFolders(folders);
+        setDialogsTruncated(Boolean(data?.truncated));
+        setDialogsDays(data?.days);
+        setMaxDialogsPerFolder(data?.maxDialogsPerFolder);
         setSyncChatsList(syncList);
         setExpandedFolderId(null);
         setSelectedChatIds(new Set(syncList.map((c) => String(c.telegram_chat_id))));
@@ -118,10 +137,11 @@ export function useBdAccountsConnect({
         setDialogsByFolders([]);
         setSyncChatsList([]);
         setSelectedChatIds(new Set());
+        setDialogsTruncated(false);
         setError(getDialogsLoadErrorMessage(e));
       })
       .finally(() => setLoadingDialogs(false));
-  }, [searchParams, router]);
+  }, [searchParams, router, syncDaysFilter]);
 
   // WebSocket sync progress
   useEffect(() => {
@@ -236,17 +256,22 @@ export function useBdAccountsConnect({
       setLoadingDialogs(true);
       try {
         const [foldersRes, syncRes] = await Promise.all([
-          apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?refresh=1`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS }),
+          apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?${getDialogsRefreshParams(syncDaysFilter)}`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS }),
           apiClient.get(`/api/bd-accounts/${connectingAccountId}/sync-chats`),
         ]);
-        const folders = (foldersRes.data as { folders?: FolderWithDialogs[] })?.folders ?? [];
+        const data = foldersRes.data as { folders?: FolderWithDialogs[]; truncated?: boolean; days?: number; maxDialogsPerFolder?: number };
+        const folders = data?.folders ?? [];
         const syncList = Array.isArray(syncRes.data) ? (syncRes.data as SyncChatRow[]) : [];
         setDialogsByFolders(folders);
+        setDialogsTruncated(Boolean(data?.truncated));
+        setDialogsDays(data?.days);
+        setMaxDialogsPerFolder(data?.maxDialogsPerFolder);
         setSyncChatsList(syncList);
         setExpandedFolderId(null);
       } catch (e) {
         setDialogsByFolders([]);
         setSyncChatsList([]);
+        setDialogsTruncated(false);
         setError(getDialogsLoadErrorMessage(e));
       } finally {
         setLoadingDialogs(false);
@@ -262,7 +287,7 @@ export function useBdAccountsConnect({
     } finally {
       setVerifyingCode(false);
     }
-  }, [connectForm.phoneNumber, connectForm.phoneCode, connectForm.password, connectingAccountId, phoneCodeHash, onAccountsRefresh]);
+  }, [connectForm.phoneNumber, connectForm.phoneCode, connectForm.password, connectingAccountId, phoneCodeHash, onAccountsRefresh, syncDaysFilter]);
 
   const handleSubmitQr2faPassword = useCallback(async () => {
     if (!qrSessionId || !qr2faPassword.trim()) return;
@@ -323,10 +348,14 @@ export function useBdAccountsConnect({
             setConnectStep('select-chats');
             setLoadingDialogs(true);
             setSelectChatsSearch('');
-            apiClient.get(`/api/bd-accounts/${data.accountId}/dialogs-by-folders?refresh=1`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS })
-              .then((r) => (r.data?.folders ?? []) as FolderWithDialogs[])
-              .then((folders) => {
+            apiClient.get(`/api/bd-accounts/${data.accountId}/dialogs-by-folders?${getDialogsRefreshParams(syncDaysFilter)}`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS })
+              .then((r) => r.data as { folders?: FolderWithDialogs[]; truncated?: boolean; days?: number; maxDialogsPerFolder?: number })
+              .then((payload) => {
+                const folders = payload?.folders ?? [];
                 setDialogsByFolders(folders);
+                setDialogsTruncated(Boolean(payload?.truncated));
+                setDialogsDays(payload?.days);
+                setMaxDialogsPerFolder(payload?.maxDialogsPerFolder);
                 setSyncChatsList([]);
                 setExpandedFolderId(null);
                 setSelectedChatIds(new Set());
@@ -336,6 +365,7 @@ export function useBdAccountsConnect({
                 setSyncChatsList([]);
                 setExpandedFolderId(null);
                 setSelectedChatIds(new Set());
+                setDialogsTruncated(false);
                 setError(getDialogsLoadErrorMessage(e));
               })
               .finally(() => setLoadingDialogs(false));
@@ -348,7 +378,7 @@ export function useBdAccountsConnect({
       }
     }, 1500);
     return () => clearInterval(t);
-  }, [connectStep, qrSessionId, fetchAccounts]);
+  }, [connectStep, qrSessionId, fetchAccounts, syncDaysFilter]);
 
   const toggleFolderExpanded = useCallback((folderId: number) => {
     const id = Number(folderId);
@@ -464,35 +494,44 @@ export function useBdAccountsConnect({
     setRefetchFoldersLoading(true);
     setError(null);
     try {
-      const res = await apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?refresh=1`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS });
-      setDialogsByFolders((res.data?.folders ?? []) as FolderWithDialogs[]);
+      const res = await apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?${getDialogsRefreshParams(syncDaysFilter)}`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS });
+      const data = res.data as { folders?: FolderWithDialogs[]; truncated?: boolean; days?: number; maxDialogsPerFolder?: number };
+      setDialogsByFolders((data?.folders ?? []) as FolderWithDialogs[]);
+      setDialogsTruncated(Boolean(data?.truncated));
+      setDialogsDays(data?.days);
+      setMaxDialogsPerFolder(data?.maxDialogsPerFolder);
     } catch (err: unknown) {
       setError(getDialogsLoadErrorMessage(err));
     } finally {
       setRefetchFoldersLoading(false);
     }
-  }, [connectingAccountId]);
+  }, [connectingAccountId, syncDaysFilter]);
 
   const handleRetryLoadDialogs = useCallback(() => {
     if (!connectingAccountId) return;
     setError(null);
     setLoadingDialogs(true);
     Promise.all([
-      apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?refresh=1`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS }).then((res) => (res.data?.folders ?? []) as FolderWithDialogs[]),
+      apiClient.get(`/api/bd-accounts/${connectingAccountId}/dialogs-by-folders?${getDialogsRefreshParams(syncDaysFilter)}`, { timeout: DIALOGS_BY_FOLDERS_REFRESH_TIMEOUT_MS }).then((res) => res.data as { folders?: FolderWithDialogs[]; truncated?: boolean; days?: number; maxDialogsPerFolder?: number }),
       apiClient.get(`/api/bd-accounts/${connectingAccountId}/sync-chats`).then((res) => (Array.isArray(res.data) ? res.data : []) as SyncChatRow[]),
     ])
-      .then(([folders, syncList]) => {
+      .then(([data, syncList]) => {
+        const folders = data?.folders ?? [];
         setDialogsByFolders(folders);
+        setDialogsTruncated(Boolean(data?.truncated));
+        setDialogsDays(data?.days);
+        setMaxDialogsPerFolder(data?.maxDialogsPerFolder);
         setSyncChatsList(syncList);
         setExpandedFolderId(null);
         setSelectedChatIds(new Set(syncList.map((c) => String(c.telegram_chat_id))));
       })
       .catch((e) => {
         reportError(e, { component: 'useBdAccountsConnect', action: 'retryLoadDialogs' });
+        setDialogsTruncated(false);
         setError(getDialogsLoadErrorMessage(e));
       })
       .finally(() => setLoadingDialogs(false));
-  }, [connectingAccountId]);
+  }, [connectingAccountId, syncDaysFilter]);
 
   return {
     showConnectModal,
@@ -525,6 +564,11 @@ export function useBdAccountsConnect({
     startingSync,
     dialogsByFolders,
     setDialogsByFolders,
+    dialogsTruncated,
+    dialogsDays,
+    maxDialogsPerFolder,
+    syncDaysFilter,
+    setSyncDaysFilter,
     syncChatsList,
     sendingCode,
     verifyingCode,

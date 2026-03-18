@@ -176,7 +176,7 @@ export class TelegramManager {
   }
 
   // --- Chat sync / dialogs ---
-  async getDialogsAll(accountId: string, folderId: number, options?: { maxDialogs?: number; delayEveryN?: number; delayMs?: number; yieldEveryN?: number }): Promise<unknown[]> {
+  async getDialogsAll(accountId: string, folderId: number, options?: { maxDialogs?: number; delayEveryN?: number; delayMs?: number; yieldEveryN?: number; offsetDate?: number }): Promise<unknown[]> {
     return this.chatSync.getDialogsAll(accountId, folderId, options);
   }
   async getDialogs(accountId: string, folderId?: number): Promise<unknown[]> { return this.chatSync.getDialogs(accountId, folderId); }

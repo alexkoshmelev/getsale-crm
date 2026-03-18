@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
+import { SYNC_DAYS_OPTIONS } from '../hooks/useBdAccountsConnect';
 import type { ConnectModalProps } from '../hooks/useBdAccountsConnect';
 import type { SyncChatRow } from '../types';
 
@@ -230,7 +231,19 @@ export function ConnectModal(c: ConnectModalProps) {
                     </div>
                   </div>
                   <div className="flex items-center gap-2 mb-2 shrink-0 flex-wrap">
-                    <span className="text-xs text-muted-foreground">Тип чатов:</span>
+                    <span className="text-xs text-muted-foreground">Чаты за период:</span>
+                    <select
+                      value={c.syncDaysFilter}
+                      onChange={(e) => c.setSyncDaysFilter(Number(e.target.value))}
+                      className="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-sm text-gray-700 dark:text-gray-300 px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-primary"
+                    >
+                      {SYNC_DAYS_OPTIONS.map((days) => (
+                        <option key={days} value={days}>
+                          {days} дн.
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-xs text-muted-foreground ml-2">Тип чатов:</span>
                     <div className="flex rounded-lg border border-gray-200 dark:border-gray-700 p-0.5 bg-gray-100 dark:bg-gray-800">
                       {(['all', 'personal', 'groups'] as const).map((key) => (
                         <button
@@ -249,6 +262,15 @@ export function ConnectModal(c: ConnectModalProps) {
                     </button>
                   </div>
                   <p className="text-xs text-muted-foreground mb-2 shrink-0">Отметьте папку — выберутся все чаты в ней. Или отметьте только нужные чаты.</p>
+                  {c.dialogsTruncated && (
+                    <p className="text-xs text-muted-foreground mb-2 shrink-0 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2">
+                      {c.dialogsDays
+                        ? `Показаны чаты за последние ${c.dialogsDays} дн. Для полного списка нажмите «Обновить папки и чаты».`
+                        : c.maxDialogsPerFolder
+                          ? `Показаны последние ${c.maxDialogsPerFolder} чатов. Для полного списка нажмите «Обновить папки и чаты».`
+                          : 'Показаны не все чаты. Для полного списка нажмите «Обновить папки и чаты».'}
+                    </p>
+                  )}
                   <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/30 p-3 space-y-4">
                     {c.filterFoldersBySearch(c.dialogsByFolders, c.selectChatsSearch).map((folder) => {
                       const folderState = c.getFolderCheckState(folder);
