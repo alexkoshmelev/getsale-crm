@@ -116,6 +116,26 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
           ErrorCodes.BAD_REQUEST
         );
       }
+      if (
+        (typeof code === 'string' && /^PEER_FLOOD$/i.test(code)) ||
+        (typeof errMsg === 'string' && errMsg.includes('PEER_FLOOD'))
+      ) {
+        throw new AppError(
+          429,
+          'Telegram rate limit (PEER_FLOOD). Send fewer messages to this user or wait before retrying.',
+          ErrorCodes.RATE_LIMITED
+        );
+      }
+      if (
+        (typeof code === 'string' && /^INPUT_USER_DEACTIVATED$/i.test(code)) ||
+        (typeof errMsg === 'string' && errMsg.includes('INPUT_USER_DEACTIVATED'))
+      ) {
+        throw new AppError(
+          400,
+          'Recipient Telegram account is deactivated.',
+          ErrorCodes.BAD_REQUEST
+        );
+      }
       log.warn({ message: 'Telegram send failed', accountId: id, chatId, error: errMsg, code });
       throw new AppError(
         502,

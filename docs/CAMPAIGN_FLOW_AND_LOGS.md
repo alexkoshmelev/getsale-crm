@@ -314,3 +314,7 @@ sequenceDiagram
    В campaign-loop при вызове `messagingClient.post` передаётся `{ userId: systemUserId, organizationId: row.organization_id }`. Если `row.organization_id` пустой или не UUID, в messaging или БД может падать запрос. В логах campaign при первом падении можно проверить participantId и по нему в БД посмотреть `organization_id` участника.
 
 После деплоя правок и при следующем запуске рассылки: при «user/chat not found» должен приходить **400** (circuit не откроется), при прочих сбоях Telegram — **502** с текстом в теле ответа и в логах bd-accounts.
+
+**Дополнительно (по логам bd-accounts):** если в логах видно `PEER_FLOOD` или `INPUT_USER_DEACTIVATED`:
+- **PEER_FLOOD** — лимит Telegram на число сообщений новым пользователям; bd-accounts отдаёт **429** (rate limit), campaign не считает это сбоем для circuit breaker, участник помечается failed после ретраев, рассылка идёт дальше по остальным.
+- **INPUT_USER_DEACTIVATED** — аккаунт получателя деактивирован в Telegram; bd-accounts отдаёт **400**, участник помечается failed, circuit не открывается.
