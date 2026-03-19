@@ -6,7 +6,7 @@ import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { TelegramManager } from '../telegram';
 import { serializeMessage } from '../telegram-serialize';
-import { MAX_FILE_SIZE_BYTES, BULK_SEND_DELAY_MS, getAccountOr404, getErrorMessage, requireBidiCanWriteAccount } from '../helpers';
+import { MAX_FILE_SIZE_BYTES, BULK_SEND_DELAY_MS, getAccountOr404, getErrorMessage, getErrorCode, requireBidiCanWriteAccount } from '../helpers';
 
 const SendMessageSchema = z.object({
   chatId: z.string().min(1).max(256),
@@ -97,15 +97,18 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
       }
     } catch (sendErr: unknown) {
       const errMsg = getErrorMessage(sendErr);
+      const code = getErrorCode(sendErr);
       const isClientError =
-        typeof errMsg === 'string' &&
-        (errMsg.includes('Could not find the input entity') ||
-          errMsg.includes('input entity') ||
-          errMsg.includes('PEER_ID_INVALID') ||
-          errMsg.includes('CHAT_ID_INVALID') ||
-          errMsg.includes('USERNAME_NOT_OCCUPIED') ||
-          errMsg.includes('USERNAME_INVALID') ||
-          errMsg.includes('Username not found'));
+        (typeof errMsg === 'string' &&
+          (errMsg.includes('Could not find the input entity') ||
+            errMsg.includes('input entity') ||
+            errMsg.includes('PEER_ID_INVALID') ||
+            errMsg.includes('CHAT_ID_INVALID') ||
+            errMsg.includes('USERNAME_NOT_OCCUPIED') ||
+            errMsg.includes('USERNAME_INVALID') ||
+            errMsg.includes('Username not found'))) ||
+        (typeof code === 'string' &&
+          /^(PEER_ID_INVALID|CHAT_ID_INVALID|USERNAME_NOT_OCCUPIED|USERNAME_INVALID|CHAT_NOT_FOUND)$/i.test(code));
       if (isClientError) {
         throw new AppError(
           400,
@@ -113,7 +116,12 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
           ErrorCodes.BAD_REQUEST
         );
       }
-      throw sendErr;
+      log.warn({ message: 'Telegram send failed', accountId: id, chatId, error: errMsg, code });
+      throw new AppError(
+        502,
+        errMsg && errMsg.length < 256 ? errMsg : 'Telegram send failed',
+        ErrorCodes.SERVICE_UNAVAILABLE
+      );
     }
 
     const chatIdStr = String(chatId).trim();

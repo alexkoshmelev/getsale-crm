@@ -180,9 +180,10 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
             message: errMsg || 'Failed to send message',
           });
         }
-        return res.status(500).json({
-          error: 'Internal server error',
-          message: 'Failed to send message',
+        const status = error instanceof ServiceCallError && error.statusCode >= 500 ? error.statusCode : 500;
+        return res.status(status).json({
+          error: status >= 500 ? 'Downstream error' : 'Internal server error',
+          message: errMsg || 'Failed to send message',
         });
       }
     }

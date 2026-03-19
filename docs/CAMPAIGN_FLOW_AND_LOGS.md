@@ -223,3 +223,94 @@ sequenceDiagram
 | **Внутренние API требуют X-Organization-Id** | bd-accounts internal, messaging internal, pipeline internal | Проверка наличия и непустоты (в т.ч. после trim) уже была; при отсутствии — 400 с явным текстом. |
 
 Итог: передача org и внутреннего секрета приведена к единым правилам (trim, проверка непустоты, явные 400/401 при нарушении). Одинаковое значение INTERNAL_AUTH_SECRET в одном окружении по-прежнему нужно задавать в конфиге деплоя (env).
+
+---
+
+## 8. Circuit breaker и «0 отправленных» при рассылке
+
+**Симптом:** В логах campaign-service: сначала `messaging-service POST /api/messaging/send returned 500`, затем `messaging-service circuit breaker OPEN — request rejected`, все участники падают с «Campaign send failed after retries», 0 сообщений отправлено.
+
+**Причина:** campaign-service дергает messaging-service через `ServiceHttpClient`. При нескольких подряд 5xx (или таймаутах) срабатывает circuit breaker: дальнейшие запросы к messaging не отправляются, сразу отклоняются. Цепочка: **campaign → messaging → bd-accounts**; если bd-accounts возвращал 500 (например, необработанное исключение при отправке в Telegram), messaging отдавал 500 campaign’у → circuit открывался → рассылка останавливалась.
+
+**Что сделано:**
+
+1. **bd-accounts POST /:id/send**  
+   Все ошибки отправки в Telegram обрабатываются в `try/catch`: «клиентские» (PEER_ID_INVALID, USERNAME_NOT_OCCUPIED и т.п.) → **400**; остальные → **502** с сообщением (логируем и больше не пробрасываем исключение). Исключения из GramJS больше не превращаются в 500 на уровне сервиса.
+
+2. **Проверка по коду ошибки**  
+   Учтён не только текст, но и `getErrorCode()` (например, RPC code USERNAME_NOT_OCCUPIED), чтобы чаще отдавать 400 для «чат/пользователь не найден».
+
+3. **messaging-service POST /send**  
+   При ошибке вызова bd-accounts возвращается статус downstream: 4xx → тот же 4xx клиенту (campaign); 5xx → тот же 5xx (502/503), а не общий 500.
+
+**Итог:** Ошибки «user/chat not found» дают 400 → campaign не считает их сбоем для circuit breaker; остальные сбои отправки дают 502 с понятным сообщением. После деплоя bd-accounts и messaging при повторной рассылке в логах будет видно либо 400 (неверный получатель), либо 502 (ошибка Telegram/сети). Чтобы circuit снова закрылся после открытия, нужно либо подождать сброса (по умолчанию 30 с), либо перезапустить campaign-service.
+
+---
+
+## 9. Полный флоу рассылки и диагностика «POST /send returned 500»
+
+**Цепочка от кнопки «Запустить» до отправки в Telegram:**
+
+```mermaid
+sequenceDiagram
+  participant FE as Frontend
+  participant GW as api-gateway
+  participant CMP as campaign-service
+  participant MSG as messaging-service
+  participant BD as bd-accounts-service
+  participant TG as Telegram
+
+  Note over FE,CMP: Пользователь нажимает «Запустить»
+  FE->>GW: POST /api/campaigns/:id/start
+  GW->>CMP: proxy (X-User-Id, X-Organization-Id, X-Internal-Auth)
+  CMP->>CMP: Выбор контактов, INSERT campaign_participants, status=active
+  CMP-->>FE: 200
+
+  Note over CMP,TG: Фоновая петля (каждые ~60 с или по таймеру)
+  loop processCampaignSends
+    CMP->>CMP: SELECT participant WHERE next_send_at <= NOW() FOR UPDATE
+    CMP->>MSG: POST /api/messaging/send (direct, X-Internal-Auth, X-Organization-Id, X-User-Id)
+    MSG->>MSG: ensureConversation, INSERT messages (PENDING)
+    MSG->>BD: POST /api/bd-accounts/:id/send (chatId, text)
+    BD->>TG: sendMessage (GramJS)
+    alt успех
+      BD-->>MSG: 200 { messageId, date }
+      MSG->>MSG: UPDATE messages SET status=delivered
+      MSG-->>CMP: 200 { id }
+    else ошибка (4xx/5xx)
+      BD-->>MSG: 4xx или 5xx
+      MSG-->>CMP: тот же 4xx/5xx (или 500 если необработанное исключение)
+    end
+    CMP->>CMP: advanceToNextStep, next_send_at += delay
+  end
+```
+
+**Почему в логах «messaging-service POST /api/messaging/send returned 500»:**
+
+500 клиенту (campaign) отдаёт **только** messaging-service. Возможные источники:
+
+1. **messaging-service получил 5xx от bd-accounts**  
+   Тогда мы пробрасываем этот статус (после правок — 502). Если правки не задеплоены, раньше мог уходить общий 500.
+
+2. **В bd-accounts при отправке в Telegram выбросилось необработанное исключение**  
+   GramJS или сеть кидают ошибку, которая не попала в `catch` в `POST /:id/send` — тогда bd-accounts отдаёт 500. После правок все такие ошибки ловятся и отдаётся 502 с сообщением.
+
+3. **Исключение внутри messaging до/после вызова bd-accounts**  
+   Например: падение на `ensureConversation`, на `pool.query`, или при разборе ответа. Тогда глобальный обработчик в messaging возвращает 500.
+
+**Что сделать по шагам:**
+
+1. **Задеплоить последние правки**  
+   - **bd-accounts-service:** в `POST /:id/send` не пробрасывать исключения из `sendMessage`/`sendFile`; клиентские ошибки → 400, остальные → 502 с логом.  
+   - **messaging-service:** при 5xx от bd-accounts отдавать тот же статус (502/503) клиенту, а не общий 500.
+
+2. **Взять логи в момент первого 500**  
+   В твоих логах первый сбой около **08:37:55** (retry 1). Нужно за тот же интервал (08:37:54–08:37:59):
+   - **messaging-service:** `docker logs getsale-crm-messaging-service --since "2026-03-19T08:37:50" --until "2026-03-19T08:38:05" 2>&1`  
+   - **bd-accounts-service:** `docker logs getsale-crm-bd-accounts-service --since "2026-03-19T08:37:50" --until "2026-03-19T08:38:05" 2>&1`  
+   В messaging ищи строки с `POST /api/messaging/send`, `Error sending Telegram message`, `Unhandled error`. В bd-accounts — строки с `send`, `Telegram send failed`, или стек исключения.
+
+3. **Проверить, что campaign передаёт контекст**  
+   В campaign-loop при вызове `messagingClient.post` передаётся `{ userId: systemUserId, organizationId: row.organization_id }`. Если `row.organization_id` пустой или не UUID, в messaging или БД может падать запрос. В логах campaign при первом падении можно проверить participantId и по нему в БД посмотреть `organization_id` участника.
+
+После деплоя правок и при следующем запуске рассылки: при «user/chat not found» должен приходить **400** (circuit не откроется), при прочих сбоях Telegram — **502** с текстом в теле ответа и в логах bd-accounts.
