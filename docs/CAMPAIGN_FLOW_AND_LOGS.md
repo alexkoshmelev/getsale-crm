@@ -149,3 +149,77 @@ sequenceDiagram
 | Отправляются только 2–3 сообщения | По текущим логам не видно | Включить/собрать логи campaign-service и messaging-service при запуске кампании; при необходимости — точечное логирование в campaign-loop и проверка БД участников |
 
 После деплоя фикса и при наличии логов campaign-service + messaging-service за один запуск можно однозначно сказать, на каком шаге (выбор участника, вызов send, ответ bd-accounts, лимиты и т.д.) рассылка обрывается.
+
+---
+
+## 5. Почему чаты «то исчезают, то появляются» (раздел «Сообщения»)
+
+**Симптом:** В разделе «Сообщения» список чатов иногда пустой («Нет чатов»), после обновления или через время чаты снова отображаются.
+
+**Возможные причины:**
+
+1. **Ошибки от bd-accounts при запросе списка sync-chats**  
+   Загрузка чатов идёт так: фронт → api-gateway → messaging-service → **bd-accounts-service** `GET /internal/sync-chats?bdAccountId=...`. Если bd-accounts возвращает 4xx/5xx (таймаут, 401 из-за неверного `INTERNAL_AUTH_SECRET`, 500 при сбое БД и т.д.), messaging-service раньше превращал это в 500 для клиента, фронт показывал пустой список. После фикса ошибка от bd-accounts пробрасывается с тем же статусом и телом — в ответе и логах будет видна реальная причина.
+
+2. **Circuit breaker в messaging-service**  
+   При повторных сбоях вызовов к bd-accounts (например, таймауты или 500) circuit breaker в `ServiceHttpClient` открывается и какое-то время все запросы к bd-accounts отклоняются с 503. Запрос чатов тогда падает → «Нет чатов». После сброса breaker’а запросы снова проходят → чаты появляются.
+
+3. **Параметр `channel`**  
+   Если в запросе приходит `channel=tg` вместо `channel=telegram`, бэкенд раньше мог возвращать пустой список (ветка «только telegram»). В коде добавлена нормализация: `tg` приводится к `telegram`, поведение единое.
+
+4. **Порядок загрузки на фронте**  
+   Запрос чатов уходит с `bdAccountId: selectedAccountId`. Если первый запрос ушёл до выбора аккаунта или с пустым `selectedAccountId`, бэкенд отдаёт список по default-ветке (чаты из `messages` + sync), который может быть пустым. После выбора аккаунта и повторного запроса приходит список по sync-chats — чаты «появляются». Это не баг, а смена контекста (без аккаунта / с аккаунтом).
+
+**Что проверить при нестабильности:**
+
+- Логи **messaging-service** в момент запроса `GET /api/messaging/chats`: есть ли 4xx/5xx от bd-accounts, таймауты, сообщения про circuit breaker.
+- Логи **bd-accounts-service** на `GET /internal/sync-chats`: 200 или ошибка, время ответа.
+- Одинаковый ли **INTERNAL_AUTH_SECRET** у api-gateway, messaging-service и bd-accounts-service (при несовпадении bd-accounts вернёт 401, чаты не загрузятся).
+- В ответе фронта на запрос чатов после фикса: при ошибке будет не только 500, а реальный статус (400/401/404/502/503) и сообщение от bd-accounts — по ним можно точно понять причину.
+
+---
+
+## 6. Связь с аудитом и валидацией (почему раньше такого не было)
+
+После внедрения правил по аудиту и валидации могли появиться или ужесточиться проверки, из‑за которых загрузка чатов стала «то работает, то нет».
+
+**Цепочка запроса чатов:**  
+Фронт → **api-gateway** (JWT → `req.user`, добавляет заголовки) → **messaging-service** (internalAuth + extractUser) → **bd-accounts** `GET /internal/sync-chats` (проверяет X-Internal-Auth и X-Organization-Id).
+
+**Что могло измениться и дать нестабильность:**
+
+1. **INTERNAL_AUTH_SECRET**  
+   В production все бэкенды требуют один и тот же секрет. Если у api-gateway, messaging-service и bd-accounts он разный или где‑то не задан, вызов messaging → bd-accounts даёт 401. Раньше проверка могла быть мягче или отсутствовать.
+
+2. **Обязательный X-Organization-Id во внутреннем API bd-accounts**  
+   В `bd-accounts-service` роут `/internal/sync-chats` явно требует заголовок `X-Organization-Id`; при отсутствии или пустом значении после `trim()` возвращается 400. Если эту проверку добавили/ужесточили при аудите, запросы без корректного org начали падать (чаты не грузятся).
+
+3. **Gateway передаёт заголовки только при полном req.user**  
+   В api-gateway заголовки `X-User-Id` и `X-Organization-Id` ставятся только если есть и `user.id`, и `user.organizationId`. Если по какой‑то причине `organizationId` пустой (например, старый JWT или баг в выдаче токена), заголовок не уходит → в messaging `req.user.organizationId` пустой → bd-accounts отвечает 400 → чаты пустые.
+
+4. **Раньше ошибки от bd-accounts превращались в 500**  
+   Любой 4xx/5xx от bd-accounts в messaging приводил к общему 500. Не было видно, что именно вернул bd-accounts (400 из‑за org, 401 из‑за секрета и т.д.). После фикса реальный статус и тело пробрасываются — по ним видно, что именно «не учли» (например, пустой org или неверный секрет).
+
+**Что проверить после аудита/валидации:**
+
+- Один и тот же **INTERNAL_AUTH_SECRET** у api-gateway, messaging-service и bd-accounts-service в том же окружении.
+- В **JWT** всегда есть валидный `organizationId` (не пустая строка и не только пробелы); при необходимости — нормализация/валидация при выдаче токена.
+- При 400 на загрузке чатов смотреть тело ответа: сообщение вроде «X-Organization-Id required» или «Account not found» укажет на пропущенную передачу org или tenant-проверку.
+
+---
+
+## 7. Проверенные и усиленные условия (аудит/валидация)
+
+Проверено по коду и при необходимости усилено:
+
+| Условие | Где | Статус |
+|--------|-----|--------|
+| **INTERNAL_AUTH_SECRET** один и тот же у gateway и всех бэкендов | api-gateway/config.ts, service-core/service-app.ts, docker-compose | В production gateway и сервисы падают при старте, если секрет не задан или равен дефолту. Значение задаётся через env (INTERNAL_AUTH_SECRET); одинаковость — ответственность деплоя. |
+| **X-Internal-Auth** передаётся при проксировании | api-gateway/proxy-helpers: addInternalAuthToProxyReq | Все createAuthProxy и bdAccountsProxy вызывают addInternalAuthToProxyReq. Секрет берётся из config (env). |
+| **X-Organization-Id** передаётся только при валидном org | api-gateway/proxy-helpers: addAuthHeadersToProxyReq | Заголовки User-Id и Organization-Id ставятся только если оба значения после **trim()** непустые. |
+| **JWT: userId и organizationId не пустые** | api-gateway/auth.ts | Перед установкой req.user значения **trim()**; если после trim пусто — 401 «Invalid token payload». |
+| **Бэкенды: org из заголовка нормализован** | service-core/middleware: extractUser | id и organizationId из заголовков приводятся к **trim()**, пустое остаётся ''. |
+| **GET /chats не дергает bd-accounts без org** | messaging-service/routes/chats.ts | В начале обработчика: если orgId после trim пустой — **400 «Organization context required»**, вызов bd-accounts не выполняется. |
+| **Внутренние API требуют X-Organization-Id** | bd-accounts internal, messaging internal, pipeline internal | Проверка наличия и непустоты (в т.ч. после trim) уже была; при отсутствии — 400 с явным текстом. |
+
+Итог: передача org и внутреннего секрета приведена к единым правилам (trim, проверка непустоты, явные 400/401 при нарушении). Одинаковое значение INTERNAL_AUTH_SECRET в одном окружении по-прежнему нужно задавать в конфиге деплоя (env).

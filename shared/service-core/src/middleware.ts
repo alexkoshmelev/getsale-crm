@@ -64,14 +64,14 @@ export function correlationId(): RequestHandler {
 
 export function extractUser(): RequestHandler {
   return (req: Request, _res: Response, next: NextFunction) => {
-    const id = req.headers['x-user-id'] as string | undefined;
-    const organizationId = req.headers['x-organization-id'] as string | undefined;
+    const id = (req.headers['x-user-id'] as string | undefined) ?? '';
+    const organizationId = (req.headers['x-organization-id'] as string | undefined) ?? '';
     const role = (req.headers['x-user-role'] as string) || '';
 
     req.user = {
-      id: id || '',
-      organizationId: organizationId || '',
-      role,
+      id: typeof id === 'string' ? id.trim() : '',
+      organizationId: typeof organizationId === 'string' ? organizationId.trim() : '',
+      role: typeof role === 'string' ? role.trim() : role,
     };
     next();
   };

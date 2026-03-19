@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes, canPermission, ServiceHttpClient, withOrgContext } from '@getsale/service-core';
+import { asyncHandler, AppError, ErrorCodes, canPermission, ServiceHttpClient, ServiceCallError, withOrgContext } from '@getsale/service-core';
 import type { PinnedChatRow, QueryParam } from '../types';
 import { runSyncListQuery, runDefaultChatsQuery } from '../chats-list-helpers';
 
@@ -18,9 +18,15 @@ export function chatsRouter({ pool, log, bdAccountsClient }: Deps): Router {
   // GET /chats — all chats (optionally filtered by bd_account_id). A1: when bdAccountId set, sync-chat list from bd-accounts internal API. A4: withOrgContext.
   router.get('/chats', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const { channel, bdAccountId } = req.query;
+    let { channel, bdAccountId } = req.query;
+    // Normalize so both "tg" and "telegram" work (frontend/URLs may send either).
+    const channelNorm = channel != null ? String(channel).trim().toLowerCase() : '';
+    if (channelNorm === 'tg') (channel as string) = 'telegram';
 
-    const orgId = organizationId;
+    const orgId = organizationId != null ? String(organizationId).trim() : '';
+    if (!orgId) {
+      throw new AppError(400, 'Organization context required', ErrorCodes.VALIDATION);
+    }
     const params: QueryParam[] = [orgId];
 
     const rows = await withOrgContext(pool, orgId, async (client) => {
@@ -30,11 +36,23 @@ export function chatsRouter({ pool, log, bdAccountsClient }: Deps): Router {
       }
       const bdId = String(bdAccountId).trim();
 
-      const { chats } = await bdAccountsClient.get<{ chats: Array<{ telegram_chat_id: string; title: string | null; peer_type: string; folder_id: number | null; folder_ids: number[] }> }>(
-        `/internal/sync-chats?bdAccountId=${encodeURIComponent(bdId)}`,
-        undefined,
-        { organizationId: orgId }
-      );
+      let chats: Array<{ telegram_chat_id: string; title: string | null; peer_type: string; folder_id: number | null; folder_ids: number[] }>;
+      try {
+        const data = await bdAccountsClient.get<{ chats: Array<{ telegram_chat_id: string; title: string | null; peer_type: string; folder_id: number | null; folder_ids: number[] }> }>(
+          `/internal/sync-chats?bdAccountId=${encodeURIComponent(bdId)}`,
+          undefined,
+          { organizationId: orgId }
+        );
+        chats = data?.chats ?? [];
+      } catch (err) {
+        if (err instanceof ServiceCallError) {
+          const msg = typeof err.body === 'object' && err.body != null && 'error' in err.body && typeof (err.body as { error: unknown }).error === 'string'
+            ? (err.body as { error: string }).error
+            : err.message;
+          throw new AppError(err.statusCode, msg, err.statusCode >= 500 ? ErrorCodes.INTERNAL_ERROR : ErrorCodes.BAD_REQUEST);
+        }
+        throw err;
+      }
       if (!chats?.length) {
         return [] as { name?: string; channel_id?: string; peer_type?: string; account_name?: string }[];
       }

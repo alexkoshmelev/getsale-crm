@@ -33,14 +33,16 @@ export function createAuthenticate(log: Logger) {
         return;
       }
 
-      if (!payload.userId || !payload.organizationId) {
+      const userId = typeof payload.userId === 'string' ? payload.userId.trim() : '';
+      const organizationId = typeof payload.organizationId === 'string' ? payload.organizationId.trim() : '';
+      if (!userId || !organizationId) {
         res.status(401).json({ error: 'Invalid token payload' });
         return;
       }
 
       req.user = {
-        id: payload.userId,
-        organizationId: payload.organizationId,
+        id: userId,
+        organizationId,
         role: (payload.role as UserRole) || UserRole.VIEWER,
       };
       next();

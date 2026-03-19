@@ -80,19 +80,40 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     }
 
     let message: { id: unknown; date?: unknown };
-    if (fileBase64 && typeof fileBase64 === 'string') {
-      const buf = Buffer.from(fileBase64, 'base64');
-      if (buf.length > MAX_FILE_SIZE_BYTES) {
-        throw new AppError(413, 'Maximum file size is 2 GB', ErrorCodes.VALIDATION);
+    try {
+      if (fileBase64 && typeof fileBase64 === 'string') {
+        const buf = Buffer.from(fileBase64, 'base64');
+        if (buf.length > MAX_FILE_SIZE_BYTES) {
+          throw new AppError(413, 'Maximum file size is 2 GB', ErrorCodes.VALIDATION);
+        }
+        message = await telegramManager.sendFile(id, chatId, buf, {
+          caption: typeof text === 'string' ? text : '',
+          filename: typeof fileName === 'string' ? fileName.trim() || 'file' : 'file',
+          replyTo: replyToMessageId != null ? Number(replyToMessageId) : undefined,
+        });
+      } else {
+        const replyTo = replyToMessageId != null && String(replyToMessageId).trim() ? Number(replyToMessageId) : undefined;
+        message = await telegramManager.sendMessage(id, chatId, typeof text === 'string' ? text : '', { replyTo });
       }
-      message = await telegramManager.sendFile(id, chatId, buf, {
-        caption: typeof text === 'string' ? text : '',
-        filename: typeof fileName === 'string' ? fileName.trim() || 'file' : 'file',
-        replyTo: replyToMessageId != null ? Number(replyToMessageId) : undefined,
-      });
-    } else {
-      const replyTo = replyToMessageId != null && String(replyToMessageId).trim() ? Number(replyToMessageId) : undefined;
-      message = await telegramManager.sendMessage(id, chatId, typeof text === 'string' ? text : '', { replyTo });
+    } catch (sendErr: unknown) {
+      const errMsg = getErrorMessage(sendErr);
+      const isClientError =
+        typeof errMsg === 'string' &&
+        (errMsg.includes('Could not find the input entity') ||
+          errMsg.includes('input entity') ||
+          errMsg.includes('PEER_ID_INVALID') ||
+          errMsg.includes('CHAT_ID_INVALID') ||
+          errMsg.includes('USERNAME_NOT_OCCUPIED') ||
+          errMsg.includes('USERNAME_INVALID') ||
+          errMsg.includes('Username not found'));
+      if (isClientError) {
+        throw new AppError(
+          400,
+          'User or chat not found. Check that the Telegram ID or username is correct and the account can message this peer.',
+          ErrorCodes.BAD_REQUEST
+        );
+      }
+      throw sendErr;
     }
 
     const chatIdStr = String(chatId).trim();

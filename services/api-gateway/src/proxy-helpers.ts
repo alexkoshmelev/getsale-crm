@@ -15,10 +15,12 @@ export function addInternalAuthToProxyReq(proxyReq: ClientRequest): void {
 
 export function addAuthHeadersToProxyReq(proxyReq: ClientRequest, req: Request): void {
   const user = req.user;
-  if (user?.id && user?.organizationId) {
-    proxyReq.setHeader('X-User-Id', user.id);
-    proxyReq.setHeader('X-Organization-Id', user.organizationId);
-    if (user.role) proxyReq.setHeader('X-User-Role', user.role);
+  const userId = user?.id != null ? String(user.id).trim() : '';
+  const organizationId = user?.organizationId != null ? String(user.organizationId).trim() : '';
+  if (userId && organizationId) {
+    proxyReq.setHeader('X-User-Id', userId);
+    proxyReq.setHeader('X-Organization-Id', organizationId);
+    if (user!.role) proxyReq.setHeader('X-User-Role', user!.role);
   }
   const token = getAccessTokenFromRequest(req) ?? (typeof req.headers.authorization === 'string' ? req.headers.authorization.replace(/^Bearer\s+/i, '').trim() : undefined);
   if (token) proxyReq.setHeader('Authorization', `Bearer ${token}`);
