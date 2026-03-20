@@ -21,6 +21,22 @@ export type StepConditions = {
 
 export const CHANNEL_TELEGRAM = 'telegram';
 
+export function normalizeTelegramUsername(username: unknown): string | null {
+  if (typeof username !== 'string') return null;
+  const normalized = username.trim().replace(/^@/, '');
+  return normalized !== '' ? normalized : null;
+}
+
+export function resolveCampaignChannelId(
+  telegramId: unknown,
+  username: unknown
+): string | null {
+  const usernameNorm = normalizeTelegramUsername(username);
+  const telegramIdNorm =
+    telegramId != null && String(telegramId).trim() !== '' ? String(telegramId).trim() : null;
+  return usernameNorm ?? telegramIdNorm;
+}
+
 export function getContactField(
   contact: Record<string, unknown>,
   field: 'first_name' | 'last_name' | 'email' | 'phone' | 'telegram_id' | 'company_name'

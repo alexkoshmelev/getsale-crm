@@ -6,7 +6,7 @@ import { EventType, CampaignStartedEvent, CampaignPausedEvent } from '@getsale/e
 import { CampaignStatus } from '@getsale/types';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, withOrgContext } from '@getsale/service-core';
-import { resolveDelayRange, sampleDelaySeconds, staggeredFirstSendAtByOffset, type Schedule } from '../helpers';
+import { resolveCampaignChannelId, resolveDelayRange, sampleDelaySeconds, staggeredFirstSendAtByOffset, type Schedule } from '../helpers';
 
 interface Deps {
   pool: Pool;
@@ -147,10 +147,9 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
     for (const row of contacts) {
       let bdAccountId = accountIds.length > 0 ? accountIds[contactIndex % accountIds.length]! : null;
       contactIndex++;
-      const telegramId = row.telegram_id != null && String(row.telegram_id).trim() !== '' ? String(row.telegram_id).trim() : null;
-      const usernameRaw = row.username != null ? String(row.username).trim().replace(/^@/, '') : null;
-      const usernameNorm = usernameRaw !== '' ? usernameRaw : null;
-      let channelId: string | null = telegramId ?? usernameNorm;
+      // Prefer username for campaign send-path because GramJS can resolve it server-side
+      // even when numeric Telegram ID is missing access_hash in session cache.
+      let channelId: string | null = resolveCampaignChannelId(row.telegram_id, row.username);
       if (channelId && bdAccountId) {
         const chatRes = await pool.query(
           `SELECT bd_account_id, telegram_chat_id FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1`,

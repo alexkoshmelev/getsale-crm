@@ -10,6 +10,25 @@ import type { MessagesRouterDeps } from './messages-deps';
 
 export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): void {
   const { pool, rabbitmq, log, bdAccountsClient } = deps;
+  const isEntityResolutionError = (error: unknown): boolean => {
+    const msg = error instanceof Error ? error.message : String(error);
+    const lowered = msg.toLowerCase();
+    if (
+      lowered.includes('could not find the input entity') ||
+      lowered.includes('user or chat not found') ||
+      lowered.includes('peer_id_invalid') ||
+      lowered.includes('chat_id_invalid')
+    ) {
+      return true;
+    }
+    if (error instanceof ServiceCallError && error.body != null && typeof error.body === 'object') {
+      const body = error.body as { message?: unknown; error?: unknown };
+      const m = typeof body.message === 'string' ? body.message.toLowerCase() : '';
+      const e = typeof body.error === 'string' ? body.error.toLowerCase() : '';
+      return m.includes('user or chat not found') || e.includes('user or chat not found');
+    }
+    return false;
+  };
 
   router.post('/send', validate(MsgSendMessageSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
@@ -26,6 +45,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
     }
 
     const contactIdOrNull = contactId ?? null;
+    let contactUsernameNorm: string | null = null;
     if (contactIdOrNull) {
       const contactResult = await pool.query(
         'SELECT id, organization_id, telegram_id, first_name, last_name, username FROM contacts WHERE id = $1 AND organization_id = $2',
@@ -34,6 +54,9 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       if (contactResult.rows.length === 0) {
         throw new AppError(404, 'Contact not found', ErrorCodes.NOT_FOUND);
       }
+      const contactRow = contactResult.rows[0] as { username?: string | null };
+      const usernameRaw = typeof contactRow.username === 'string' ? contactRow.username.trim().replace(/^@/, '') : '';
+      contactUsernameNorm = usernameRaw || null;
     }
 
     const captionOrContent = typeof content === 'string' ? content : '';
@@ -79,32 +102,36 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       }
     }
 
-    const body: Record<string, string> = {
-      chatId: channelId,
-      text: captionOrContent,
+    const makeBody = (chatIdValue: string): Record<string, string> => {
+      const body: Record<string, string> = {
+        chatId: chatIdValue,
+        text: captionOrContent,
+      };
+      if (fileBase64 && typeof fileBase64 === 'string') {
+        body.fileBase64 = fileBase64;
+        body.fileName = typeof fileName === 'string' ? fileName : 'file';
+      }
+      if (replyToTgId) {
+        body.replyToMessageId = replyToTgId;
+      }
+      if (typeof idempotencyKey === 'string' && idempotencyKey.trim()) {
+        body.idempotencyKey = idempotencyKey.trim();
+      }
+      return body;
     };
-    if (fileBase64 && typeof fileBase64 === 'string') {
-      body.fileBase64 = fileBase64;
-      body.fileName = typeof fileName === 'string' ? fileName : 'file';
-    }
-    if (replyToTgId) {
-      body.replyToMessageId = replyToTgId;
-    }
-    if (typeof idempotencyKey === 'string' && idempotencyKey.trim()) {
-      body.idempotencyKey = idempotencyKey.trim();
-    }
-    const doSend = () =>
+    let sentChannelId = channelId;
+    const doSend = (chatIdValue: string) =>
       bdAccountsClient.post<{
         messageId?: string;
         date?: number;
         telegram_media?: Record<string, unknown> | null;
         telegram_entities?: Record<string, unknown>[] | null;
-      }>(`/api/bd-accounts/${bdAccountId}/send`, body, undefined, { userId, organizationId });
+      }>(`/api/bd-accounts/${bdAccountId}/send`, makeBody(chatIdValue), undefined, { userId, organizationId });
 
     let resJson: Awaited<ReturnType<typeof doSend>> | null = null;
     let lastError: unknown = null;
     try {
-      resJson = await doSend();
+      resJson = await doSend(channelId);
     } catch (error: unknown) {
       const isNotConnected =
         error instanceof ServiceCallError &&
@@ -113,12 +140,30 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       if (isNotConnected) {
         await new Promise((r) => setTimeout(r, 2500));
         try {
-          resJson = await doSend();
+          resJson = await doSend(channelId);
         } catch (retryErr: unknown) {
           lastError = retryErr;
         }
       } else {
         lastError = error;
+      }
+    }
+
+    // Campaign-only fallback for existing participants saved with numeric chatId:
+    // if entity cannot be resolved, retry once with contact username.
+    if (
+      resJson == null &&
+      source === 'campaign' &&
+      lastError != null &&
+      isEntityResolutionError(lastError) &&
+      contactUsernameNorm &&
+      contactUsernameNorm !== channelId
+    ) {
+      try {
+        resJson = await doSend(contactUsernameNorm);
+        sentChannelId = contactUsernameNorm;
+      } catch (fallbackErr: unknown) {
+        lastError = fallbackErr;
       }
     }
 
@@ -166,7 +211,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
         organizationId,
         bdAccountId,
         channel,
-        channelId,
+        sentChannelId,
         contactIdOrNull,
         MessageDirection.OUTBOUND,
         contentForDb,
@@ -186,7 +231,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       await pool.query(
         `UPDATE conversations SET first_manager_reply_at = COALESCE(first_manager_reply_at, NOW()), updated_at = NOW()
          WHERE organization_id = $1 AND bd_account_id IS NOT DISTINCT FROM $2 AND channel = $3 AND channel_id = $4`,
-        [organizationId, bdAccountId, channel, channelId]
+        [organizationId, bdAccountId, channel, sentChannelId]
       );
     }
 

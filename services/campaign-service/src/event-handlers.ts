@@ -9,6 +9,7 @@ import {
   CHANNEL_TELEGRAM,
   ensureLeadInPipeline,
   delayHoursFromStep,
+  resolveCampaignChannelId,
   resolveDelayRange,
   sampleDelaySeconds,
   staggeredFirstSendAtByOffset,
@@ -204,10 +205,10 @@ async function addContactToDynamicCampaigns(
   const { pool } = deps;
 
   const contactRow = await pool.query(
-    'SELECT id, telegram_id FROM contacts WHERE id = $1 AND organization_id = $2',
+    'SELECT id, telegram_id, username FROM contacts WHERE id = $1 AND organization_id = $2',
     [contactId, organizationId]
   );
-  if (contactRow.rows.length === 0 || !contactRow.rows[0].telegram_id) return;
+  if (contactRow.rows.length === 0) return;
 
   const campaigns = await pool.query(
     `SELECT id, target_audience, schedule FROM campaigns
@@ -236,13 +237,15 @@ async function addContactToDynamicCampaigns(
     if (!bdAccountId) continue;
 
     const telegramId = contactRow.rows[0].telegram_id;
-    let channelId: string | null = String(telegramId);
-    const chatRes = await pool.query(
-      'SELECT bd_account_id, telegram_chat_id FROM bd_account_sync_chats WHERE bd_account_id = $1::uuid AND telegram_chat_id = $2 LIMIT 1',
-      [bdAccountId, telegramId]
-    );
-    if (chatRes.rows.length > 0) {
-      channelId = String(chatRes.rows[0].telegram_chat_id);
+    let channelId: string | null = resolveCampaignChannelId(contactRow.rows[0].telegram_id, contactRow.rows[0].username);
+    if (telegramId) {
+      const chatRes = await pool.query(
+        'SELECT bd_account_id, telegram_chat_id FROM bd_account_sync_chats WHERE bd_account_id = $1::uuid AND telegram_chat_id = $2 LIMIT 1',
+        [bdAccountId, telegramId]
+      );
+      if (chatRes.rows.length > 0) {
+        channelId = String(chatRes.rows[0].telegram_chat_id);
+      }
     }
     if (!channelId) continue;
 

@@ -10,6 +10,8 @@ import {
   dateInTz,
   isWithinScheduleAt,
   resolveDelayRange,
+  resolveCampaignChannelId,
+  normalizeTelegramUsername,
   sampleDelaySeconds,
   staggeredFirstSendAtByOffset,
   staggeredFirstSendAt,
@@ -193,6 +195,20 @@ describe('resolveDelayRange', () => {
 describe('sampleDelaySeconds', () => {
   it('returns fixed value for equal bounds', () => {
     expect(sampleDelaySeconds({ minSeconds: 13, maxSeconds: 13 })).toBe(13);
+  });
+});
+
+describe('campaign channel id resolution', () => {
+  it('prefers username over telegram id when both exist', () => {
+    expect(resolveCampaignChannelId('123456789', '@john_doe')).toBe('john_doe');
+  });
+
+  it('falls back to telegram id when username is missing', () => {
+    expect(resolveCampaignChannelId('123456789', null)).toBe('123456789');
+  });
+
+  it('normalizes username by trimming and removing @', () => {
+    expect(normalizeTelegramUsername('  @Sales_User  ')).toBe('Sales_User');
   });
 });
 

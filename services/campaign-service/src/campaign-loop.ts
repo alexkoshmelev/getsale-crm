@@ -240,6 +240,16 @@ function isNonRetryableCampaignSendError(err: unknown): boolean {
   return needles.some((n) => msg.includes(n));
 }
 
+function isEntityResolutionSendError(err: unknown): boolean {
+  const msg = campaignSendDownstreamReason(err).toLowerCase();
+  return (
+    msg.includes('user or chat not found') ||
+    msg.includes('could not find the input entity') ||
+    msg.includes('peer_id_invalid') ||
+    msg.includes('chat_id_invalid')
+  );
+}
+
 async function sendMessageWithRetry(
   messagingClient: ServiceHttpClient,
   payload: { contactId: string; channelId: string; content: string; bdAccountId: string; idempotencyKey: string },
@@ -345,7 +355,7 @@ async function processParticipant(
   const schedule = meta?.schedule ?? null;
 
   const contactRes = await pool.query(
-    `SELECT c.first_name, c.last_name, c.email, c.phone, c.telegram_id, co.name as company_name
+    `SELECT c.first_name, c.last_name, c.email, c.phone, c.telegram_id, c.username, co.name as company_name
      FROM contacts c LEFT JOIN companies co ON co.id = c.company_id WHERE c.id = $1`,
     [row.contact_id]
   );
@@ -406,7 +416,10 @@ async function processParticipant(
   await simulateHumanBehavior(bdAccountsClient, row.bd_account_id, row.channel_id, content.length, row.organization_id, log);
 
   let msgJson: { id?: string };
+  let deliveredChannelId = row.channel_id;
   const idempotencyKey = `campaign:${row.campaign_id}:participant:${row.participant_id}:step:${row.current_step}`;
+  const usernameRaw = typeof contact.username === 'string' ? contact.username.trim().replace(/^@/, '') : '';
+  const usernameForFallback = usernameRaw || null;
   try {
     msgJson = await sendMessageWithRetry(
       messagingClient,
@@ -416,14 +429,45 @@ async function processParticipant(
       log
     );
   } catch (sendErr) {
+    if (
+      isEntityResolutionSendError(sendErr) &&
+      usernameForFallback &&
+      usernameForFallback !== row.channel_id
+    ) {
+      try {
+        log.info({
+          message: 'Campaign send: retrying by username fallback after entity resolution error',
+          participantId: row.participant_id,
+          originalChannelId: row.channel_id,
+          fallbackChannelId: usernameForFallback,
+        });
+        msgJson = await sendMessageWithRetry(
+          messagingClient,
+          {
+            contactId: row.contact_id,
+            channelId: usernameForFallback,
+            content,
+            bdAccountId: row.bd_account_id,
+            idempotencyKey,
+          },
+          { userId: systemUserId, organizationId: row.organization_id },
+          SEND_MAX_RETRIES,
+          log
+        );
+        deliveredChannelId = usernameForFallback;
+      } catch (fallbackErr) {
+        sendErr = fallbackErr;
+      }
+    }
     const reasonMessage =
       sendErr instanceof ServiceCallError && sendErr.body != null && typeof sendErr.body === 'object'
         ? (sendErr.body as { message?: string }).message ?? (sendErr.body as { error?: string }).error ?? (sendErr instanceof Error ? sendErr.message : String(sendErr))
         : sendErr instanceof Error ? sendErr.message : String(sendErr);
 
-    const is429 = sendErr instanceof ServiceCallError && sendErr.statusCode === 429;
+    const sendErrSvc = sendErr instanceof ServiceCallError ? sendErr : null;
+    const is429 = sendErrSvc?.statusCode === 429;
     if (is429) {
-      const body = sendErr.body as { details?: { retryAfterSeconds?: number } } | undefined;
+      const body = sendErrSvc?.body as { details?: { retryAfterSeconds?: number } } | undefined;
       const retryAfterSeconds =
         body?.details?.retryAfterSeconds ?? CAMPAIGN_429_RETRY_AFTER_MINUTES * 60;
       const retryAt = new Date(Date.now() + retryAfterSeconds * 1000);
@@ -462,6 +506,13 @@ async function processParticipant(
       reason: reasonMessage,
     });
     return;
+  }
+
+  if (deliveredChannelId !== row.channel_id) {
+    await client.query(
+      `UPDATE campaign_participants SET channel_id = $1, updated_at = NOW() WHERE id = $2`,
+      [deliveredChannelId, row.participant_id]
+    );
   }
 
   await advanceToNextStep(client, row.participant_id, row.current_step, steps, schedule, {

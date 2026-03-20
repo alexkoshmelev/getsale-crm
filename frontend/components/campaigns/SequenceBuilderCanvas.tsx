@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { clsx } from 'clsx';
 import { Plus, MessageSquare, Clock, Pencil, Trash2, GripVertical, Eye } from 'lucide-react';
@@ -49,6 +49,90 @@ function formatStepDelay(hours: number, minutes: number): string {
   if (hours > 0 && minutes > 0) return `${hours} ч ${minutes} мин`;
   if (minutes > 0) return `${minutes} мин`;
   return hours === 1 ? '1 ч' : `${hours} ч`;
+}
+
+/** Step delay slider: 1 min … 1 day, non-linear scale (fine at start). Stored as hours+minutes (seconds rounded on save). */
+const STEP_DELAY_MIN_SEC = 60;
+const STEP_DELAY_DEFAULT_MAX_SEC = 24 * 3600;
+/** First segment ends at 10 min — slider uses ~40% width for high resolution. */
+const STEP_DELAY_SEG1_END_SEC = 10 * 60;
+/** Second segment ends at 2 h — next ~35% for minute steps. */
+const STEP_DELAY_SEG2_END_SEC = 2 * 3600;
+const STEP_DELAY_SLIDER_P1 = 0.4;
+const STEP_DELAY_SLIDER_P2 = 0.75;
+
+function secondsFromSliderPosition(p: number, maxSec: number): number {
+  const T0 = STEP_DELAY_MIN_SEC;
+  const T1 = STEP_DELAY_SEG1_END_SEC;
+  const T2 = STEP_DELAY_SEG2_END_SEC;
+  const T3 = Math.max(T2 + 60, maxSec);
+  const clampedP = Math.min(1, Math.max(0, p));
+  if (clampedP <= STEP_DELAY_SLIDER_P1) {
+    const q = clampedP / STEP_DELAY_SLIDER_P1;
+    return T0 + q * (T1 - T0);
+  }
+  if (clampedP <= STEP_DELAY_SLIDER_P2) {
+    const q = (clampedP - STEP_DELAY_SLIDER_P1) / (STEP_DELAY_SLIDER_P2 - STEP_DELAY_SLIDER_P1);
+    return T1 + q * (T2 - T1);
+  }
+  const q = (clampedP - STEP_DELAY_SLIDER_P2) / (1 - STEP_DELAY_SLIDER_P2);
+  return T2 + q * (T3 - T2);
+}
+
+function sliderPositionFromSeconds(sec: number, maxSec: number): number {
+  const T0 = STEP_DELAY_MIN_SEC;
+  const T1 = STEP_DELAY_SEG1_END_SEC;
+  const T2 = STEP_DELAY_SEG2_END_SEC;
+  const T3 = Math.max(T2 + 60, maxSec);
+  const s = Math.min(Math.max(sec, T0), T3);
+  if (s <= T1) return STEP_DELAY_SLIDER_P1 * ((s - T0) / (T1 - T0));
+  if (s <= T2) {
+    return STEP_DELAY_SLIDER_P1 + (STEP_DELAY_SLIDER_P2 - STEP_DELAY_SLIDER_P1) * ((s - T1) / (T2 - T1));
+  }
+  return STEP_DELAY_SLIDER_P2 + (1 - STEP_DELAY_SLIDER_P2) * ((s - T2) / (T3 - T2));
+}
+
+/** Snap: 15s in first segment, 1 min in middle, 15 min at the end (hour-scale). */
+function snapStepDelaySeconds(sec: number, maxSec: number): number {
+  const raw = Math.min(maxSec, Math.max(STEP_DELAY_MIN_SEC, sec));
+  if (raw <= STEP_DELAY_SEG1_END_SEC) return Math.round(raw / 15) * 15;
+  if (raw <= STEP_DELAY_SEG2_END_SEC) return Math.round(raw / 60) * 60;
+  return Math.round(raw / 900) * 900;
+}
+
+function ceilSnapForMaxDynamic(sec: number): number {
+  const s = Math.max(0, sec);
+  if (s <= STEP_DELAY_SEG1_END_SEC) return Math.ceil(s / 15) * 15;
+  if (s <= STEP_DELAY_SEG2_END_SEC) return Math.ceil(s / 60) * 60;
+  return Math.ceil(s / 900) * 900;
+}
+
+/** Readable label including seconds when relevant (UI only; API stores rounded minutes). */
+function formatDelayFromSeconds(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const totalHours = s / 3600;
+  if (totalHours >= 24) {
+    const days = Math.round(totalHours / 24);
+    return days === 1 ? '1 дн.' : `${days} дн.`;
+  }
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) {
+    if (m > 0 && sec > 0) return `${h} ч ${m} мин ${sec} сек`;
+    if (m > 0) return `${h} ч ${m} мин`;
+    if (sec > 0) return `${h} ч ${sec} сек`;
+    return h === 1 ? '1 ч' : `${h} ч`;
+  }
+  if (m > 0 && sec > 0) return `${m} мин ${sec} сек`;
+  if (m > 0) return `${m} мин`;
+  if (sec > 0) return `${sec} сек`;
+  return '1 мин';
+}
+
+function delayPartsFromTotalSeconds(totalSeconds: number): { delayHours: number; delayMinutes: number } {
+  const mins = Math.max(1, Math.round(totalSeconds / 60));
+  return { delayHours: Math.floor(mins / 60), delayMinutes: mins % 60 };
 }
 
 /** Step conditions (matches backend StepConditions). */
@@ -109,8 +193,8 @@ export function SequenceBuilderCanvas({
   const [formName, setFormName] = useState('');
   const [formChannel, setFormChannel] = useState('telegram');
   const [formContent, setFormContent] = useState('');
-  const [formDelayHours, setFormDelayHours] = useState(24);
-  const [formDelayMinutes, setFormDelayMinutes] = useState(0);
+  /** Total delay for step (seconds); UI slider 1 min–1 day; saved as rounded minutes → hours/minutes. */
+  const [formDelayTotalSeconds, setFormDelayTotalSeconds] = useState(STEP_DELAY_DEFAULT_MAX_SEC);
   const [formTriggerType, setFormTriggerType] = useState<'delay' | 'after_reply'>('delay');
   const [formStopIfReplied, setFormStopIfReplied] = useState(false);
   const [formContactConditions, setFormContactConditions] = useState<ContactRule[]>([]);
@@ -128,8 +212,7 @@ export function SequenceBuilderCanvas({
     setFormName('');
     setFormChannel('telegram');
     setFormContent('');
-    setFormDelayHours(24);
-    setFormDelayMinutes(0);
+    setFormDelayTotalSeconds(STEP_DELAY_DEFAULT_MAX_SEC);
     setFormTriggerType('delay');
     setFormStopIfReplied(false);
     setFormContactConditions([]);
@@ -143,8 +226,11 @@ export function SequenceBuilderCanvas({
     setFormName(step.template_name || '');
     setFormChannel(step.channel || 'telegram');
     setFormContent(step.content || '');
-    setFormDelayHours(step.delay_hours ?? 24);
-    setFormDelayMinutes(step.delay_minutes ?? 0);
+    {
+      const rawSec =
+        (step.delay_hours ?? 0) * 3600 + (step.delay_minutes ?? 0) * 60;
+      setFormDelayTotalSeconds(rawSec < STEP_DELAY_MIN_SEC ? STEP_DELAY_MIN_SEC : rawSec);
+    }
     setFormTriggerType(step.trigger_type === 'after_reply' ? 'after_reply' : 'delay');
     const c = (step.conditions || {}) as StepConditionsForm;
     setFormStopIfReplied(!!c.stopIfReplied);
@@ -173,6 +259,7 @@ export function SequenceBuilderCanvas({
     if (!name || content === undefined) return;
     setSaving(true);
     try {
+      const { delayHours, delayMinutes } = delayPartsFromTotalSeconds(formDelayTotalSeconds);
       if (editingStep) {
         await updateCampaignTemplate(campaignId, editingStep.template_id, {
           name,
@@ -180,8 +267,8 @@ export function SequenceBuilderCanvas({
           content,
         });
         await updateCampaignSequenceStep(campaignId, editingStep.id, {
-          delayHours: formDelayHours,
-          delayMinutes: formDelayMinutes,
+          delayHours,
+          delayMinutes,
           conditions,
           triggerType: formTriggerType,
         });
@@ -194,8 +281,8 @@ export function SequenceBuilderCanvas({
         await createCampaignSequenceStep(campaignId, {
           orderIndex: sortedSteps.length,
           templateId: template.id,
-          delayHours: formDelayHours,
-          delayMinutes: formDelayMinutes,
+          delayHours,
+          delayMinutes,
           conditions,
           triggerType: formTriggerType,
         });
@@ -418,10 +505,8 @@ export function SequenceBuilderCanvas({
           setChannel={setFormChannel}
           content={formContent}
           setContent={setFormContent}
-          delayHours={formDelayHours}
-          setDelayHours={setFormDelayHours}
-          delayMinutes={formDelayMinutes}
-          setDelayMinutes={setFormDelayMinutes}
+          delayTotalSeconds={formDelayTotalSeconds}
+          setDelayTotalSeconds={setFormDelayTotalSeconds}
           triggerType={formTriggerType}
           setTriggerType={setFormTriggerType}
           stopIfReplied={formStopIfReplied}
@@ -451,10 +536,8 @@ function StepEditModal({
   setChannel,
   content,
   setContent,
-  delayHours,
-  setDelayHours,
-  delayMinutes,
-  setDelayMinutes,
+  delayTotalSeconds,
+  setDelayTotalSeconds,
   triggerType,
   setTriggerType,
   stopIfReplied,
@@ -478,10 +561,8 @@ function StepEditModal({
   setChannel: (v: string) => void;
   content: string;
   setContent: (v: string) => void;
-  delayHours: number;
-  setDelayHours: (v: number) => void;
-  delayMinutes: number;
-  setDelayMinutes: (v: number) => void;
+  delayTotalSeconds: number;
+  setDelayTotalSeconds: (v: number) => void;
   triggerType: 'delay' | 'after_reply';
   setTriggerType: (v: 'delay' | 'after_reply') => void;
   stopIfReplied: boolean;
@@ -505,6 +586,51 @@ function StepEditModal({
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [stagesForIn, setStagesForIn] = useState<Stage[]>([]);
   const [stagesForNotIn, setStagesForNotIn] = useState<Stage[]>([]);
+
+  const stepDelayTrackRef = useRef<HTMLDivElement>(null);
+  const [draggingStepDelay, setDraggingStepDelay] = useState(false);
+
+  const stepDelayMaxSeconds = Math.max(
+    STEP_DELAY_DEFAULT_MAX_SEC,
+    ceilSnapForMaxDynamic(delayTotalSeconds)
+  );
+
+  const applyStepDelaySeconds = useCallback(
+    (sec: number) => {
+      const snapped = snapStepDelaySeconds(sec, stepDelayMaxSeconds);
+      setDelayTotalSeconds(snapped);
+    },
+    [setDelayTotalSeconds, stepDelayMaxSeconds]
+  );
+
+  const stepDelaySecondsFromClientX = useCallback(
+    (clientX: number) => {
+      const el = stepDelayTrackRef.current;
+      if (!el) return delayTotalSeconds;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0) return delayTotalSeconds;
+      const p = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+      const raw = secondsFromSliderPosition(p, stepDelayMaxSeconds);
+      return snapStepDelaySeconds(raw, stepDelayMaxSeconds);
+    },
+    [stepDelayMaxSeconds, delayTotalSeconds]
+  );
+
+  useEffect(() => {
+    if (!draggingStepDelay) return;
+    const onMove = (e: MouseEvent) => {
+      applyStepDelaySeconds(stepDelaySecondsFromClientX(e.clientX));
+    };
+    const onUp = () => setDraggingStepDelay(false);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [draggingStepDelay, stepDelaySecondsFromClientX, applyStepDelaySeconds]);
+
+  const stepDelaySliderP = sliderPositionFromSeconds(delayTotalSeconds, stepDelayMaxSeconds);
 
   useEffect(() => {
     fetchContacts({ limit: 100 })
@@ -712,30 +838,50 @@ function StepEditModal({
                   <label className="block text-sm font-medium text-foreground mt-2 mb-1.5">
                     {t('campaigns.stepDelay')}
                   </label>
-                  <div className="flex gap-2">
-                    <div className="flex-1">
-                      <span className="text-xs text-muted-foreground block mb-1">{t('campaigns.stepDelayHoursLabel')}</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={8760}
-                        value={delayHours}
-                        onChange={(e) => setDelayHours(Math.max(0, parseInt(e.target.value, 10) || 0))}
-                        className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
-                      />
-                    </div>
-                    <div className="flex-1">
-                      <span className="text-xs text-muted-foreground block mb-1">{t('campaigns.stepDelayMinutesLabel')}</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={59}
-                        value={delayMinutes}
-                        onChange={(e) => setDelayMinutes(Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)))}
-                        className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
-                      />
-                    </div>
+                  <div
+                    ref={stepDelayTrackRef}
+                    className="relative h-8 mt-1"
+                    onMouseDown={(e) => {
+                      applyStepDelaySeconds(stepDelaySecondsFromClientX(e.clientX));
+                    }}
+                  >
+                    <div className="absolute top-1/2 -translate-y-1/2 h-1.5 w-full rounded-full bg-muted/60" />
+                    <div
+                      className="absolute top-1/2 -translate-y-1/2 h-1.5 rounded-full bg-primary"
+                      style={{
+                        left: 0,
+                        width: `${stepDelaySliderP * 100}%`,
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDraggingStepDelay(true);
+                      }}
+                      className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-primary border-2 border-background shadow"
+                      style={{
+                        left: `${stepDelaySliderP * 100}%`,
+                        zIndex: draggingStepDelay ? 40 : 20,
+                      }}
+                      aria-label={t('campaigns.stepDelaySliderAria')}
+                      aria-valuemin={STEP_DELAY_MIN_SEC}
+                      aria-valuemax={stepDelayMaxSeconds}
+                      aria-valuenow={delayTotalSeconds}
+                    />
                   </div>
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground -mt-1">
+                    <span>{t('campaigns.stepDelaySliderMin')}</span>
+                    <span>
+                      {stepDelayMaxSeconds <= STEP_DELAY_DEFAULT_MAX_SEC
+                        ? t('campaigns.stepDelaySliderMax1d')
+                        : formatDelayFromSeconds(stepDelayMaxSeconds)}
+                    </span>
+                  </div>
+                  <p className="text-sm text-foreground mt-1">
+                    {formatDelayFromSeconds(delayTotalSeconds)}
+                  </p>
                 </>
               )}
             </div>
