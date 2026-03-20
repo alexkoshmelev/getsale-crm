@@ -105,3 +105,9 @@
 
 - **api-gateway** (proxies): для bd-accounts задан таймаут 5 мин (300000 ms). Меньший лимит приведёт к обрыву ответа и «Ошибка загрузки» на клиенте.
 - **Traefik** (или другой reverse proxy перед api-gateway): при настройке `transport.respondingTimeouts` не задавать для маршрута к API значение меньше 5 мин, иначе долгий ответ dialogs-by-folders будет обрезан.
+
+## 8. Runtime policy updates
+
+- Keepalive для Telegram update-loop в `bd-accounts-service` выполняется каждые **30 секунд** (`updates.GetState`).
+- Proxy policy для Telegram подключений: только **SOCKS5**.
+- Ошибки `PRIVACY_PREMIUM_REQUIRED`, `USER_PRIVACY_RESTRICTED`, `CHAT_WRITE_FORBIDDEN`, `USER_NOT_MUTUAL_CONTACT` мапятся в user-friendly 400 в send-route.

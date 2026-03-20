@@ -3,6 +3,7 @@ import { Api } from 'telegram';
 import type { Pool } from 'pg';
 import { getErrorMessage } from '../helpers';
 import type { TelegramManagerDeps, TelegramClientInfo, StructuredLog } from './types';
+import { telegramInvokeWithFloodRetry } from './telegram-invoke-flood';
 
 /**
  * Contact enrichment/upsert from Telegram user data.
@@ -120,9 +121,9 @@ export class ContactManager {
 
       if (!skipGetFullUser) {
         try {
-          const fullResult = await client.invoke(
-            new Api.users.GetFullUser({ id: peer })
-          ) as Api.users.UserFull;
+          const fullResult = (await telegramInvokeWithFloodRetry(this.log, accountId, 'GetFullUser', () =>
+            client.invoke(new Api.users.GetFullUser({ id: peer }))
+          )) as Api.users.UserFull;
           const fullUser = (fullResult as any).fullUser ?? fullResult?.fullUser;
           if (fullUser?.about != null) bio = String(fullUser.about).trim() || null;
           if (fullUser?.phone != null && !phone) phone = String(fullUser.phone).trim() || null;

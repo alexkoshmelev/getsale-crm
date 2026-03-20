@@ -12,7 +12,7 @@ import { PipelineManageModal } from '@/components/pipeline/PipelineManageModal';
 import { LeadCardModal } from '@/components/pipeline/LeadCardModal';
 import { LeadCardPreview } from '@/components/pipeline/LeadCardPreview';
 import { LeadAvatar } from '@/components/pipeline/LeadAvatar';
-import { apiClient } from '@/lib/api/client';
+import { listBdAccountIds } from '@/lib/api/bd-accounts';
 import { safeSetItem } from '@/lib/safe-storage';
 import { reportError, reportWarning } from '@/lib/error-reporter';
 import { formatDealAmount } from '@/lib/format/currency';
@@ -69,10 +69,9 @@ export default function PipelinePage() {
   const [firstBdAccountId, setFirstBdAccountId] = useState<string | null>(null);
 
   useEffect(() => {
-    apiClient.get<{ id: string }[]>('/api/bd-accounts').then((r) => {
-      const list = Array.isArray(r.data) ? r.data : [];
-      setFirstBdAccountId(list.length > 0 ? list[0].id : null);
-    }).catch(() => setFirstBdAccountId(null));
+    listBdAccountIds()
+      .then((list) => setFirstBdAccountId(list.length > 0 ? list[0]!.id : null))
+      .catch(() => setFirstBdAccountId(null));
   }, []);
 
   const loadPipelines = useCallback(async () => {

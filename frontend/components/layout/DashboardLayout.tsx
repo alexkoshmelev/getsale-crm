@@ -40,6 +40,7 @@ import { NotificationsDropdown } from '@/components/layout/NotificationsDropdown
 import { KeyboardShortcutsModal } from '@/components/layout/KeyboardShortcutsModal';
 import { HelpDropdown } from '@/components/layout/HelpDropdown';
 import { OnboardingModal } from '@/components/layout/OnboardingModal';
+import { runWhenIdle } from '@/lib/run-when-idle';
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -71,7 +72,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const { t } = useTranslation();
   const router = useRouter();
   const pathname = usePathname();
-  const { user, logout, workspaces, fetchWorkspaces, switchWorkspace, refreshUser } = useAuthStore();
+  const { user, logout, workspaces, fetchWorkspaces, switchWorkspace } = useAuthStore();
   const { sidebarCollapsed, toggleSidebar } = useLayoutStore();
   const { mode: themeMode, setMode: setThemeMode } = useThemeStore();
   const { locale, setLocale } = useLocaleStore();
@@ -80,13 +81,14 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const [workspaceDropdownOpen, setWorkspaceDropdownOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
 
+  // Session is validated in app/dashboard/layout.tsx (/api/auth/me). Avoid a second /me here.
+  // Workspaces are only needed for the sidebar switcher — load after idle so home/route data wins the network.
   useEffect(() => {
-    if (user?.id) fetchWorkspaces();
+    if (!user?.id) return;
+    return runWhenIdle(() => {
+      void fetchWorkspaces();
+    }, 3000);
   }, [user?.id, fetchWorkspaces]);
-
-  useEffect(() => {
-    refreshUser();
-  }, [refreshUser]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -165,6 +167,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch={false}
                 title={sidebarCollapsed ? label : undefined}
                 className={clsx(
                   'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors',
@@ -193,6 +196,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch={false}
                 title={sidebarCollapsed ? label : undefined}
                 className={clsx(
                   'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors',

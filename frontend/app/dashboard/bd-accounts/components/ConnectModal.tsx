@@ -73,6 +73,72 @@ export function ConnectModal(c: ConnectModalProps) {
                   />
                 </div>
               )}
+              <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-3 space-y-3">
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={c.useProxy}
+                    onChange={(e) => c.setUseProxy(e.target.checked)}
+                    className="rounded border-gray-300 w-4 h-4"
+                  />
+                  Использовать прокси
+                </label>
+                {c.useProxy && (
+                  <div className="space-y-2">
+                    <div>
+                      <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Тип прокси</label>
+                      <select
+                        value={c.proxyForm.type}
+                        onChange={(e) => c.setProxyForm({ ...c.proxyForm, type: e.target.value as 'socks5' | 'http' })}
+                        className="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm"
+                      >
+                        <option value="socks5">SOCKS5</option>
+                        <option value="http" disabled>HTTP/HTTPS (скоро)</option>
+                      </select>
+                    </div>
+                    <p className="text-xs text-amber-600 dark:text-amber-400">
+                      Сейчас для Telegram login поддерживается только SOCKS5.
+                    </p>
+                    <div className="grid grid-cols-3 gap-2">
+                      <div className="col-span-2">
+                        <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Host</label>
+                        <Input
+                          value={c.proxyForm.host}
+                          onChange={(e) => c.setProxyForm({ ...c.proxyForm, host: e.target.value })}
+                          placeholder="127.0.0.1"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Port</label>
+                        <Input
+                          value={c.proxyForm.port}
+                          onChange={(e) => c.setProxyForm({ ...c.proxyForm, port: e.target.value })}
+                          placeholder="1080"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Логин (опционально)</label>
+                        <Input
+                          value={c.proxyForm.username}
+                          onChange={(e) => c.setProxyForm({ ...c.proxyForm, username: e.target.value })}
+                          placeholder="user"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Пароль (опционально)</label>
+                        <Input
+                          type="password"
+                          value={c.proxyForm.password}
+                          onChange={(e) => c.setProxyForm({ ...c.proxyForm, password: e.target.value })}
+                          placeholder="••••••"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </>
           )}
 

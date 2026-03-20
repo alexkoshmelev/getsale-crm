@@ -1,30 +1,8 @@
 import { Pool, PoolClient } from 'pg';
-import { AppError, ErrorCodes, parseLimit } from '@getsale/service-core';
+import { AppError, ErrorCodes, parsePageLimit, buildPagedResponse } from '@getsale/service-core';
 
-/** Parse page and limit from query; default limit 20, max 100. Uses shared parseLimit for consistency. */
-export function parsePageLimit(
-  query: Record<string, unknown>,
-  defaultLimit = 20,
-  maxLimit = 100
-): { page: number; limit: number; offset: number } {
-  const page = Math.max(1, parseInt(String(query.page), 10) || 1);
-  const limit = parseLimit(query, defaultLimit, maxLimit);
-  const offset = (page - 1) * limit;
-  return { page, limit, offset };
-}
-
-/** Build standard paged response. */
-export function buildPagedResponse<T>(
-  items: T[],
-  total: number,
-  page: number,
-  limit: number
-): { items: T[]; pagination: { page: number; limit: number; total: number; totalPages: number } } {
-  return {
-    items,
-    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
-  };
-}
+/** Re-export shared pagination for routes that import from ../helpers. */
+export { parsePageLimit, buildPagedResponse };
 
 export async function getFirstStageId(
   pool: Pool,

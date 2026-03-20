@@ -3,8 +3,11 @@ import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate, ServiceHttpClient } from '@getsale/service-core';
 import { randomUUID } from 'crypto';
-import { RedisClient } from '@getsale/utils';
+import type { RedisClient } from '@getsale/utils';
+
+type RedisSubscriber = ReturnType<RedisClient['duplicateSubscriber']>;
 import { ParseResolveSchema, ParseStartSchema } from '../validation';
+import { computeParseEtaFields } from '../parse-progress-utils';
 
 interface Deps {
   pool: Pool;
@@ -37,7 +40,15 @@ export function parseRouter({ pool, log, bdAccountsClient, campaignServiceClient
   // POST /api/crm/parse/start
   router.post('/start', validate(ParseStartSchema), asyncHandler(async (req, res) => {
     const { organizationId, id: userId } = req.user as { organizationId: string; id: string };
-    const { sources, settings, accountIds, listName, campaignId: reqCampaignId, campaignName } = req.body;
+    const {
+      sources,
+      settings,
+      accountIds,
+      listName,
+      campaignId: reqCampaignId,
+      campaignName,
+      channelEngagement,
+    } = req.body;
 
     let campaignId: string | undefined = reqCampaignId;
     if (!campaignId && campaignName?.trim()) {
@@ -78,6 +89,7 @@ export function parseRouter({ pool, log, bdAccountsClient, campaignServiceClient
       parseMode: 'all',
       postDepth: 100,
       ...(campaignId ? { campaignId } : {}),
+      ...(channelEngagement ? { channelEngagement } : {}),
     };
     const total = sources.length;
     const taskId = randomUUID();
@@ -91,7 +103,7 @@ export function parseRouter({ pool, log, bdAccountsClient, campaignServiceClient
     res.status(201).json({ taskId, campaignId: campaignId ?? null });
   }));
 
-  // GET /api/crm/parse/progress/:taskId — SSE stream (polls DB)
+  // GET /api/crm/parse/progress/:taskId — SSE: Redis parse:progress:{taskId} + DB poll fallback
   router.get('/progress/:taskId', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { taskId } = req.params;
@@ -136,6 +148,8 @@ export function parseRouter({ pool, log, bdAccountsClient, campaignServiceClient
         const percent = Math.min(100, Math.round((progress / total) * 100));
         const results = (t.results as Record<string, unknown>) || {};
         const parsed = Number(results.parsed) || 0;
+        const parseStartedAtMs =
+          typeof results.parseStartedAtMs === 'number' ? results.parseStartedAtMs : undefined;
 
         send({
           taskId,
@@ -147,11 +161,46 @@ export function parseRouter({ pool, log, bdAccountsClient, campaignServiceClient
           progress,
           total,
           status: t.status,
+          ...computeParseEtaFields({
+            parseStartedAtMs,
+            chatsCompleted: progress,
+            totalChats: total,
+            found: parsed,
+          }),
         });
       } catch (err: unknown) {
         log.warn({ message: 'Parse progress poll error', taskId, error: String(err) });
       }
     };
+
+    const progressChannel = `parse:progress:${taskId}`;
+    let sub: RedisSubscriber | null = null;
+    if (redis) {
+      try {
+        sub = redis.duplicateSubscriber();
+        await sub.subscribe(progressChannel);
+        sub.on('message', (_channel: string, message: string) => {
+          try {
+            const ev = JSON.parse(message) as Record<string, unknown>;
+            send(ev);
+          } catch {
+            // ignore malformed payloads
+          }
+        });
+      } catch (e) {
+        log.warn({
+          message: 'Parse SSE: Redis subscribe failed, using DB poll only',
+          taskId,
+          error: String(e),
+        });
+        try {
+          sub?.disconnect();
+        } catch {
+          /* noop */
+        }
+        sub = null;
+      }
+    }
 
     await poll();
     const interval = setInterval(poll, PARSE_PROGRESS_POLL_MS);
@@ -166,6 +215,11 @@ export function parseRouter({ pool, log, bdAccountsClient, campaignServiceClient
     req.on('close', () => {
       clearInterval(interval);
       clearInterval(keepalive);
+      if (sub) {
+        sub.unsubscribe(progressChannel).catch(() => {});
+        sub.disconnect();
+        sub = null;
+      }
       try {
         if (!res.writableEnded) res.end();
       } catch (e) {

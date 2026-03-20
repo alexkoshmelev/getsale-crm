@@ -104,5 +104,13 @@ export class RedisClient {
   disconnect(): void {
     this.client.disconnect();
   }
+
+  /**
+   * Separate ioredis connection for SUBSCRIBE (must not share the command connection).
+   * Caller must unsubscribe and disconnect on teardown (e.g. SSE client close).
+   */
+  duplicateSubscriber(): Redis {
+    return this.client.duplicate();
+  }
 }
 

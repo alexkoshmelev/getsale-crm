@@ -9,6 +9,9 @@ import {
   parseCsv,
   dateInTz,
   isWithinScheduleAt,
+  resolveDelayRange,
+  sampleDelaySeconds,
+  staggeredFirstSendAtByOffset,
   staggeredFirstSendAt,
   type Schedule,
 } from './helpers';
@@ -168,5 +171,34 @@ describe('staggeredFirstSendAt', () => {
   it('uses 0 delay when sendDelaySeconds is negative', () => {
     const base = new Date('2026-03-19T10:00:00.000Z');
     expect(staggeredFirstSendAt(base, 1, -5, {}).getTime()).toBe(base.getTime());
+  });
+});
+
+describe('resolveDelayRange', () => {
+  it('uses min/max when both provided', () => {
+    expect(resolveDelayRange({ sendDelayMinSeconds: 10, sendDelayMaxSeconds: 20 }, 60)).toEqual({
+      minSeconds: 10,
+      maxSeconds: 20,
+    });
+  });
+
+  it('falls back to legacy sendDelaySeconds', () => {
+    expect(resolveDelayRange({ sendDelaySeconds: 77 }, 60)).toEqual({
+      minSeconds: 77,
+      maxSeconds: 77,
+    });
+  });
+});
+
+describe('sampleDelaySeconds', () => {
+  it('returns fixed value for equal bounds', () => {
+    expect(sampleDelaySeconds({ minSeconds: 13, maxSeconds: 13 })).toBe(13);
+  });
+});
+
+describe('staggeredFirstSendAtByOffset', () => {
+  it('adds exact offset when schedule is empty', () => {
+    const base = new Date('2026-03-19T10:00:00.000Z');
+    expect(staggeredFirstSendAtByOffset(base, 193, {}).getTime()).toBe(base.getTime() + 193_000);
   });
 });

@@ -51,6 +51,7 @@ export class QrLogin {
       userId,
       apiId,
       apiHash,
+      proxyConfigRaw: proxyConfigRaw ?? null,
     });
     this.persistQrState(sessionId);
 
@@ -177,14 +178,14 @@ export class QrLogin {
             return;
           }
           await this.pool.query(
-            `UPDATE bd_accounts SET telegram_id = $1, phone_number = $2, api_id = $3, api_hash = $4, session_string = $5, is_active = true, session_encrypted = true, created_by_user_id = COALESCE(created_by_user_id, $6) WHERE id = $7`,
-            [telegramId, phoneNumber, String(apiId), encryptSession(apiHash), encryptSession(sessionString), userId, accountId]
+            `UPDATE bd_accounts SET telegram_id = $1, phone_number = $2, api_id = $3, api_hash = $4, session_string = $5, is_active = true, session_encrypted = true, created_by_user_id = COALESCE(created_by_user_id, $6), proxy_config = COALESCE($8::jsonb, proxy_config) WHERE id = $7`,
+            [telegramId, phoneNumber, String(apiId), encryptSession(apiHash), encryptSession(sessionString), userId, accountId, state.proxyConfigRaw ? JSON.stringify(state.proxyConfigRaw) : null]
           );
         } else {
           const insertResult = await this.pool.query(
-            `INSERT INTO bd_accounts (organization_id, telegram_id, phone_number, api_id, api_hash, session_string, is_active, session_encrypted, created_by_user_id)
-             VALUES ($1, $2, $3, $4, $5, $6, true, true, $7) RETURNING id`,
-            [organizationId, telegramId, phoneNumber, String(apiId), encryptSession(apiHash), encryptSession(sessionString), userId]
+            `INSERT INTO bd_accounts (organization_id, telegram_id, phone_number, api_id, api_hash, session_string, is_active, session_encrypted, created_by_user_id, proxy_config)
+             VALUES ($1, $2, $3, $4, $5, $6, true, true, $7, $8) RETURNING id`,
+            [organizationId, telegramId, phoneNumber, String(apiId), encryptSession(apiHash), encryptSession(sessionString), userId, state.proxyConfigRaw ? JSON.stringify(state.proxyConfigRaw) : null]
           );
           accountId = insertResult.rows[0].id;
         }

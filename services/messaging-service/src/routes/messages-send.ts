@@ -3,33 +3,17 @@ import { Router } from 'express';
 import { EventType, MessageSentEvent } from '@getsale/events';
 import { MessageChannel, MessageDirection, MessageStatus } from '@getsale/types';
 import { asyncHandler, AppError, ErrorCodes, ServiceCallError, validate } from '@getsale/service-core';
-import { z } from 'zod';
 import { SYSTEM_MESSAGES } from '../system-messages';
 import { ensureConversation, MAX_FILE_SIZE_BYTES } from '../helpers';
+import { MsgSendMessageSchema } from '../validation';
 import type { MessagesRouterDeps } from './messages-deps';
-
-const SendMessageSchema = z.object({
-  /** Optional for group/channel chats (e.g. shared chat); required for 1-1. */
-  contactId: z.union([z.string().uuid(), z.literal(''), z.null()]).optional().nullable().transform((v) => (v === '' || v == null ? null : v)),
-  channel: z.string().min(1).max(64),
-  channelId: z.string().min(1).max(128),
-  content: z.string().max(100_000).optional(),
-  bdAccountId: z.string().uuid().optional().nullable(),
-  fileBase64: z.string().optional(),
-  fileName: z.string().max(512).optional(),
-  replyToMessageId: z.string().max(128).optional().nullable(),
-  source: z.string().max(64).optional(),
-}).refine((data) => (data.content != null && data.content !== '') || (data.fileBase64 != null && data.fileBase64 !== ''), {
-  message: 'Either content or fileBase64 is required',
-  path: ['content'],
-});
 
 export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): void {
   const { pool, rabbitmq, log, bdAccountsClient } = deps;
 
-  router.post('/send', validate(SendMessageSchema), asyncHandler(async (req, res) => {
+  router.post('/send', validate(MsgSendMessageSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
-    const { contactId, channel, channelId, content, bdAccountId, fileBase64, fileName, replyToMessageId, source } = req.body;
+    const { contactId, channel, channelId, content, bdAccountId, fileBase64, fileName, replyToMessageId, source, idempotencyKey } = req.body;
 
     if (fileBase64 && typeof fileBase64 === 'string') {
       const estimatedBytes = (fileBase64.length * 3) / 4;
@@ -64,140 +48,146 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       contactId: contactIdOrNull,
     });
 
-    const result = await pool.query(
-      `INSERT INTO messages (organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata, reply_to_telegram_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+    // Telegram: send first, persist only after Telegram accepts the message.
+    // Otherwise campaign retries (and any client retries) create duplicate rows with status failed/pending.
+    if (channel !== MessageChannel.TELEGRAM) {
+      return res.status(400).json({ error: 'Unsupported channel or sending failed' });
+    }
+
+    if (!bdAccountId) {
+      return res.status(400).json({ error: 'bdAccountId is required for Telegram messages' });
+    }
+
+    // Campaign idempotency guard: if the same logical send was already persisted, return it.
+    if (source === 'campaign' && typeof idempotencyKey === 'string' && idempotencyKey.trim()) {
+      const idem = idempotencyKey.trim();
+      const existing = await pool.query(
+        `SELECT *
+         FROM messages
+         WHERE organization_id = $1
+           AND bd_account_id = $2
+           AND channel = $3
+           AND channel_id = $4
+           AND direction = 'outbound'
+           AND metadata->>'idempotencyKey' = $5
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [organizationId, bdAccountId, channel, channelId, idem]
+      );
+      if (existing.rows.length > 0) {
+        return res.json(existing.rows[0]);
+      }
+    }
+
+    const body: Record<string, string> = {
+      chatId: channelId,
+      text: captionOrContent,
+    };
+    if (fileBase64 && typeof fileBase64 === 'string') {
+      body.fileBase64 = fileBase64;
+      body.fileName = typeof fileName === 'string' ? fileName : 'file';
+    }
+    if (replyToTgId) {
+      body.replyToMessageId = replyToTgId;
+    }
+    if (typeof idempotencyKey === 'string' && idempotencyKey.trim()) {
+      body.idempotencyKey = idempotencyKey.trim();
+    }
+    const doSend = () =>
+      bdAccountsClient.post<{
+        messageId?: string;
+        date?: number;
+        telegram_media?: Record<string, unknown> | null;
+        telegram_entities?: Record<string, unknown>[] | null;
+      }>(`/api/bd-accounts/${bdAccountId}/send`, body, undefined, { userId, organizationId });
+
+    let resJson: Awaited<ReturnType<typeof doSend>> | null = null;
+    let lastError: unknown = null;
+    try {
+      resJson = await doSend();
+    } catch (error: unknown) {
+      const isNotConnected =
+        error instanceof ServiceCallError &&
+        error.statusCode === 400 &&
+        /not connected|account is not connected/i.test(String(error.message));
+      if (isNotConnected) {
+        await new Promise((r) => setTimeout(r, 2500));
+        try {
+          resJson = await doSend();
+        } catch (retryErr: unknown) {
+          lastError = retryErr;
+        }
+      } else {
+        lastError = error;
+      }
+    }
+
+    if (resJson == null) {
+      const error = lastError;
+      const errMsg = error instanceof Error ? error.message : String(error);
+      const downstreamMessage =
+        error instanceof ServiceCallError && error.body != null && typeof error.body === 'object'
+          ? (error.body as { message?: string }).message ?? (error.body as { error?: string }).error ?? errMsg
+          : errMsg;
+      log.error({ message: 'Error sending Telegram message', error: downstreamMessage });
+      const is413 = (error instanceof ServiceCallError && error.statusCode === 413)
+        || (errMsg.toLowerCase().includes('too large') || errMsg.includes('2 GB'));
+      if (is413) {
+        return res.status(413).json({ error: 'File too large', message: 'File too large' });
+      }
+      if (error instanceof ServiceCallError && error.statusCode >= 400 && error.statusCode < 500) {
+        const json: { error: string; message: string; details?: unknown } = {
+          error: downstreamMessage || 'Bad request',
+          message: downstreamMessage || 'Failed to send message',
+        };
+        if (error.statusCode === 429 && error.body != null && typeof error.body === 'object' && 'details' in error.body) {
+          json.details = (error.body as { details?: unknown }).details;
+        }
+        return res.status(error.statusCode).json(json);
+      }
+      const status = error instanceof ServiceCallError && error.statusCode >= 500 ? error.statusCode : 500;
+      return res.status(status).json({
+        error: status >= 500 ? 'Downstream error' : 'Internal server error',
+        message: downstreamMessage || 'Failed to send message',
+      });
+    }
+
+    const tgMessageId = resJson.messageId != null ? String(resJson.messageId).trim() : null;
+    const tgDate = resJson.date != null ? new Date(resJson.date * 1000) : null;
+    const hasMedia = resJson.telegram_media != null && typeof resJson.telegram_media === 'object';
+    const hasEntities = Array.isArray(resJson.telegram_entities);
+
+    const insertResult = await pool.query(
+      `INSERT INTO messages (
+        organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata, reply_to_telegram_id,
+        telegram_message_id, telegram_date, telegram_media, telegram_entities
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
       [
         organizationId,
-        bdAccountId || null,
+        bdAccountId,
         channel,
         channelId,
         contactIdOrNull,
         MessageDirection.OUTBOUND,
         contentForDb,
-        MessageStatus.PENDING,
+        MessageStatus.DELIVERED,
         false,
-        JSON.stringify({ sentBy: userId }),
+        JSON.stringify({ sentBy: userId, idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey.trim() : undefined, source: source ?? null }),
         replyToTgId,
+        tgMessageId,
+        tgDate,
+        hasMedia ? JSON.stringify(resJson.telegram_media) : null,
+        hasEntities ? JSON.stringify(resJson.telegram_entities) : null,
       ]
     );
-    const message = result.rows[0];
+    const message = insertResult.rows[0];
 
     if (source !== 'campaign') {
       await pool.query(
         `UPDATE conversations SET first_manager_reply_at = COALESCE(first_manager_reply_at, NOW()), updated_at = NOW()
          WHERE organization_id = $1 AND bd_account_id IS NOT DISTINCT FROM $2 AND channel = $3 AND channel_id = $4`,
-        [organizationId, bdAccountId || null, channel, channelId]
+        [organizationId, bdAccountId, channel, channelId]
       );
-    }
-
-    let sent = false;
-    if (channel === MessageChannel.TELEGRAM) {
-      if (!bdAccountId) {
-        return res.status(400).json({ error: 'bdAccountId is required for Telegram messages' });
-      }
-      const body: Record<string, string> = {
-        chatId: channelId,
-        text: captionOrContent,
-      };
-      if (fileBase64 && typeof fileBase64 === 'string') {
-        body.fileBase64 = fileBase64;
-        body.fileName = typeof fileName === 'string' ? fileName : 'file';
-      }
-      if (replyToTgId) {
-        body.replyToMessageId = replyToTgId;
-      }
-      const doSend = () =>
-        bdAccountsClient.post<{
-          messageId?: string;
-          date?: number;
-          telegram_media?: Record<string, unknown> | null;
-          telegram_entities?: Record<string, unknown>[] | null;
-        }>(`/api/bd-accounts/${bdAccountId}/send`, body, undefined, { userId, organizationId });
-
-      let resJson: Awaited<ReturnType<typeof doSend>> | null = null;
-      let lastError: unknown = null;
-      try {
-        resJson = await doSend();
-      } catch (error: unknown) {
-        const isNotConnected =
-          error instanceof ServiceCallError &&
-          error.statusCode === 400 &&
-          /not connected|account is not connected/i.test(String(error.message));
-        if (isNotConnected) {
-          await new Promise((r) => setTimeout(r, 2500));
-          try {
-            resJson = await doSend();
-          } catch (retryErr: unknown) {
-            lastError = retryErr;
-          }
-        } else {
-          lastError = error;
-        }
-      }
-
-      if (resJson != null) {
-        const tgMessageId = resJson.messageId != null ? String(resJson.messageId).trim() : null;
-        const tgDate = resJson.date != null ? new Date(resJson.date * 1000) : null;
-        const hasMedia = resJson.telegram_media != null && typeof resJson.telegram_media === 'object';
-        const hasEntities = Array.isArray(resJson.telegram_entities);
-        if (hasMedia || hasEntities) {
-          await pool.query(
-            `UPDATE messages SET status = $1, telegram_message_id = $2, telegram_date = $3, telegram_media = $4, telegram_entities = $5 WHERE id = $6`,
-            [
-              MessageStatus.DELIVERED,
-              tgMessageId,
-              tgDate,
-              hasMedia ? JSON.stringify(resJson.telegram_media) : null,
-              hasEntities ? JSON.stringify(resJson.telegram_entities) : null,
-              message.id,
-            ]
-          );
-        } else {
-          await pool.query(
-            `UPDATE messages SET status = $1, telegram_message_id = $2, telegram_date = $3 WHERE id = $4`,
-            [MessageStatus.DELIVERED, tgMessageId, tgDate, message.id]
-          );
-        }
-        sent = true;
-      } else {
-        const error = lastError;
-        const errMsg = error instanceof Error ? error.message : String(error);
-        const downstreamMessage =
-          error instanceof ServiceCallError && error.body != null && typeof error.body === 'object'
-            ? (error.body as { message?: string }).message ?? (error.body as { error?: string }).error ?? errMsg
-            : errMsg;
-        log.error({ message: 'Error sending Telegram message', error: downstreamMessage });
-        await pool.query('UPDATE messages SET status = $1, metadata = $2 WHERE id = $3', [
-          MessageStatus.FAILED,
-          JSON.stringify({ error: downstreamMessage }),
-          message.id,
-        ]);
-        const is413 = (error instanceof ServiceCallError && error.statusCode === 413)
-          || (errMsg.toLowerCase().includes('too large') || errMsg.includes('2 GB'));
-        if (is413) {
-          return res.status(413).json({ error: 'File too large', message: 'File too large' });
-        }
-        if (error instanceof ServiceCallError && error.statusCode >= 400 && error.statusCode < 500) {
-          const json: { error: string; message: string; details?: unknown } = {
-            error: downstreamMessage || 'Bad request',
-            message: downstreamMessage || 'Failed to send message',
-          };
-          if (error.statusCode === 429 && error.body != null && typeof error.body === 'object' && 'details' in error.body) {
-            json.details = (error.body as { details?: unknown }).details;
-          }
-          return res.status(error.statusCode).json(json);
-        }
-        const status = error instanceof ServiceCallError && error.statusCode >= 500 ? error.statusCode : 500;
-        return res.status(status).json({
-          error: status >= 500 ? 'Downstream error' : 'Internal server error',
-          message: downstreamMessage || 'Failed to send message',
-        });
-      }
-    }
-
-    if (!sent) {
-      return res.status(400).json({ error: 'Unsupported channel or sending failed' });
     }
 
     const updatedResult = await pool.query('SELECT * FROM messages WHERE id = $1', [message.id]);
@@ -225,7 +215,16 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
         createdAt: updatedRow && updatedRow.created_at != null ? String(updatedRow.created_at) : undefined,
       },
     };
-    await rabbitmq.publishEvent(event);
+    try {
+      await rabbitmq.publishEvent(event);
+    } catch (publishErr) {
+      // Do not convert a successful Telegram send into an HTTP error.
+      log.warn({
+        message: 'Message sent, but publishEvent failed',
+        messageId: message.id,
+        error: publishErr instanceof Error ? publishErr.message : String(publishErr),
+      });
+    }
 
     res.json(updatedRow);
   }));

@@ -1,15 +1,10 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
 import { randomBytes } from 'crypto';
-import { z } from 'zod';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, canPermission, requireUser, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { auditLog, getClientIp, normalizeRole, getRoleLevel } from '../helpers';
-
-const CreateInviteLinkSchema = z.object({
-  role: z.string().max(64).optional(),
-  expiresInDays: z.coerce.number().int().min(1).max(365).optional(),
-});
+import { TmCreateInviteLinkSchema } from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -90,7 +85,7 @@ export function inviteLinksRouter({ pool }: Deps): Router {
     );
   }));
 
-  router.post('/', validate(CreateInviteLinkSchema), asyncHandler(async (req, res) => {
+  router.post('/', validate(TmCreateInviteLinkSchema), asyncHandler(async (req, res) => {
     const user = req.user;
     const allowed = await checkPermission(user.role, 'invite_links', 'create');
     if (!allowed) {

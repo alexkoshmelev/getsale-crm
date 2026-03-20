@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import OpenAI from 'openai';
-import { z } from 'zod';
 import { RedisClient, RabbitMQClient } from '@getsale/utils';
 import { EventType, AIDraftGeneratedEvent } from '@getsale/events';
 import { AIDraftStatus } from '@getsale/types';
@@ -8,11 +7,7 @@ import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { DRAFT_SYSTEM, PROMPT_VERSION } from '../prompts';
 import { AIRateLimiter } from '../rate-limiter';
-
-const DraftGenerateSchema = z.object({
-  contactId: z.string().uuid().optional(),
-  context: z.string().max(100_000).optional(),
-});
+import { AiDraftGenerateSchema } from '../validation';
 
 interface Deps {
   openai: OpenAI | null;
@@ -26,7 +21,7 @@ interface Deps {
 export function draftsRouter({ openai, redis, rabbitmq, log, rateLimiter, models }: Deps): Router {
   const router = Router();
 
-  router.post('/generate', validate(DraftGenerateSchema), asyncHandler(async (req, res) => {
+  router.post('/generate', validate(AiDraftGenerateSchema), asyncHandler(async (req, res) => {
     if (!openai) throw new AppError(503, 'AI service not configured', ErrorCodes.SERVICE_UNAVAILABLE);
 
     const { id: userId, organizationId } = req.user;

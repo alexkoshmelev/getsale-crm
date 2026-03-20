@@ -1,8 +1,9 @@
 import { Pool, PoolClient } from 'pg';
 import { Logger } from '@getsale/logger';
-import { ServiceHttpClient } from '@getsale/service-core';
+import { ServiceCallError, ServiceHttpClient } from '@getsale/service-core';
 import { RedisClient } from '@getsale/utils';
 import { randomUUID } from 'crypto';
+import { computeParseEtaFields } from './parse-progress-utils';
 
 /** Row from contact_discovery_tasks */
 export interface DiscoveryTaskRow {
@@ -29,6 +30,8 @@ export interface DiscoveryTaskParams {
   excludeAdmins?: boolean;
   leaveAfter?: boolean;
   campaignId?: string;
+  /** Optional: for broadcast channels without linked chat, collect users from message reactions (bd-accounts reaction-participants). */
+  channelEngagement?: 'default' | 'reactions';
 }
 
 export interface DiscoveryTaskResults {
@@ -36,6 +39,8 @@ export interface DiscoveryTaskResults {
   parsed?: number;
   error?: string;
   errors?: Array<{ chatId: string; error: string }>;
+  /** Wall time when first parse iteration started (for ETA / speed). */
+  parseStartedAtMs?: number;
 }
 
 interface Deps {
@@ -57,10 +62,110 @@ const stageByStatus: Record<string, string> = {
 
 type RedisPublish = { publish(channel: string, message: string): Promise<void> };
 
+function parseProgressTiming(
+  results: DiscoveryTaskResults,
+  chatsCompleted: number,
+  totalChats: number,
+  found: number
+): Record<string, unknown> {
+  return computeParseEtaFields({
+    parseStartedAtMs: results.parseStartedAtMs,
+    chatsCompleted,
+    totalChats,
+    found,
+  });
+}
+
 function pushParseProgress(redis: RedisClient | null, userId: string | null, taskId: string, payload: Record<string, unknown>): void {
+  const ssePayload = { ...payload, taskId };
+  if (redis) {
+    (redis as RedisPublish)
+      .publish(`parse:progress:${taskId}`, JSON.stringify(ssePayload))
+      .catch(() => {});
+  }
   if (!redis || !userId) return;
   const channel = `events:${userId}`;
-  (redis as RedisPublish).publish(channel, JSON.stringify({ event: 'parse_progress', data: { ...payload, taskId } })).catch(() => {});
+  (redis as RedisPublish).publish(channel, JSON.stringify({ event: 'parse_progress', data: ssePayload })).catch(() => {});
+}
+
+/** Telegram flood / downstream errors: try next BD account if task has multiple (B4 / PLAN_TELEGRAM_PARSE_FLOW §3). */
+function shouldRotateBdAccount(err: unknown): boolean {
+  if (!(err instanceof ServiceCallError)) return false;
+  return err.statusCode === 429 || err.statusCode === 502 || err.statusCode === 503;
+}
+
+type BdReqCtx = { organizationId: string; userId?: string };
+
+async function bdGetWithRotation<T>(
+  bdAccountsClient: ServiceHttpClient,
+  accountIds: string[],
+  pathFor: (bdId: string) => string,
+  ctx: BdReqCtx,
+  log: Logger,
+  logContext: Record<string, unknown>
+): Promise<{ data: T; bdAccountId: string }> {
+  let lastErr: unknown;
+  for (let i = 0; i < accountIds.length; i++) {
+    const bdId = accountIds[i];
+    try {
+      const data = await bdAccountsClient.get<T>(pathFor(bdId), undefined, {
+        organizationId: ctx.organizationId,
+        userId: ctx.userId,
+      });
+      return { data, bdAccountId: bdId };
+    } catch (e) {
+      lastErr = e;
+      if (shouldRotateBdAccount(e) && i < accountIds.length - 1) {
+        log.warn({
+          message: 'bd-accounts GET failed, rotating BD account',
+          ...logContext,
+          bdAccountId: bdId,
+          nextAccountIndex: i + 1,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+
+async function bdPostLeaveWithRotation(
+  bdAccountsClient: ServiceHttpClient,
+  accountIds: string[],
+  chatId: string,
+  ctx: BdReqCtx,
+  log: Logger,
+  logContext: Record<string, unknown>
+): Promise<void> {
+  let lastErr: unknown;
+  for (let i = 0; i < accountIds.length; i++) {
+    const bdId = accountIds[i];
+    try {
+      await bdAccountsClient.post(
+        `/api/bd-accounts/${bdId}/chats/${chatId}/leave`,
+        {},
+        undefined,
+        { organizationId: ctx.organizationId, userId: ctx.userId }
+      );
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (shouldRotateBdAccount(e) && i < accountIds.length - 1) {
+        log.warn({
+          message: 'bd-accounts POST leave failed, rotating BD account',
+          ...logContext,
+          bdAccountId: bdId,
+          nextAccountIndex: i + 1,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
 }
 
 export function startDiscoveryLoop(deps: Deps) {
@@ -145,8 +250,14 @@ async function processSearchTask(client: PoolClient, task: DiscoveryTaskRow, dep
   const { log, bdAccountsClient } = deps;
   const params = (task.params || {}) as DiscoveryTaskParams;
   const { bdAccountId, queries = [], searchType = 'all', limitPerQuery = 50 } = params;
-  
-  if (!bdAccountId || !Array.isArray(queries) || queries.length === 0) {
+  const searchAccountIds =
+    Array.isArray(params.accountIds) && params.accountIds.length > 0
+      ? params.accountIds
+      : bdAccountId
+        ? [bdAccountId]
+        : [];
+
+  if (searchAccountIds.length === 0 || !Array.isArray(queries) || queries.length === 0) {
      await client.query(`UPDATE contact_discovery_tasks SET status = 'failed', updated_at = NOW() WHERE id = $1`, [task.id]);
      return;
   }
@@ -163,10 +274,15 @@ async function processSearchTask(client: PoolClient, task: DiscoveryTaskRow, dep
 
   try {
     const queryParams = new URLSearchParams({ q: keyword, type: searchType, limit: String(limitPerQuery) });
-    const res = await bdAccountsClient.get<Array<{ chatId?: string; title?: string; peerType?: string; membersCount?: number }>>(
-      `/api/bd-accounts/${bdAccountId}/search-groups?${queryParams.toString()}`,
-      undefined,
-      { organizationId: task.organization_id, userId: task.created_by_user_id ?? undefined }
+    const { data: res } = await bdGetWithRotation<
+      Array<{ chatId?: string; title?: string; peerType?: string; membersCount?: number }>
+    >(
+      bdAccountsClient,
+      searchAccountIds,
+      (bd) => `/api/bd-accounts/${bd}/search-groups?${queryParams.toString()}`,
+      { organizationId: task.organization_id, userId: task.created_by_user_id ?? undefined },
+      log,
+      { taskId: task.id, keyword, type: 'search' }
     );
 
     const newGroups = res || [];
@@ -209,6 +325,9 @@ interface ParseWorkItem {
   title: string;
   useMembersList: boolean;
   depth: number;
+  /** B4: channel + linked discussion — authors from replies under posts (not full linked-group member list). */
+  strategy?: 'comment_replies' | 'reaction_users';
+  linkedChatId?: string;
 }
 
 /** Work item for parse: either from new sources (with type) or legacy chats */
@@ -220,7 +339,30 @@ function getParseWorkList(params: DiscoveryTaskParams): ParseWorkItem[] {
   const maxMessages = settings.maxMessages ?? depthPreset;
 
   if (Array.isArray(sources) && sources.length > 0) {
+    const engagement = params.channelEngagement ?? 'default';
     return sources.map((s) => {
+      const srcType = String(s.type ?? '');
+      const linked =
+        s.linkedChatId != null && s.linkedChatId !== '' ? String(s.linkedChatId) : undefined;
+      if (srcType === 'channel' && !linked && engagement === 'reactions') {
+        return {
+          chatId: String(s.chatId ?? ''),
+          title: `${String(s.title || s.chatId || '')} (реакции)`.trim(),
+          useMembersList: false,
+          depth: maxMessages,
+          strategy: 'reaction_users' as const,
+        };
+      }
+      if (srcType === 'channel' && linked) {
+        return {
+          chatId: String(s.chatId ?? ''),
+          title: `${String(s.title || s.chatId || '')} (комментарии к постам)`.trim(),
+          useMembersList: false,
+          depth: maxMessages,
+          strategy: 'comment_replies' as const,
+          linkedChatId: linked,
+        };
+      }
       const useDiscussionGroup = s.linkedChatId != null && s.canGetMembers === false;
       const chatId = useDiscussionGroup ? String(s.linkedChatId) : String(s.chatId ?? '');
       const title = useDiscussionGroup
@@ -245,7 +387,12 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
   const { pool, log, bdAccountsClient, campaignServiceClient, redis } = deps;
   const params = (task.params || {}) as DiscoveryTaskParams;
   const workList = getParseWorkList(params);
-  const accountIds = params.accountIds ?? (params.bdAccountId ? [params.bdAccountId] : []);
+  const accountIds =
+    Array.isArray(params.accountIds) && params.accountIds.length > 0
+      ? params.accountIds
+      : params.bdAccountId
+        ? [params.bdAccountId]
+        : [];
   const bdAccountId = accountIds[0] ?? params.bdAccountId;
   const { excludeAdmins = true, leaveAfter = false, campaignId } = params;
   const settings = params.settings || {};
@@ -266,6 +413,13 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
   const targetTitle = item.title;
   const results: DiscoveryTaskResults = task.results ? { ...task.results } : {};
   results.parsed = results.parsed || 0;
+  if (typeof results.parseStartedAtMs !== 'number') {
+    results.parseStartedAtMs = Date.now();
+    await client.query(`UPDATE contact_discovery_tasks SET results = $1::jsonb WHERE id = $2`, [
+      JSON.stringify(results),
+      task.id,
+    ]);
+  }
 
   const totalChats = workList.length;
   const pctStart = totalChats ? Math.min(100, Math.round((progress / totalChats) * 100)) : 0;
@@ -278,6 +432,7 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
     status: 'running',
     found: results.parsed ?? 0,
     estimated: totalChats,
+    ...parseProgressTiming(results, progress, totalChats, results.parsed ?? 0),
   });
 
   interface ParticipantRow {
@@ -292,20 +447,77 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
     nextOffset?: number;
   }
 
+  const reqCtx: BdReqCtx = {
+    organizationId: task.organization_id,
+    userId: task.created_by_user_id ?? undefined,
+  };
+
   try {
     let participants: ParticipantRow[] = [];
+    let bdUsed = bdAccountId;
 
-    if (item.useMembersList) {
+    if (item.strategy === 'comment_replies' && item.linkedChatId) {
+      const postLimit = Math.min(100, Math.max(10, Math.floor(item.depth / 5) || 30));
+      const maxRepliesPerPost = Math.min(300, Math.max(50, item.depth * 2));
+      const q = new URLSearchParams({
+        linkedChatId: item.linkedChatId,
+        postLimit: String(postLimit),
+        maxRepliesPerPost: String(maxRepliesPerPost),
+        excludeAdmins: String(excludeAdmins),
+      });
+      const chatSeg = encodeURIComponent(targetChatId);
+      const r = await bdGetWithRotation<ParticipantsResponse>(
+        bdAccountsClient,
+        accountIds,
+        (bd) => `/api/bd-accounts/${bd}/chats/${chatSeg}/comment-participants?${q.toString()}`,
+        reqCtx,
+        log,
+        { taskId: task.id, targetChatId, phase: 'comment_participants' }
+      );
+      participants = r.data?.users || [];
+      bdUsed = r.bdAccountId;
+    } else if (item.strategy === 'reaction_users') {
+      const q = new URLSearchParams({
+        depth: String(Math.min(200, Math.max(20, item.depth))),
+      });
+      const chatSeg = encodeURIComponent(targetChatId);
+      const r = await bdGetWithRotation<ParticipantsResponse>(
+        bdAccountsClient,
+        accountIds,
+        (bd) => `/api/bd-accounts/${bd}/chats/${chatSeg}/reaction-participants?${q.toString()}`,
+        reqCtx,
+        log,
+        { taskId: task.id, targetChatId, phase: 'reaction_users' }
+      );
+      participants = r.data?.users || [];
+      bdUsed = r.bdAccountId;
+    } else if (item.useMembersList) {
       let offset = 0;
       const limit = 200;
       const maxMembers = settings.maxMembers ?? 2000;
+      let participantsFirstPage = true;
       while (participants.length < maxMembers) {
         const queryParams = new URLSearchParams({ offset: String(offset), limit: String(limit), excludeAdmins: String(excludeAdmins) });
-        const res = await bdAccountsClient.get<ParticipantsResponse>(
-          `/api/bd-accounts/${bdAccountId}/chats/${targetChatId}/participants?${queryParams.toString()}`,
-          undefined,
-          { organizationId: task.organization_id, userId: task.created_by_user_id ?? undefined }
-        );
+        let res: ParticipantsResponse;
+        if (participantsFirstPage) {
+          const r = await bdGetWithRotation<ParticipantsResponse>(
+            bdAccountsClient,
+            accountIds,
+            (bd) => `/api/bd-accounts/${bd}/chats/${targetChatId}/participants?${queryParams.toString()}`,
+            reqCtx,
+            log,
+            { taskId: task.id, targetChatId, phase: 'participants' }
+          );
+          res = r.data;
+          bdUsed = r.bdAccountId;
+          participantsFirstPage = false;
+        } else {
+          res = await bdAccountsClient.get<ParticipantsResponse>(
+            `/api/bd-accounts/${bdUsed}/chats/${targetChatId}/participants?${queryParams.toString()}`,
+            undefined,
+            reqCtx
+          );
+        }
         const users = res?.users || [];
         if (users.length === 0) break;
         participants.push(...users);
@@ -316,22 +528,30 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
       if (participants.length === 0) {
         const depth = Math.min(2000, Math.max(1, item.depth));
         const q = new URLSearchParams({ depth: String(depth), excludeAdmins: String(excludeAdmins) });
-        const activeRes = await bdAccountsClient.get<ParticipantsResponse>(
-          `/api/bd-accounts/${bdAccountId}/chats/${targetChatId}/active-participants?${q.toString()}`,
-          undefined,
-          { organizationId: task.organization_id, userId: task.created_by_user_id ?? undefined }
+        const r = await bdGetWithRotation<ParticipantsResponse>(
+          bdAccountsClient,
+          accountIds,
+          (bd) => `/api/bd-accounts/${bd}/chats/${targetChatId}/active-participants?${q.toString()}`,
+          reqCtx,
+          log,
+          { taskId: task.id, targetChatId, phase: 'active_fallback' }
         );
-        participants.push(...(activeRes?.users || []));
+        participants.push(...(r.data?.users || []));
+        bdUsed = r.bdAccountId;
       }
     } else {
       const depth = Math.min(2000, Math.max(1, item.depth));
       const queryParams = new URLSearchParams({ depth: String(depth), excludeAdmins: String(excludeAdmins) });
-      const res = await bdAccountsClient.get<ParticipantsResponse>(
-        `/api/bd-accounts/${bdAccountId}/chats/${targetChatId}/active-participants?${queryParams.toString()}`,
-        undefined,
-        { organizationId: task.organization_id, userId: task.created_by_user_id ?? undefined }
+      const r = await bdGetWithRotation<ParticipantsResponse>(
+        bdAccountsClient,
+        accountIds,
+        (bd) => `/api/bd-accounts/${bd}/chats/${targetChatId}/active-participants?${queryParams.toString()}`,
+        reqCtx,
+        log,
+        { taskId: task.id, targetChatId, phase: 'active_only' }
       );
-      participants = res?.users || [];
+      participants = r.data?.users || [];
+      bdUsed = r.bdAccountId;
     }
 
     if (participants.length > 0) {
@@ -367,7 +587,7 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
              `INSERT INTO contact_telegram_sources (organization_id, contact_id, bd_account_id, telegram_chat_id, telegram_chat_title)
               VALUES ($1, $2, $3, $4, $5)
               ON CONFLICT (organization_id, contact_id, bd_account_id, telegram_chat_id) DO NOTHING`,
-             [task.organization_id, contactId, bdAccountId, targetChatId, targetTitle]
+             [task.organization_id, contactId, bdUsed, targetChatId, targetTitle]
           );
 
           runningParsed++;
@@ -389,6 +609,7 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
                progress,
                total: totalChats,
                status: 'running',
+               ...parseProgressTiming(results, progress, totalChats, runningParsed),
              });
           }
        }
@@ -403,7 +624,7 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
           try {
              await campaignServiceClient.post(
                `/api/campaigns/${campaignId}/participants-bulk`,
-               { contactIds, bdAccountId },
+               { contactIds, bdAccountId: bdUsed },
                undefined,
                { organizationId: task.organization_id, userId: task.created_by_user_id ?? undefined }
              );
@@ -416,12 +637,10 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
     // Leave chat if requested
     if (leaveAfter) {
        try {
-         await bdAccountsClient.post(
-           `/api/bd-accounts/${bdAccountId}/chats/${targetChatId}/leave`,
-           {},
-           undefined,
-           { organizationId: task.organization_id, userId: task.created_by_user_id ?? undefined }
-         );
+         await bdPostLeaveWithRotation(bdAccountsClient, accountIds, targetChatId, reqCtx, log, {
+           taskId: task.id,
+           targetChatId,
+         });
        } catch (leaveErr: unknown) {
          log.warn({ message: 'Failed to leave chat', taskId: task.id, targetChatId, error: leaveErr instanceof Error ? leaveErr.message : String(leaveErr) });
        }
@@ -446,6 +665,7 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
       progress: nextProgress,
       total: totalChats,
       status: newStatus,
+      ...parseProgressTiming(results, nextProgress, totalChats, results.parsed ?? 0),
     });
     if (newStatus === 'completed') {
       const channel = task.created_by_user_id ? `events:${task.created_by_user_id}` : null;
@@ -482,6 +702,7 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
         total: totalChats,
         status: newStatus,
         error: errMsg,
+        ...parseProgressTiming(results, nextProgress, totalChats, results.parsed ?? 0),
       });
     } catch (e: unknown) {
       log.error({ message: 'Failed to update/push on parse chat error', taskId: task.id, error: e instanceof Error ? e.message : String(e) });

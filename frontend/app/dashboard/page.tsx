@@ -103,7 +103,12 @@ export default function DashboardPage() {
           const Icon = stat.icon;
           const value = values[i];
           return (
-            <Link key={stat.titleKey} href={stat.href} className="block focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-xl">
+            <Link
+              key={stat.titleKey}
+              href={stat.href}
+              prefetch={false}
+              className="block focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-xl"
+            >
               <Card
                 className="group cursor-pointer border-l-4 border-l-primary hover:shadow-soft-md hover:-translate-y-0.5 transition-all duration-200"
               >
@@ -135,6 +140,7 @@ export default function DashboardPage() {
                   <li key={r.id} className="flex items-center justify-between gap-2 text-sm">
                     <Link
                       href={r.entity_type === 'contact' ? `/dashboard/crm?tab=contacts&open=${r.entity_id}` : `/dashboard/pipeline`}
+                      prefetch={false}
                       className="text-primary hover:underline truncate flex-1 min-w-0"
                     >
                       {r.title || formatShortDateTime(r.remind_at)}
@@ -145,7 +151,7 @@ export default function DashboardPage() {
                   </li>
                 ))}
               </ul>
-              <Link href="/dashboard/crm" className="text-sm text-primary hover:underline mt-2 flex items-center gap-1">
+              <Link href="/dashboard/crm" prefetch={false} className="text-sm text-primary hover:underline mt-2 flex items-center gap-1">
                 {t('dashboard.allReminders')}
                 <ArrowRight className="w-3 h-3" />
               </Link>
@@ -188,21 +194,21 @@ export default function DashboardPage() {
 
             <Card title={t('dashboard.quickActions')} className="shrink-0 w-72">
               <div className="space-y-2">
-                <Link href="/dashboard/crm" className="block">
+                <Link href="/dashboard/crm" prefetch={false} className="block">
                   <Button variant="secondary" className="w-full justify-start gap-2 h-11">
                     <Building2 className="w-4 h-4" />
                     {t('dashboard.createCompany')}
                     <ArrowRight className="w-4 h-4 ml-auto opacity-50" />
                   </Button>
                 </Link>
-                <Link href="/dashboard/crm" className="block">
+                <Link href="/dashboard/crm" prefetch={false} className="block">
                   <Button variant="secondary" className="w-full justify-start gap-2 h-11">
                     <Users className="w-4 h-4" />
                     {t('dashboard.addContact')}
                     <ArrowRight className="w-4 h-4 ml-auto opacity-50" />
                   </Button>
                 </Link>
-                <Link href="/dashboard/pipeline" className="block">
+                <Link href="/dashboard/pipeline" prefetch={false} className="block">
                   <Button variant="secondary" className="w-full justify-start gap-2 h-11">
                     <TrendingUp className="w-4 h-4" />
                     {t('dashboard.newLead')}

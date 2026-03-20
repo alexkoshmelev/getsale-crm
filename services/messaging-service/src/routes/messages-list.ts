@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { asyncHandler, AppError, ErrorCodes, canPermission } from '@getsale/service-core';
+import { asyncHandler, AppError, ErrorCodes, canPermission, parsePageLimit, buildPagedResponse } from '@getsale/service-core';
 import {
   buildMessagesListWhere,
   runMessagesCount,
@@ -30,10 +30,13 @@ export function registerListRoutes(router: Router, deps: MessagesRouterDeps): vo
 
   router.get('/messages', asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
-    const { contactId, channel, channelId, bdAccountId, page = 1, limit = 50 } = req.query;
+    const { contactId, channel, channelId, bdAccountId, page: pageQ, limit: limitQ } = req.query;
 
-    const pageNum = Math.max(1, parseInt(String(page), 10));
-    const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10)));
+    const { page: pageNum, limit: limitNum, offset } = parsePageLimit(
+      { page: pageQ ?? 1, limit: limitQ ?? 50 } as Record<string, unknown>,
+      50,
+      100
+    );
     const bdId = bdAccountId && String(bdAccountId).trim() ? String(bdAccountId).trim() : null;
     const chId = channelId && String(channelId).trim() ? String(channelId).trim() : null;
 
@@ -75,7 +78,6 @@ export function registerListRoutes(router: Router, deps: MessagesRouterDeps): vo
       );
     }
 
-    const offset = (pageNum - 1) * limitNum;
     let rows = await runMessagesListQuery(pool, where, limitNum, offset);
 
     if (bdId && chId && rows.length > 0) {
@@ -87,18 +89,14 @@ export function registerListRoutes(router: Router, deps: MessagesRouterDeps): vo
       historyExhausted = await getHistoryExhausted(pool, bdId, chId, apiOpts);
     }
 
+    const paged = buildPagedResponse(rows, total, pageNum, limitNum);
     const payload: {
       messages: MessageRow[];
       pagination: { page: number; limit: number; total: number; totalPages: number };
       historyExhausted?: boolean;
     } = {
-      messages: rows,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages: Math.ceil(total / limitNum),
-      },
+      messages: paged.items,
+      pagination: paged.pagination,
     };
     if (historyExhausted !== undefined) payload.historyExhausted = historyExhausted;
     res.json(payload);

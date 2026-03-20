@@ -1,7 +1,9 @@
 # Текущее состояние и дорожная карта
 
-**Дата обновления:** 2025-02-26  
+**Дата обновления:** 2026-03-20  
 **Цель:** единая картина «что сделано / что нет» и приоритеты на следующий период.
+
+> Шапка и блок **§1.10** синхронизированы с репозиторием и [MIGRATION_TO_TARGET_ARCHITECTURE.md](MIGRATION_TO_TARGET_ARCHITECTURE.md) (v3.0) / [CURRENT_SYSTEM_AS_IS.md](CURRENT_SYSTEM_AS_IS.md) (v2.15). Детальные аудиты — в [ai_docs/develop/audits/](../ai_docs/develop/audits/). Целевая модель: [TARGET_SAAS_CRM_ARCHITECTURE.md](TARGET_SAAS_CRM_ARCHITECTURE.md).
 
 ---
 
@@ -57,43 +59,66 @@
 - Command palette (⌘K): поиск по компаниям, контактам, сделкам и чатам с переходом к карточке/чату.
 - Rate limiting в API Gateway (Redis), WebSocket для событий и уведомлений, звук уведомлений (mute в шапке).
 
+### 1.10 Архитектура и миграция к целевой модели (инкремент)
+
+Детальный план и журнал: [MIGRATION_TO_TARGET_ARCHITECTURE.md](MIGRATION_TO_TARGET_ARCHITECTURE.md). Факт «как в коде»: [CURRENT_SYSTEM_AS_IS.md](CURRENT_SYSTEM_AS_IS.md).
+
+- **Границы данных (A):** список/поиск чатов в messaging без прямого чтения `bd_account_sync_chats` — через internal bd-accounts (**A1**). Orphan сообщений при удалении BD — через messaging internal; при сбое API — fallback SQL + метрика + алерт + [RUNBOOK_ORPHAN_MESSAGES.md](RUNBOOK_ORPHAN_MESSAGES.md) (**A2**). Обходы записи в `messages` из bd-accounts задокументированы в [TABLE_OWNERSHIP_A1.md](../ai_docs/develop/TABLE_OWNERSHIP_A1.md); SQL в `message-db.ts` без HTTP-клиента messaging — метрика `bd_accounts_message_db_sql_bypass_total`, алерт `BdAccountsMessageDbSqlBypass`, [DEPLOYMENT.md](DEPLOYMENT.md) (**A3** наблюдаемость; опционально **`BD_ACCOUNTS_MESSAGE_DB_STRICT`** — запрет bypass; полное удаление SQL-пути — долгосрочный бэклог).
+- **Надёжность (B):** общий слой межсервисного HTTP (`interServiceHttpDefaults` / `ServiceHttpClient`, retry + circuit breaker, env `SERVICE_HTTP_*`), DLQ-метрики и ряд правил Prometheus ([DEPLOYMENT.md](DEPLOYMENT.md)); кампании — валидация пустой аудитории, мин. интервал между отправками с одного BD (**B3**). **B1:** счётчики **`inter_service_http_*`** на пяти сервисах + алерты **`InterServiceHttpErrorShareElevated`**, **`InterServiceHttpCircuitReject`** ([DEPLOYMENT.md](DEPLOYMENT.md)); таймауты AI / automation как ранее; [SERVICE_HTTP_CLIENT_INVENTORY.md](SERVICE_HTTP_CLIENT_INVENTORY.md). **B4:** parse **channel + linkedChatId** — комментарии (`comment-participants`); канал без linked + **`channelEngagement: 'reactions'`** — `reaction-participants` (best-effort; просмотры — счётчики для приоритизации); **`telegramInvokeWithFloodRetry`** на основных GramJS-путях bd-accounts (resolve, sync, sender, shared-chat, leave, контакты — см. [PLAN_TELEGRAM_PARSE_FLOW.md](PLAN_TELEGRAM_PARSE_FLOW.md) §1.1); Redis **`parse:progress:{taskId}`** + **ETA/speed**.
+- **Код (C):** **C1** — `parsePageLimit` / `buildPagedResponse` в `@getsale/service-core` (CRM, pipeline leads, messaging messages list, campaign list/participants и т.д.). **C2/C3** — частично: хелперы messaging, нарезка bd-accounts `chat-sync*` / `sync-routes-*`. **C4** — `validation.ts` также у **team** (`Tm*`), **analytics** (`An*`), **activity** (`Ac*`), плюс ранее перечисленные; **api-gateway** — исключение в [.cursor/rules/backend-standards.mdc](../.cursor/rules/backend-standards.mdc).
+- **Фронт (D):** единый `lib/api/bd-accounts`, тип `BDAccount`, аватар; разбиение `useMessagingData` на loaders/effects (**D4** частично). Contact discovery: мультивыбор BD на поиске → `accountIds` в задаче; **парсинг** — `channelEngagement` + ETA/speed на шаге прогресса ([`ParseSettingsForm`](../frontend/components/parsing/ParseSettingsForm.tsx), [`ParseProgressPanel`](../frontend/components/parsing/ParseProgressPanel.tsx)); хвосты `apiClient` — точечный grep (см. as-is §5).
+- **Доки (E):** INDEX/README, ADR, CONTRIBUTING; периодически сверять этот файл (**E1**).
+
 ---
 
 ## 2. Что не сделано или неполно
 
-- **Auth:** MFA, восстановление пароля по email, верификация email, OAuth (Google/GitHub/Telegram), account lockout, детальный audit по входам.
+- **Auth:** восстановление пароля по email, верификация email, OAuth (Google/GitHub/Telegram), account lockout, детальный audit по входам. **2FA (TOTP + recovery codes)** — реализовано в auth-service (см. API и настройки профиля); при необходимости — доработка UX и политик.
 - **CRM:** массовые операции (bulk delete/update), импорт/экспорт (CSV), мягкое удаление (soft delete) при необходимости.
 - **Pipeline:** история переходов по стадии, валидация правил entry/exit, авто-переходы по правилам (управление воронками/стадиями PUT/DELETE + UI уже сделано).
-- **Campaign Service:** реализован (CRUD, sequences, расписание, worker отправки, аудитория из CRM/CSV/группы TG); см. [CAMPAIGNS.md](CAMPAIGNS.md). В бэклоге: rate limit по каналу, AI-персонализация.
+- **Campaign Service:** реализован (CRUD, sequences, расписание, worker, аудитория из CRM/CSV/группы TG, часть лимитов и валидаций — см. [CAMPAIGNS.md](CAMPAIGNS.md), [MIGRATION_TO_TARGET_ARCHITECTURE.md](MIGRATION_TO_TARGET_ARCHITECTURE.md) **B3**). В бэклоге: дальнейший rate limit по каналу, AI-персонализация, рефакторинг толстого `campaigns.ts` (**C2/C3**).
 - **AI:** автосоздание сделки/лида из чата (правила или AI по намерению), виджеты в карточке сделки (следующий шаг, вероятность закрытия).
 - **Омниканал:** модель channels/conversations, единый timeline по контакту, каналы помимо Telegram.
 - **Права:** при необходимости — расширение canPermission в CRM и других сервисах (messaging и bd-accounts уже используют role_permissions).
-- **Инфра:** детальные rate limits по типу операции, мониторинг (метрики, алерты), E2E-тесты ключевых сценариев.
+- **Инфра:** детальные rate limits по типу операции; расширение мониторинга (дашборды, покрытие всех критичных цепочек); E2E-тесты ключевых сценариев. **Частично уже есть:** метрики `/metrics`, правила в `infrastructure/prometheus/alert_rules.yml`, DLQ-счётчики и описание в [DEPLOYMENT.md](DEPLOYMENT.md).
+
+### 2.1 Приоритизация продуктового бэклога (§2)
+
+Перечень выше — не один спринт. Рекомендуемый порядок для **продукта** (после закрытия горящих техзадач релиза):
+
+1. **Доверие и доступ:** восстановление пароля и верификация email (блокируют B2B-онбординг сильнее, чем OAuth).
+2. **CRM operations:** массовые действия и импорт/экспорт CSV — снижают трение ежедневных операций.
+3. **Воронка:** история стадий и правила переходов — качество аналитики и автоматизации.
+4. **AI в сделке** и **кампании** (доработки из §2) — после стабильности данных CRM/воронки.
+5. **Омниканал** — отдельная крупная инициатива (модель каналов + timeline).
+
+Технический хвост **B4** (просмотры, FloodWait) и **A3** (полный отказ от SQL в MessageDb) ведутся по [PLAN_TELEGRAM_PARSE_FLOW.md](PLAN_TELEGRAM_PARSE_FLOW.md) и [MIGRATION_TO_TARGET_ARCHITECTURE.md](MIGRATION_TO_TARGET_ARCHITECTURE.md), не смешивая с пунктами 1–5 без явной приоритизации PM.
 
 ### Чеклист к продакшену (критичное)
 
 - Полные CRUD (GET by id, PUT, DELETE) по CRM, Pipeline и остальным сервисам; пагинация и поиск.
-- Валидация: Zod на бэкенде, React Hook Form + Zod на фронте; бизнес-правила (стадии воронки и т.д.).
+- Валидация: Zod на бэкенде (центральный `validation.ts` в основных сервисах — см. [CURRENT_SYSTEM_AS_IS.md](CURRENT_SYSTEM_AS_IS.md) §4.2); на фронте — по мере внедрения React Hook Form + Zod; бизнес-правила (стадии воронки и т.д.).
 - Централизованная обработка ошибок: AppError, единый формат ответа, логирование (уже частично в service-core).
 - Безопасность: rate limiting (есть в gateway), Helmet, CORS, санитизация входных данных.
 - Campaign Service: CRUD кампаний, шаблоны, sequences, интеграция с Messaging.
 - Надёжность: retry/circuit breaker для вызовов AI и BD Accounts; алерты по метрикам и очередям; DLQ (см. [STAGES.md](STAGES.md), [FULL_SYSTEM_AUDIT_2026.md](FULL_SYSTEM_AUDIT_2026.md)).
 
-### Приоритетные технические задачи (по полному аудиту 2026)
+### Приоритетные технические задачи (аудит 2026 + текущий план миграции)
 
-См. [FULL_SYSTEM_AUDIT_2026.md](FULL_SYSTEM_AUDIT_2026.md). Рекомендуемый порядок:
+База: [FULL_SYSTEM_AUDIT_2026.md](FULL_SYSTEM_AUDIT_2026.md), [MIGRATION_TO_TARGET_ARCHITECTURE.md](MIGRATION_TO_TARGET_ARCHITECTURE.md). Рекомендуемый порядок:
 
-1. **Reliability:** Retry и circuit breaker при вызовах AI-service и bd-accounts из messaging-service (и других сервисов) — при падении внешних API UX не должен ломаться.
-2. **Observability:** Алерты по метрикам (latency, error rate) и по здоровью очередей RabbitMQ (глубина, DLQ). Реализация DLQ после этапа Observability (STAGES.md).
-3. **Scale:** Стратегия партиционирования и/или архивации для таблицы `messages` при росте объёма; проверка нагрузки на 10k conversations.
-4. **Контракты схемы:** Зафиксировать ownership таблиц между сервисами (кто какие таблицы меняет), чтобы избежать конфликтов миграций при росте.
+1. **Reliability (B1):** Алерты **`InterServiceHttpErrorShareElevated`** / **`InterServiceHttpCircuitReject`** заведены; при необходимости подстроить пороги и добавить latency-правила; ревью покрытия по эндпоинтам.
+2. **Observability:** Расширить алерты (latency, error rate по HTTP-сервисам) при необходимости; DLQ-метрики и часть правил уже заведены — см. [DEPLOYMENT.md](DEPLOYMENT.md).
+3. **Парсинг / discovery (B4):** по [PLAN_TELEGRAM_PARSE_FLOW.md](PLAN_TELEGRAM_PARSE_FLOW.md) — хвост редких `invoke` без FloodRetry; фронт — `channelEngagement` и ETA/speed на Discovery; при необходимости — fallback SSE-only без WebSocket.
+4. **Scale:** Стратегия партиционирования/архивации `messages`; нагрузочные проверки на большом числе conversations.
+5. **Контракты данных:** [TABLE_OWNERSHIP_A1.md](../ai_docs/develop/TABLE_OWNERSHIP_A1.md) и [INTERNAL_API.md](INTERNAL_API.md) — поддерживать в актуальном виде при изменениях.
 
 ### По результатам аудита 2026-03-18
 
 Полный отчёт: [ai_docs/develop/audits/2026-03-18-full-system-audit.md](../ai_docs/develop/audits/2026-03-18-full-system-audit.md).
 
 **Выполнено (ремедиация):**
-- **A1/S2:** Orphan messages при удалении аккаунта перенесён в messaging-service: добавлен `POST /internal/messages/orphan-by-bd-account`; bd-accounts вызывает его перед удалением и больше не делает `UPDATE messages`.
+- **A1/S2:** Orphan messages при удалении аккаунта: основной путь — `POST /internal/messages/orphan-by-bd-account` в messaging-service; при ошибке API bd-accounts выполняет локальный `UPDATE` (fallback) с метрикой `bd_accounts_messaging_orphan_fallback_total` и алертом — см. [RUNBOOK_ORPHAN_MESSAGES.md](RUNBOOK_ORPHAN_MESSAGES.md).
 - **S1:** Internal API messaging: приоритет заголовка `X-Organization-Id` над body для ensure и POST /messages.
 - **S3:** В DEPLOYMENT.md добавлена рекомендация задавать INTERNAL_AUTH_SECRET в dev/staging.
 - **S4:** Edit/delete-by-telegram требуют `X-Organization-Id` и проверяют `organization_id` в WHERE; bd-accounts MessageDb и event-handlers передают organizationId в контексте.
@@ -101,15 +126,15 @@
 - **A4:** GET /chats и GET /search в messaging обёрнуты в `withOrgContext`; internal ensure и POST /messages — в withOrgContext.
 - **Doc:** INTERNAL_API.md дополнен эндпоинтом orphan-by-bd-account и требованием X-Organization-Id для edit/delete-by-telegram.
 - **Q1 (баг):** В GET /chats внутри withOrgContext ранние выходы (channel!==telegram, !chats?.length) теперь возвращают `[]` из callback, а не вызывают res.json([]), чтобы избежать двойной отправки ответа.
-- **Q2:** В bd-accounts telegram-manager во всех пустых catch добавлено логирование (log.debug): disconnect, регистрация Raw/Short/NewMessage, UpdateUserTyping/ChatUserTyping/UpdateUserStatus/ReadHistoryInbox/ReadChannelInbox/UpdateDraftMessage, contact insert, wrap (other handlers).
+- **Q2:** В bd-accounts модулях `telegram/*` во всех пустых catch добавлено логирование (log.debug): disconnect, регистрация Raw/Short/NewMessage, typing/status/read handlers, contact insert, wrap (other handlers). *(Исторически часть работ относилась к удалённому legacy `telegram-manager.ts`.)*
 - **A5, Q1 (рефактор):** В messaging-service создан chats-list-helpers.ts (getSyncListQuery, getDefaultChatsQuery, normalizeChatRows, runSyncListQuery, runDefaultChatsQuery); GET /chats использует эти хелперы.
 - **Общий чат в списке:** После создания общего чата с лидом чат сразу появляется в списке чатов аккаунта: в bd-accounts-service после createSharedChat выполняется INSERT в bd_account_sync_chats (peer_type=chat); при выборе аккаунта список тянется из sync-chats.
 
 **Осталось:**
-- **P0 (опционально):** GET /chats без bdAccountId и GET /search всё ещё читают `bd_account_sync_chats` (JOIN). При желании перевести на вызов bd-accounts internal API.
-- **P1:** Дальнейшее разбиение chats.ts по необходимости; сократить any и вынести filterToApiMessages в bd-accounts Telegram (Q3–Q4).
-- **P2:** Слой репозитория (A3); god-модули bd-accounts Telegram (A6); CSP и theme script (S15, S16); DRY пагинация/API layer/типы (Q5–Q10).
-- **Бэклог:** A7–A14, S6–S14, Q11–Q16; метрики RabbitMQ; партиционирование messages; tracing; дисциплина доков и тестов.
+- **P0 (закрыто):** GET /chats без bdAccountId и GET /search — internal bd-accounts; журнал **A1** в [MIGRATION_TO_TARGET_ARCHITECTURE.md](MIGRATION_TO_TARGET_ARCHITECTURE.md).
+- **P1:** Дальнейшее разбиение `chats.ts` при росте; сократить `any`, вынести filterToApiMessages в bd-accounts Telegram (Q3–Q4).
+- **P2:** Слой репозитория / query-модули (**C2**); остатки god-модулей bd-accounts (**C3**); CSP и theme script (S15, S16); DRY API layer и типы на фронте (Q5–Q10) — **пагинация частично закрыта C1** (`parsePageLimit` в service-core, см. [CURRENT_SYSTEM_AS_IS.md](CURRENT_SYSTEM_AS_IS.md) §4.1).
+- **Бэклог:** A7–A14, S6–S14, Q11–Q16; партиционирование messages; tracing; расширение тестов.
 
 ---
 
@@ -118,16 +143,19 @@
 ### Ближайшие (по приоритету)
 
 1. **Автосоздание сделки/лида из чата**  
-   Правила (например: «если ключевые слова — создать лид в воронку X») или AI (извлечение намерения и создание лида/сделки). Таблица правил (organization_id, pipeline_id, trigger_type: keyword/first_message, keywords), подписка messaging или bd-accounts на MessageReceivedEvent, вызов pipeline-service POST /api/pipeline/leads при срабатывании. Связано с текущей воронкой лидов и контактами из TG.
+   Правила (ключевые слова / первое сообщение) или AI; таблица правил, подписка на событие сообщения, вызов pipeline-service `POST .../leads`. См. контекст воронки и контактов из TG.
 
-2. **Email и MFA**  
-   Восстановление пароля по email (SendGrid/Resend); MFA (TOTP + backup codes) для повышения безопасности.
+2. **Auth: email и соц. вход**  
+   Восстановление пароля по email (SendGrid/Resend), верификация email, OAuth. **2FA (TOTP)** уже в auth-service — приоритизировать продуктовый UX и политики, если нужно.
 
-3. **Campaign Service (базовый)**  
-   Новый сервис: CRUD кампаний, шаблоны сообщений, sequences, вызов отправки через Messaging. Можно начать с простых рассылок по выбранным контактам/чатам.
+3. **Надёжность и парсинг (техдолг архитектуры)**  
+   **B1** — ревью breaker/retry на критичных цепочках; **B4** — этапы [PLAN_TELEGRAM_PARSE_FLOW.md](PLAN_TELEGRAM_PARSE_FLOW.md). Параллельно — **C2/C3** (толстый `campaigns.ts` и др.) по нагрузке команды.
+
+4. **Campaign Service (развитие)**  
+   Базовый сервис уже в продуктах; дальше — лимиты, AI-персонализация, рефакторинг роутеров — см. [CAMPAIGNS.md](CAMPAIGNS.md) и [MIGRATION_TO_TARGET_ARCHITECTURE.md](MIGRATION_TO_TARGET_ARCHITECTURE.md).
 
 **Что делать дальше (рекомендация):**  
-Сначала реализовать **автосоздание лида из чата**: миграция таблицы правил (auto_lead_rules: organization_id, pipeline_id, trigger_type, keywords, is_active), CRUD API правил, подписка на MessageReceivedEvent (bd-accounts его публикует; подписчик — messaging-service или отдельный worker), при срабатывании — создание лида через pipeline-service (игнорировать 409 ALREADY_IN_PIPELINE). Затем — Email/MFA и Campaign по приоритету.
+Продуктово — **автосоздание лида из чата** (если это ближайший релизный приоритет). Технически параллельно или следом — **B1/B4** и обновление **STATE_AND_ROADMAP** после каждого крупного шага (**E1**).
 
 ### Средний срок
 

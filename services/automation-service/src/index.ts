@@ -1,9 +1,16 @@
 import { Counter } from 'prom-client';
 import { createLogger } from '@getsale/logger';
-import { createServiceApp, ServiceHttpClient } from '@getsale/service-core';
+import { createServiceApp, ServiceHttpClient, interServiceHttpDefaults } from '@getsale/service-core';
 import { subscribeToEvents, executeRule } from './event-handlers';
 import { runSlaCronOnce, startCronJobs } from './sla-cron';
 import { rulesRouter } from './routes/rules';
+
+function automationClientTimeoutMs(envVar: string, fallbackMs: number): number {
+  const raw = process.env[envVar]?.trim();
+  if (!raw) return fallbackMs;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 3000 ? n : fallbackMs;
+}
 
 async function main() {
   const ctx = await createServiceApp({
@@ -63,19 +70,21 @@ async function main() {
 
   const crmClient = new ServiceHttpClient(
     {
+      ...interServiceHttpDefaults(),
       baseUrl: process.env.CRM_SERVICE_URL || 'http://crm-service:3002',
       name: 'crm-service',
-      timeoutMs: 15_000,
-      retries: 2,
+      timeoutMs: automationClientTimeoutMs('AUTOMATION_CRM_HTTP_TIMEOUT_MS', 15_000),
+      metricsRegistry: registry,
     },
     log
   );
   const pipelineClient = new ServiceHttpClient(
     {
+      ...interServiceHttpDefaults(),
       baseUrl: process.env.PIPELINE_SERVICE_URL || 'http://pipeline-service:3008',
       name: 'pipeline-service',
-      timeoutMs: 15_000,
-      retries: 2,
+      timeoutMs: automationClientTimeoutMs('AUTOMATION_PIPELINE_HTTP_TIMEOUT_MS', 15_000),
+      metricsRegistry: registry,
     },
     log
   );

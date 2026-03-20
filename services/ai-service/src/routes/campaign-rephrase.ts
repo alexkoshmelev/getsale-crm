@@ -1,13 +1,9 @@
 import { Router } from 'express';
-import { z } from 'zod';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { AIRateLimiter } from '../rate-limiter';
 import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL } from '../openrouter-campaign-config';
-
-const RephraseSchema = z.object({
-  text: z.string().min(1).max(4000),
-});
+import { AiCampaignRephraseSchema, type AiCampaignRephraseInput } from '../validation';
 
 interface Deps {
   log: Logger;
@@ -44,9 +40,9 @@ function extractRephrasedText(data: {
 export function campaignRephraseRouter({ log, rateLimiter }: Deps): Router {
   const router = Router();
 
-  router.post('/campaigns/rephrase', validate(RephraseSchema), asyncHandler(async (req, res) => {
+  router.post('/campaigns/rephrase', validate(AiCampaignRephraseSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const { text } = req.body as { text: string };
+    const { text } = req.body as AiCampaignRephraseInput;
     const apiKey = process.env.OPENROUTER_API_KEY?.trim();
     const model = process.env.OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_CAMPAIGN_MODEL;
 

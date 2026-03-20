@@ -43,6 +43,8 @@ import { validate } from '@getsale/service-core';
 router.post('/', validate(CreateSchema), async (req, res) => { ... });
 ```
 
+**Exceptions (C4):** **api-gateway** — thin proxy/rate-limit only; no business `validation.ts` required. Prefer Zod on services that own data (**team**, **analytics**, **activity** — centralized `validation.ts` with a short prefix e.g. `Tm*`, `An*`, `Ac*`).
+
 ### 4. Use `AppError` for business errors
 ```typescript
 import { AppError, ErrorCodes } from '@getsale/service-core';

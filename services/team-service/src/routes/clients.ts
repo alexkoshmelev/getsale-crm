@@ -1,14 +1,8 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
-import { z } from 'zod';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, requireUser, AppError, ErrorCodes, validate } from '@getsale/service-core';
-
-const AssignClientSchema = z.object({
-  teamId: z.string().uuid(),
-  clientId: z.string().uuid(),
-  assignedTo: z.string().uuid(),
-});
+import { TmAssignClientSchema } from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -19,7 +13,7 @@ export function clientsRouter({ pool }: Deps): Router {
   const router = Router();
   router.use(requireUser());
 
-  router.post('/assign', validate(AssignClientSchema), asyncHandler(async (req, res) => {
+  router.post('/assign', validate(TmAssignClientSchema), asyncHandler(async (req, res) => {
     const user = req.user;
     const { teamId, clientId, assignedTo } = req.body;
 

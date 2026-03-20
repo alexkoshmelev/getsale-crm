@@ -1,12 +1,18 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
-import { z } from 'zod';
+import { Counter } from 'prom-client';
 import { RabbitMQClient } from '@getsale/utils';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, canPermission, validate, withOrgContext, ServiceHttpClient } from '@getsale/service-core';
 import { TelegramManager } from '../telegram';
 import { requireAccountOwner, requireBidiOwnAccount, getAccountOr404 } from '../helpers';
 import { decryptIfNeeded } from '../crypto';
+import {
+  BdAccountPurchaseSchema,
+  BdAccountEnrichContactsSchema,
+  BdAccountPatchSchema,
+  BdAccountConfigSchema,
+} from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -14,37 +20,38 @@ interface Deps {
   log: Logger;
   telegramManager: TelegramManager;
   messagingClient: ServiceHttpClient;
+  messagingOrphanFallbackTotal: Counter;
 }
 
-export function accountsRouter({ pool, rabbitmq, log, telegramManager, messagingClient }: Deps): Router {
+export function accountsRouter({
+  pool,
+  rabbitmq,
+  log,
+  telegramManager,
+  messagingClient,
+  messagingOrphanFallbackTotal,
+}: Deps): Router {
   const router = Router();
   const checkPermission = canPermission(pool);
-
-  const PurchaseSchema = z.object({
-    platform: z.string().min(1).max(64),
-    durationDays: z.number().int().min(1).max(3650),
-  });
-  const EnrichContactsSchema = z.object({
-    contactIds: z.array(z.string()).optional(),
-    bdAccountId: z.string().uuid().optional().nullable(),
-  });
-  const AccountPatchSchema = z.object({
-    display_name: z.string().max(500).trim().optional().nullable(),
-    proxy_config: z.object({
-      type: z.enum(['http', 'socks5']).optional(),
-      host: z.string().min(1).max(256),
-      port: z.number().int().min(1).max(65535),
-      username: z.string().max(256).optional(),
-      password: z.string().max(512).optional(),
-    }).nullable().optional(),
-  }).optional();
-  const AccountConfigSchema = z.object({
-    limits: z.record(z.unknown()).optional(),
-    metadata: z.record(z.unknown()).optional(),
-  }).optional();
+  const withProxyStatus = (
+    row: Record<string, unknown>,
+    isConnected: boolean
+  ): Record<string, unknown> => {
+    const cfg = row.proxy_config;
+    const hasProxy = cfg != null && typeof cfg === 'object';
+    const lastStatus = typeof row.last_status === 'string' ? row.last_status.toLowerCase() : '';
+    const lastMessage = typeof row.last_status_message === 'string' ? row.last_status_message : '';
+    const proxyError = hasProxy && (lastStatus === 'error') && /proxy|socks|http proxy|connection refused|timed out/i.test(lastMessage);
+    return {
+      ...row,
+      proxy_status: !hasProxy ? 'none' : proxyError ? 'error' : isConnected ? 'ok' : 'configured',
+      last_proxy_check_at: row.last_status_at ?? null,
+      last_proxy_error: proxyError ? lastMessage : null,
+    };
+  };
 
   // POST routes with literal paths must be registered before /:id patterns
-  router.post('/purchase', validate(PurchaseSchema), asyncHandler(async (req, res) => {
+  router.post('/purchase', validate(BdAccountPurchaseSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
     const { platform, durationDays } = req.body;
 
@@ -62,7 +69,7 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager, messaging
     res.json(row);
   }));
 
-  router.post('/enrich-contacts', validate(EnrichContactsSchema), asyncHandler(async (req, res) => {
+  router.post('/enrich-contacts', validate(BdAccountEnrichContactsSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { contactIds = [], bdAccountId } = req.body;
     const ids = contactIds;
@@ -79,11 +86,21 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager, messaging
     }
 
     const result = await pool.query(
-      `SELECT id, organization_id, telegram_id, phone_number, is_active, is_demo, connected_at, last_activity,
-              created_at, sync_status, sync_progress_done, sync_progress_total, sync_error,
-              created_by_user_id AS owner_id,
-              first_name, last_name, username, bio, photo_file_id, display_name
-       FROM bd_accounts WHERE organization_id = $1 ORDER BY created_at DESC`,
+      `SELECT a.id, a.organization_id, a.telegram_id, a.phone_number, a.is_active, a.is_demo, a.connected_at, a.last_activity,
+              a.created_at, a.sync_status, a.sync_progress_done, a.sync_progress_total, a.sync_error,
+              a.created_by_user_id AS owner_id,
+              a.first_name, a.last_name, a.username, a.bio, a.photo_file_id, a.display_name, a.proxy_config,
+              a.connection_state, a.disconnect_reason, a.last_error_code, a.last_error_at,
+              s.status AS last_status, s.message AS last_status_message, s.recorded_at AS last_status_at
+       FROM bd_accounts a
+       LEFT JOIN LATERAL (
+         SELECT status, message, recorded_at
+         FROM bd_account_status
+         WHERE account_id = a.id
+         ORDER BY recorded_at DESC
+         LIMIT 1
+       ) s ON true
+       WHERE a.organization_id = $1 ORDER BY a.created_at DESC`,
       [organizationId]
     );
 
@@ -107,11 +124,15 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager, messaging
     }
 
     interface ListRow { id: string; owner_id?: string | null; [k: string]: unknown }
-    const rows = result.rows.map((r: ListRow) => ({
-      ...r,
-      is_owner: r.owner_id != null && r.owner_id === userId,
-      unread_count: unreadByAccount[r.id] ?? 0,
-    }));
+    const rows = result.rows.map((r: ListRow) => {
+      const isConnected = telegramManager.isConnected(r.id);
+      const withProxy = withProxyStatus(r as Record<string, unknown>, isConnected);
+      return {
+        ...withProxy,
+        is_owner: r.owner_id != null && r.owner_id === userId,
+        unread_count: unreadByAccount[r.id] ?? 0,
+      };
+    });
     res.json(rows);
   }));
 
@@ -124,16 +145,17 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager, messaging
       pool,
       id,
       organizationId,
-      'id, organization_id, telegram_id, phone_number, is_active, is_demo, connected_at, last_activity, created_at, sync_status, sync_progress_done, sync_progress_total, sync_error, created_by_user_id AS owner_id, first_name, last_name, username, bio, photo_file_id, display_name, proxy_config'
+      'id, organization_id, telegram_id, phone_number, is_active, is_demo, connected_at, last_activity, created_at, sync_status, sync_progress_done, sync_progress_total, sync_error, created_by_user_id AS owner_id, first_name, last_name, username, bio, photo_file_id, display_name, proxy_config, connection_state, disconnect_reason, last_error_code, last_error_at'
     );
+    const isConnected = telegramManager.isConnected(id);
     res.json({
-      ...row,
+      ...withProxyStatus(row as Record<string, unknown>, isConnected),
       is_owner: row.owner_id != null && row.owner_id === userId,
     });
   }));
 
   // PATCH /:id — update display_name and/or proxy_config
-  router.patch('/:id', validate(AccountPatchSchema), asyncHandler(async (req, res) => {
+  router.patch('/:id', validate(BdAccountPatchSchema), asyncHandler(async (req, res) => {
     const user = req.user;
     const { id } = req.params;
     const body = req.body ?? {};
@@ -168,9 +190,16 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager, messaging
         sets.push(`proxy_config = $${idx++}`);
         params.push(null);
       } else if (typeof proxyConfig === 'object' && proxyConfig.host && proxyConfig.port) {
+        if ((proxyConfig as { type?: string }).type === 'http') {
+          throw new AppError(
+            400,
+            'HTTP/HTTPS proxy is not supported by current Telegram client. Please use SOCKS5 proxy.',
+            ErrorCodes.VALIDATION
+          );
+        }
         sets.push(`proxy_config = $${idx++}`);
         params.push(JSON.stringify({
-          type: proxyConfig.type === 'http' ? 'http' : 'socks5',
+          type: 'socks5',
           host: String(proxyConfig.host).trim(),
           port: Number(proxyConfig.port),
           ...(proxyConfig.username ? { username: String(proxyConfig.username) } : {}),
@@ -230,7 +259,7 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager, messaging
   }));
 
   // PUT /:id/config
-  router.put('/:id/config', validate(AccountConfigSchema), asyncHandler(async (req, res) => {
+  router.put('/:id/config', validate(BdAccountConfigSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const { limits, metadata } = req.body;
@@ -258,7 +287,7 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager, messaging
     const { id } = req.params;
 
     const accountResult = await pool.query(
-      `SELECT id, organization_id, created_by_user_id, phone_number, api_id, api_hash, session_string, session_encrypted
+      `SELECT id, organization_id, created_by_user_id, phone_number, api_id, api_hash, session_string, session_encrypted, connection_state
        FROM bd_accounts WHERE id = $1 AND organization_id = $2`,
       [id, user.organizationId]
     );
@@ -273,6 +302,9 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager, messaging
     }
 
     const row = accountResult.rows[0] as Record<string, unknown> & { session_string?: string; api_hash?: string; session_encrypted?: unknown; organization_id?: string; created_by_user_id?: string; phone_number?: string; api_id?: string };
+    if (row.connection_state === 'reauth_required') {
+      throw new AppError(409, 'Session expired. Please reconnect account via QR or phone login.', ErrorCodes.BAD_REQUEST);
+    }
     if (!row.session_string) {
       throw new AppError(400, 'Account has no session; reconnect via QR or phone', ErrorCodes.BAD_REQUEST);
     }
@@ -283,7 +315,7 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager, messaging
 
     await withOrgContext(pool, user.organizationId, (client) =>
       client.query(
-        'UPDATE bd_accounts SET is_active = true WHERE id = $1 AND organization_id = $2',
+        "UPDATE bd_accounts SET is_active = true, connection_state = 'reconnecting', updated_at = NOW() WHERE id = $1 AND organization_id = $2",
         [id, user.organizationId]
       )
     );
@@ -340,6 +372,7 @@ export function accountsRouter({ pool, rabbitmq, log, telegramManager, messaging
       return false;
     });
     if (!orphanOk) {
+      messagingOrphanFallbackTotal.inc();
       await pool.query(
         'UPDATE messages SET bd_account_id = NULL WHERE bd_account_id = $1 AND organization_id = $2',
         [id, user.organizationId]

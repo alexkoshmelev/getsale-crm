@@ -77,7 +77,12 @@ make k8s-apply
 ## 📚 Документация
 
 ### Основная документация
+- [Contributing](CONTRIBUTING.md) — PR, ADR (`docs/adr/`)
+- [Индекс документации](docs/INDEX.md) — целевая / as-is / миграция, API, runbooks
 - [Архитектура системы](docs/ARCHITECTURE.md) - Общая архитектура
+- [Целевая архитектура SaaS CRM](docs/TARGET_SAAS_CRM_ARCHITECTURE.md) — целевая модель, границы сервисов, надёжность
+- [Текущее состояние (as-is)](docs/CURRENT_SYSTEM_AS_IS.md) — фактическая реализация, дубли, SRP
+- [План перехода к целевой архитектуре](docs/MIGRATION_TO_TARGET_ARCHITECTURE.md) — фазы A–E и критерии готовности
 - [BD CRM Архитектура](docs/BD_CRM_ARCHITECTURE.md) - Детальная архитектура согласно промпту
 - [Анализ текущего состояния](docs/CURRENT_STATE_ANALYSIS.md) - Детальный анализ всех доменов
 - [План к продакшену](docs/PRODUCTION_ROADMAP.md) - Пошаговый план до продакшена

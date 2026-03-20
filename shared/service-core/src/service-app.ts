@@ -2,7 +2,7 @@ import express, { Express, Request, Router } from 'express';
 import cors from 'cors';
 import { Pool, PoolConfig } from 'pg';
 import { Registry, Counter, Histogram, collectDefaultMetrics } from 'prom-client';
-import { RabbitMQClient, eventPublishFailedTotal } from '@getsale/utils';
+import { RabbitMQClient, eventPublishFailedTotal, rabbitmqDlqMessagesTotal } from '@getsale/utils';
 import { createLogger, Logger } from '@getsale/logger';
 import {
   correlationId,
@@ -113,6 +113,7 @@ export async function createServiceApp(config: ServiceConfig): Promise<ServiceCo
   const registry = new Registry();
   collectDefaultMetrics({ register: registry });
   registry.registerMetric(eventPublishFailedTotal);
+  registry.registerMetric(rabbitmqDlqMessagesTotal);
 
   const httpRequestDuration = new Histogram({
     name: 'http_request_duration_seconds',

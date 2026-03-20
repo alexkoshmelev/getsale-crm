@@ -7,7 +7,14 @@ import { UserRole } from '@getsale/types';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { randomUUID } from 'crypto';
-import { z } from 'zod';
+import {
+  AU_ORG_NAME_MAX_LEN,
+  AU_ORG_SLUG_MAX_LEN,
+  AuSignupSchema,
+  AuSigninSchema,
+  AuVerifyBodySchema,
+  auEmailSchema,
+} from '../validation';
 import {
   signAccessToken, signRefreshToken, signWsToken, verifyAccessToken, verifyRefreshToken, hashRefreshToken,
   signTempToken,
@@ -44,28 +51,6 @@ const SIGNUP_RATE_LIMIT = 5;
 const SIGNUP_RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 const SIGNUP_RATE_WINDOW_SEC = Math.ceil(SIGNUP_RATE_WINDOW_MS / 1000);
 
-const ORG_NAME_MAX_LEN = 200;
-const ORG_SLUG_MAX_LEN = 100;
-
-const SignupSchema = z.object({
-  email: z.string().email('Invalid email format').max(254).trim().toLowerCase(),
-  password: z.string().min(8, 'Password must be at least 8 characters').max(128, 'Password must be at most 128 characters')
-    .refine((p) => /[a-z]/.test(p), 'Password must contain a lowercase letter')
-    .refine((p) => /[A-Z]/.test(p), 'Password must contain an uppercase letter')
-    .refine((p) => /[0-9]/.test(p), 'Password must contain a digit'),
-  organizationName: z.string().max(ORG_NAME_MAX_LEN).trim().optional(),
-  inviteToken: z.string().min(1).optional(),
-});
-
-const SigninSchema = z.object({
-  email: z.string().email('Invalid email format').max(254).trim().toLowerCase(),
-  password: z.string().min(1, 'Password is required'),
-});
-
-const VerifyBodySchema = z.object({
-  token: z.string().min(1).optional(),
-});
-
 function getClientIp(req: { ip?: string; headers?: Record<string, string | string[] | undefined> }): string {
   const forwarded = req.headers?.['x-forwarded-for'];
   if (typeof forwarded === 'string') return forwarded.split(',')[0]?.trim() || req.ip || 'unknown';
@@ -94,8 +79,6 @@ function validatePassword(password: string): string | null {
   return null;
 }
 
-const emailSchema = z.string().email('Invalid email format').max(254).trim().toLowerCase();
-
 function validateEmailAndPassword(
   body: unknown,
   opts: { requirePasswordLength?: boolean } = {}
@@ -103,7 +86,7 @@ function validateEmailAndPassword(
   const raw = body as { email?: unknown; password?: unknown };
   if (!raw.email || !raw.password) throw new AppError(400, 'Email and password required', ErrorCodes.BAD_REQUEST);
 
-  const emailResult = emailSchema.safeParse(raw.email);
+  const emailResult = auEmailSchema.safeParse(raw.email);
   if (!emailResult.success) {
     throw new AppError(400, 'Invalid email format', ErrorCodes.VALIDATION);
   }
@@ -131,7 +114,7 @@ export function setAuthCookiesAndRespond(
 export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
   const router = Router();
 
-  router.post('/signup', validate(SignupSchema), asyncHandler(async (req, res) => {
+  router.post('/signup', validate(AuSignupSchema), asyncHandler(async (req, res) => {
     await checkRateLimit(redis, {
       keyPrefix: 'auth_rate:signup',
       clientId: getClientIp(req),
@@ -142,7 +125,7 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
     const { email, password, organizationName, inviteToken } = req.body;
     const orgName =
       organizationName != null && String(organizationName).trim()
-        ? String(organizationName).trim().slice(0, ORG_NAME_MAX_LEN)
+        ? String(organizationName).trim().slice(0, AU_ORG_NAME_MAX_LEN)
         : 'My Organization';
 
     let organization: { id: string; name: string };
@@ -185,7 +168,7 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
 
         const orgResult = await client.query(
           'INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING *',
-          [orgName, slug.slice(0, ORG_SLUG_MAX_LEN)]
+          [orgName, slug.slice(0, AU_ORG_SLUG_MAX_LEN)]
         );
         organization = orgResult.rows[0];
 
@@ -256,7 +239,7 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
     });
   }));
 
-  router.post('/signin', validate(SigninSchema), asyncHandler(async (req, res) => {
+  router.post('/signin', validate(AuSigninSchema), asyncHandler(async (req, res) => {
     await checkRateLimit(redis, {
       keyPrefix: 'auth_rate:signin',
       clientId: getClientIp(req),
@@ -351,7 +334,7 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
     res.status(204).send();
   }));
 
-  router.post('/verify', validate(VerifyBodySchema), asyncHandler(async (req, res) => {
+  router.post('/verify', validate(AuVerifyBodySchema), asyncHandler(async (req, res) => {
     const token =
       req.body?.token ||
       req.cookies?.[AUTH_COOKIE_ACCESS] ||

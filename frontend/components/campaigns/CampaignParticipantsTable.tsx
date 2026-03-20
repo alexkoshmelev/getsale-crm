@@ -38,6 +38,9 @@ const PHASE_KEYS: Record<CampaignParticipantPhase, string> = {
   replied: 'campaigns.replied',
   shared: 'campaigns.shared',
   failed: 'campaigns.statusFailed',
+  pending: 'campaigns.participantPhasePending',
+  scheduled: 'campaigns.participantPhaseScheduled',
+  skipped: 'campaigns.participantPhaseSkipped',
 };
 
 export function CampaignParticipantsTable({
@@ -352,7 +355,10 @@ export function CampaignParticipantsTable({
                         p.status_phase === 'replied' && 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400',
                         p.status_phase === 'read' && 'bg-blue-500/15 text-blue-700 dark:text-blue-400',
                         p.status_phase === 'sent' && 'bg-muted text-muted-foreground',
-                        p.status_phase === 'failed' && 'bg-destructive/15 text-destructive'
+                        p.status_phase === 'failed' && 'bg-destructive/15 text-destructive',
+                        p.status_phase === 'pending' && 'bg-amber-500/10 text-amber-800 dark:text-amber-200',
+                        p.status_phase === 'scheduled' && 'bg-sky-500/10 text-sky-800 dark:text-sky-200',
+                        p.status_phase === 'skipped' && 'bg-muted/80 text-muted-foreground'
                       )}
                       title={p.status_phase === 'failed' && p.last_error ? p.last_error : undefined}
                     >

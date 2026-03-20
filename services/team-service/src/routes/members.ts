@@ -2,22 +2,12 @@ import { Router } from 'express';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 import bcrypt from 'bcryptjs';
-import { z } from 'zod';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, TeamMemberAddedEvent } from '@getsale/events';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, canPermission, requireUser, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { normalizeRole, auditLog, getClientIp } from '../helpers';
-
-const InviteMemberSchema = z.object({
-  email: z.string().email().max(254).transform((s) => s.trim().toLowerCase()),
-  teamId: z.union([z.string().uuid(), z.literal('default')]).optional(),
-  role: z.string().max(64).optional(),
-});
-
-const UpdateRoleSchema = z.object({
-  role: z.string().min(1).max(64),
-});
+import { TmInviteMemberSchema, TmUpdateMemberRoleSchema } from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -82,7 +72,7 @@ export function membersRouter({ pool, rabbitmq, log }: Deps): Router {
     res.json(result.rows);
   }));
 
-  router.post('/invite', validate(InviteMemberSchema), asyncHandler(async (req, res) => {
+  router.post('/invite', validate(TmInviteMemberSchema), asyncHandler(async (req, res) => {
     const user = req.user;
     const { teamId, email: normalizedEmail, role } = req.body;
 
@@ -203,7 +193,7 @@ export function membersRouter({ pool, rabbitmq, log }: Deps): Router {
     }
   }));
 
-  router.put('/:id/role', validate(UpdateRoleSchema), asyncHandler(async (req, res) => {
+  router.put('/:id/role', validate(TmUpdateMemberRoleSchema), asyncHandler(async (req, res) => {
     const user = req.user;
     const roleLower = (user.role || '').toLowerCase();
     const isOwnerOrAdmin = roleLower === 'owner' || roleLower === 'admin';

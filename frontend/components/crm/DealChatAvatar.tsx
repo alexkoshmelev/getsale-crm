@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { apiClient } from '@/lib/api/client';
+import { fetchBdAccountChatAvatarBlob } from '@/lib/api/bd-accounts';
 import { blobUrlCache, avatarChatKey } from '@/lib/cache/blob-url-cache';
 
 /** Аватар чата для карточки сделки (если сделка привязана к чату по bd_account_id + channel_id). */
@@ -31,11 +31,10 @@ export function DealChatAvatar({
         setSrc(null);
       };
     }
-    apiClient
-      .get(`/api/bd-accounts/${bdAccountId}/chats/${channelId}/avatar`, { responseType: 'blob' })
-      .then((res) => {
-        if (mounted.current && res.data instanceof Blob && res.data.size > 0) {
-          const u = URL.createObjectURL(res.data);
+    fetchBdAccountChatAvatarBlob(bdAccountId, channelId)
+      .then((blob) => {
+        if (mounted.current && blob) {
+          const u = URL.createObjectURL(blob);
           blobUrlCache.set(key, u);
           setSrc(u);
         }

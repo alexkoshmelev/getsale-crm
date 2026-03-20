@@ -23,6 +23,8 @@ interface ProgressEvent {
   total?: number;
   status?: string;
   error?: string;
+  etaSeconds?: number;
+  speed?: number;
 }
 
 export default function ParseProgressPanel({ taskId, onStopped }: ParseProgressPanelProps) {
@@ -71,6 +73,17 @@ export default function ParseProgressPanel({ taskId, onStopped }: ParseProgressP
   const found = event?.found ?? 0;
   const total = event?.total ?? 0;
   const status = event?.status ?? 'running';
+  const etaSeconds = event?.etaSeconds;
+  const speed = event?.speed;
+
+  const etaText =
+    etaSeconds != null && Number.isFinite(etaSeconds) && etaSeconds >= 0
+      ? etaSeconds < 90
+        ? t('parsing.etaSeconds', { n: Math.max(1, Math.round(etaSeconds)) })
+        : etaSeconds < 3600
+          ? t('parsing.etaMinutes', { n: Math.max(1, Math.round(etaSeconds / 60)) })
+          : t('parsing.etaHours', { n: Math.max(1, Math.round(etaSeconds / 3600)) })
+      : null;
 
   return (
     <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow border border-gray-200 dark:border-gray-700 space-y-4">
@@ -98,6 +111,12 @@ export default function ParseProgressPanel({ taskId, onStopped }: ParseProgressP
         <span>{t('parsing.participantsCollected')}: {found}{total > 0 ? ` / ${total}` : ''}</span>
         <span>{percent}%</span>
       </div>
+      {(status === 'running' || status === 'paused') && (etaText != null || (speed != null && speed > 0)) && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+          {etaText != null && <span>{t('parsing.progressEtaPrefix')} {etaText}</span>}
+          {speed != null && speed > 0 && <span>{t('parsing.progressSpeed', { n: speed })}</span>}
+        </div>
+      )}
       {(status === 'running' || status === 'paused') && (
         <div className="flex gap-2 pt-2">
           <Button variant="outline" size="sm" onClick={handlePause} disabled={pausing || status !== 'running'}>

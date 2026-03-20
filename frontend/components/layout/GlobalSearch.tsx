@@ -93,10 +93,15 @@ export function GlobalSearch() {
     }
   }, []);
 
+  // Only hit CRM/messaging/pipeline when the palette is open (avoids background fan-out if query was left non-empty).
   useEffect(() => {
+    if (!open) {
+      setResults(null);
+      return;
+    }
     if (debouncedQuery.length >= MIN_QUERY_LENGTH) runSearch(debouncedQuery);
     else setResults(null);
-  }, [debouncedQuery, runSearch]);
+  }, [debouncedQuery, runSearch, open]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -293,6 +298,7 @@ export function GlobalSearch() {
                       <Link
                         key={link.href}
                         href={link.href}
+                        prefetch={false}
                         onClick={() => setOpen(false)}
                         className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-accent transition-colors text-left"
                       >

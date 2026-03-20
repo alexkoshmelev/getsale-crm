@@ -1,4 +1,4 @@
-import { createServiceApp, ServiceHttpClient } from '@getsale/service-core';
+import { createServiceApp, ServiceHttpClient, interServiceHttpDefaults } from '@getsale/service-core';
 import { RedisClient } from '@getsale/utils';
 import { TelegramManager } from './telegram';
 import { accountsRouter } from './routes/accounts';
@@ -7,6 +7,7 @@ import { syncRouter } from './routes/sync';
 import { messagingRouter } from './routes/messaging';
 import { mediaRouter } from './routes/media';
 import { internalBdAccountsRouter } from './routes/internal';
+import { messagingOrphanFallbackTotal, messageDbSqlBypassTotal } from './metrics';
 
 const MESSAGING_SERVICE_URL = process.env.MESSAGING_SERVICE_URL || 'http://localhost:3003';
 
@@ -19,16 +20,24 @@ async function main() {
       await telegramManager?.shutdown();
     },
   });
-  const { pool, rabbitmq, log } = ctx;
+  ctx.registry.registerMetric(messagingOrphanFallbackTotal);
+  ctx.registry.registerMetric(messageDbSqlBypassTotal);
+  const { pool, rabbitmq, log, registry } = ctx;
 
   const redisUrl = process.env.REDIS_URL;
   const redis = redisUrl ? new RedisClient(redisUrl) : null;
 
   const messagingClient = new ServiceHttpClient(
-    { baseUrl: MESSAGING_SERVICE_URL, name: 'messaging-service', retries: 2 },
+    {
+      ...interServiceHttpDefaults(),
+      baseUrl: MESSAGING_SERVICE_URL,
+      name: 'messaging-service',
+      retries: 2,
+      metricsRegistry: registry,
+    },
     log
   );
-  telegramManager = new TelegramManager(pool, rabbitmq, redis, log, messagingClient);
+  telegramManager = new TelegramManager(pool, rabbitmq, redis, log, messagingClient, messageDbSqlBypassTotal);
 
   process.on('unhandledRejection', (reason: unknown) => {
     const msg = reason instanceof Error ? reason.message : String(reason);
@@ -65,7 +74,7 @@ async function main() {
     log.error({ message: 'Failed to initialize active accounts', error: String(error) });
   });
 
-  const deps = { pool, rabbitmq, log, telegramManager, messagingClient };
+  const deps = { pool, rabbitmq, log, telegramManager, messagingClient, messagingOrphanFallbackTotal };
 
   // Auth (literal paths) and media (/:id/avatar, /:id/chats/:chatId/avatar) before accounts (/:id)
   ctx.mount('/api/bd-accounts', authRouter(deps));

@@ -1,7 +1,7 @@
 # CRM API — компании, контакты, сделки
 
 **Сервис:** crm-service  
-**Обновлено:** 2025-01-21
+**Обновлено:** 2026-03-20
 
 Все запросы к CRM проходят через API Gateway с заголовками `x-user-id` и `x-organization-id` (после аутентификации).
 
@@ -59,6 +59,23 @@
 
 ---
 
+## Contact discovery (задачи)
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| GET | `/api/crm/discovery-tasks` | Список задач организации. Query: `limit`, `offset`. |
+| GET | `/api/crm/discovery-tasks/:id` | Детали задачи. |
+| POST | `/api/crm/discovery-tasks` | Создание задачи. Body: `name`, `type` (`search` \| `parse`), **`params`** (см. ниже). |
+| POST | `/api/crm/discovery-tasks/:id/action` | Body: `{ action: 'start' \| 'pause' \| 'stop' }`. |
+
+**`params` для `type: 'search'`:** обязательно непустой **`queries`**: `string[]`. Нужен хотя бы один BD: **`bdAccountId`** (uuid) и/или **`accountIds`**: uuid[] (1–10). При нескольких аккаунтах discovery-loop может переключаться при **429/502/503** от bd-accounts (см. [PLAN_TELEGRAM_PARSE_FLOW.md](PLAN_TELEGRAM_PARSE_FLOW.md)). Опционально: `searchType` (`groups` \| `channels` \| `all`), `limitPerQuery` (1–100). В UI (**Contact discovery** → новый поиск) при выборе одного аккаунта уходит `bdAccountId`, при нескольких — **`accountIds`**.
+
+**`params` для `type: 'parse'`:** нужен хотя бы один BD (`bdAccountId` и/или `accountIds` как выше). Нужны непустые **`chats`** (массив `{ chatId, title?, peerType? }`) **или** **`sources`** (объекты с полями в духе resolve: `chatId`, `linkedChatId`, `type`, `canGetMembers`, …). Опционально: `parseMode`, `postDepth`, `excludeAdmins`, `leaveAfter`, `campaignId`, `campaignName`, **`channelEngagement`** (`default` \| `reactions` — см. пошаговый `POST /api/crm/parse/start` и [INTERNAL_API.md](INTERNAL_API.md) §2).
+
+Отдельный пошаговый флоу parse/resolve/start — в [INTERNAL_API.md](INTERNAL_API.md) и `POST /api/crm/parse/*`.
+
+---
+
 ## Аналитика (Analytics)
 
 | Метод | Путь | Описание |
@@ -90,3 +107,10 @@
 - **`lead.converted`** (при создании сделки с leadId: data: leadId, dealId, pipelineId, convertedAt)
 
 Их могут использовать Analytics, Automation, WebSocket и другие сервисы.
+
+---
+
+## Примечание по Telegram (BD Accounts)
+
+Для Telegram-подключений в bd-accounts используется только **SOCKS5 proxy**.  
+HTTP/HTTPS proxy для auth/connect потоков не поддерживается.

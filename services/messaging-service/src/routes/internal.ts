@@ -3,7 +3,13 @@ import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, withOrgContext } from '@getsale/service-core';
 import { ensureConversation } from '../helpers';
-import { z } from 'zod';
+import {
+  MsgInternalEnsureConversationSchema as EnsureConversationSchema,
+  MsgInternalCreateMessageSchema as CreateMessageSchema,
+  MsgInternalEditByTelegramSchema as EditByTelegramSchema,
+  MsgInternalDeleteByTelegramSchema as DeleteByTelegramSchema,
+  MsgInternalOrphanByBdAccountSchema as OrphanByBdAccountSchema,
+} from '../validation';
 
 /** S1: Prefer X-Organization-Id header over body for tenant context. */
 function getOrganizationId(req: { headers: Record<string, string | string[] | undefined>; body?: Record<string, unknown> }, bodyOrgId?: string): string | null {
@@ -12,75 +18,6 @@ function getOrganizationId(req: { headers: Record<string, string | string[] | un
   if (fromHeader) return fromHeader;
   return bodyOrgId ?? null;
 }
-
-const EnsureConversationSchema = z.object({
-  organizationId: z.string().uuid(),
-  bdAccountId: z.string().uuid(),
-  channel: z.string().min(1).max(64),
-  channelId: z.string().min(1).max(256),
-  contactId: z.string().uuid().nullable(),
-});
-
-/** Accept string or number from bd-accounts (SerializedTelegramMessage uses string); normalize to number for DB. */
-const telegramIdSchema = z
-  .union([z.string(), z.number()])
-  .optional()
-  .nullable()
-  .transform((v) => {
-    if (v == null || v === '') return null;
-    if (typeof v === 'number') return Number.isNaN(v) ? null : v;
-    const n = parseInt(String(v), 10);
-    return Number.isNaN(n) ? null : n;
-  });
-
-const SerializedTelegramSchema = z.object({
-  telegram_message_id: telegramIdSchema,
-  telegram_date: z.union([z.string(), z.date(), z.number()]).nullable().optional(),
-  content: z.string(),
-  telegram_entities: z.unknown().nullable().optional(),
-  telegram_media: z.unknown().nullable().optional(),
-  reply_to_telegram_id: telegramIdSchema,
-  telegram_extra: z.record(z.unknown()).optional(),
-});
-
-const CreateMessageSchema = z.object({
-  organizationId: z.string().uuid(),
-  bdAccountId: z.string().uuid(),
-  contactId: z.string().uuid().nullable(),
-  channel: z.string().min(1).max(64),
-  channelId: z.string().min(1).max(256),
-  direction: z.string().min(1).max(32),
-  status: z.string().min(1).max(32),
-  unread: z.boolean(),
-  serialized: SerializedTelegramSchema,
-  metadata: z.record(z.unknown()).optional(),
-  /** Pre-computed by caller (e.g. bd-accounts) from telegram_extra */
-  reactions: z.unknown().optional(),
-  our_reactions: z.unknown().optional(),
-});
-
-/** A1 Stage 2: edit message by Telegram identifiers (bd-accounts → messaging only) */
-const EditByTelegramSchema = z.object({
-  bdAccountId: z.string().uuid(),
-  channelId: z.string().min(1).max(256),
-  telegramMessageId: z.number().int(),
-  content: z.string(),
-  telegram_entities: z.unknown().nullable().optional(),
-  telegram_media: z.unknown().nullable().optional(),
-});
-
-/** A1 Stage 2: delete messages by Telegram identifiers (bd-accounts → messaging only) */
-const DeleteByTelegramSchema = z.object({
-  bdAccountId: z.string().uuid(),
-  /** Required for channel/supergroup deletes (UpdateDeleteChannelMessages) */
-  channelId: z.string().min(1).max(256).optional(),
-  telegramMessageIds: z.array(z.number().int()).min(1).max(500),
-});
-
-/** S2/A1: orphan messages when bd-account is deleted; caller must send X-Organization-Id */
-const OrphanByBdAccountSchema = z.object({
-  bdAccountId: z.string().uuid(),
-});
 
 interface Deps {
   pool: Pool;

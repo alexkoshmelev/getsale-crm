@@ -3,10 +3,12 @@ import { Counter } from 'prom-client';
 import { Event, EventType } from '@getsale/events';
 import { createLogger, type Logger } from '@getsale/logger';
 
-const dlqCounter = new Counter({
+/** Register with service registry for /metrics (see createServiceApp). */
+export const rabbitmqDlqMessagesTotal = new Counter({
   name: 'rabbitmq_dlq_messages_total',
-  help: 'Total messages sent to dead letter queues',
+  help: 'Total messages sent to dead letter queues after max consumer retries',
   labelNames: ['queue'] as const,
+  registers: [],
 });
 
 /** Counter for event publish failures. Register with service registry for /metrics: registry.registerMetric(eventPublishFailedTotal). */
@@ -174,7 +176,7 @@ export class RabbitMQClient {
             const event = JSON.parse(msg.content.toString());
             event.timestamp = event.timestamp ? new Date(event.timestamp) : new Date();
             await this.publishToDlq(dlqName, event);
-            dlqCounter.inc({ queue: dlqName });
+            rabbitmqDlqMessagesTotal.inc({ queue: dlqName });
             this.log.error({
               message: 'Message sent to DLQ after max retries',
               queue: dlqName,

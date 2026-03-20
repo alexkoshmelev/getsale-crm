@@ -123,11 +123,91 @@ export const ImportFromTelegramGroupSchema = z.object({
 export type ContactImportInput = z.infer<typeof ContactImportSchema>;
 export type ImportFromTelegramGroupInput = z.infer<typeof ImportFromTelegramGroupSchema>;
 
-export const DiscoveryTaskCreateSchema = z.object({
-  name: z.string().min(1).max(255).trim(),
-  type: z.enum(['search', 'parse']),
-  params: z.record(z.unknown()), // Depending on type, could be refined further
+/** Contact discovery: search task `params` (POST /discovery-tasks, type=search). */
+export const DiscoverySearchParamsSchema = z
+  .object({
+    bdAccountId: z.string().uuid().optional(),
+    /** Несколько BD для ротации при 429/502/503 к bd-accounts; если задано вместе с bdAccountId, в воркере приоритет у этого списка. */
+    accountIds: z.array(z.string().uuid()).min(1).max(10).optional(),
+    queries: z.array(z.string().min(1).max(512)).min(1).max(100),
+    searchType: z.enum(['groups', 'channels', 'all']).optional(),
+    limitPerQuery: z.number().int().min(1).max(100).optional(),
+  })
+  .superRefine((p, ctx) => {
+    const hasBd = p.bdAccountId != null;
+    const hasAccounts = Array.isArray(p.accountIds) && p.accountIds.length > 0;
+    if (!hasBd && !hasAccounts) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide bdAccountId and/or accountIds',
+        path: ['bdAccountId'],
+      });
+    }
+  });
+
+export const DiscoveryParseTaskChatItemSchema = z.object({
+  chatId: z.string().min(1).max(512),
+  title: z.string().max(512).optional(),
+  peerType: z.string().max(64).optional(),
 });
+
+export const DiscoveryParseTaskSourceItemSchema = z.object({
+  chatId: z.string().max(128).optional(),
+  linkedChatId: z.union([z.number(), z.string().transform((s) => Number(s))]).optional(),
+  title: z.string().max(512).optional(),
+  type: z.string().max(32).optional(),
+  canGetMembers: z.boolean().optional(),
+});
+
+/** Contact discovery: parse task `params` (POST /discovery-tasks, type=parse). */
+export const DiscoveryParseTaskParamsSchema = z
+  .object({
+    bdAccountId: z.string().uuid().optional(),
+    accountIds: z.array(z.string().uuid()).min(1).max(10).optional(),
+    chats: z.array(DiscoveryParseTaskChatItemSchema).max(200).optional(),
+    sources: z.array(DiscoveryParseTaskSourceItemSchema).max(200).optional(),
+    parseMode: z.string().max(32).optional(),
+    postDepth: z.number().int().min(1).max(2000).optional(),
+    excludeAdmins: z.boolean().optional(),
+    leaveAfter: z.boolean().optional(),
+    campaignId: z.string().uuid().optional(),
+    campaignName: z.string().max(255).optional(),
+    /** Каналы без linked chat: сбор по реакциям (bd-accounts reaction-participants). */
+    channelEngagement: z.enum(['default', 'reactions']).optional(),
+  })
+  .superRefine((p, ctx) => {
+    const hasBd = p.bdAccountId != null;
+    const hasAccounts = Array.isArray(p.accountIds) && p.accountIds.length > 0;
+    if (!hasBd && !hasAccounts) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide bdAccountId and/or accountIds',
+        path: ['bdAccountId'],
+      });
+    }
+    const nChats = p.chats?.length ?? 0;
+    const nSrc = p.sources?.length ?? 0;
+    if (nChats === 0 && nSrc === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide non-empty chats or sources',
+        path: ['chats'],
+      });
+    }
+  });
+
+export const DiscoveryTaskCreateSchema = z.discriminatedUnion('type', [
+  z.object({
+    name: z.string().min(1).max(255).trim(),
+    type: z.literal('search'),
+    params: DiscoverySearchParamsSchema,
+  }),
+  z.object({
+    name: z.string().min(1).max(255).trim(),
+    type: z.literal('parse'),
+    params: DiscoveryParseTaskParamsSchema,
+  }),
+]);
 
 export const DiscoveryTaskActionSchema = z.object({
   action: z.enum(['start', 'pause', 'stop']),
@@ -173,6 +253,8 @@ export const ParseStartSchema = z.object({
   listName: z.string().max(255).optional(),
   campaignId: z.string().uuid().optional(),
   campaignName: z.string().max(255).optional(),
+  /** `reactions` — для каналов без linked chat: bd-accounts `reaction-participants` (GetMessageReactionsList, best-effort). */
+  channelEngagement: z.enum(['default', 'reactions']).optional(),
 });
 export type ParseResolveInput = z.infer<typeof ParseResolveSchema>;
 export type ParseStartInput = z.infer<typeof ParseStartSchema>;

@@ -49,27 +49,23 @@ async function handleReadOutbox(
 
 export async function subscribeToEvents(deps: EventHandlerDeps): Promise<void> {
   const { pool, rabbitmq, log } = deps;
+  // Single queue + one consumer: two subscribeToEvents() with the same queue name would register
+  // two competing consumers and round-robin delivery — LEAD_CREATED could be acked without attachLead.
   await rabbitmq.subscribeToEvents(
-    [EventType.LEAD_CREATED_FROM_CAMPAIGN],
+    [EventType.LEAD_CREATED_FROM_CAMPAIGN, EventType.BD_ACCOUNT_TELEGRAM_UPDATE],
     async (event: any) => {
-      if (event.type !== EventType.LEAD_CREATED_FROM_CAMPAIGN) return;
-      const { conversationId, leadId, campaignId } = event.data || {};
-      const organizationId = event.organizationId;
-      if (!conversationId || !leadId || !campaignId || !organizationId) return;
-      try {
-        const updated = await attachLead(pool, { conversationId, leadId, campaignId, organizationId });
-        if (updated === 0) log.info({ message: 'attachLead no-op (already attached)', conversationId, leadId });
-      } catch (err) {
-        log.error({ message: 'attachLead error', error: String(err) });
+      if (event.type === EventType.LEAD_CREATED_FROM_CAMPAIGN) {
+        const { conversationId, leadId, campaignId } = event.data || {};
+        const organizationId = event.organizationId;
+        if (!conversationId || !leadId || !campaignId || !organizationId) return;
+        try {
+          const updated = await attachLead(pool, { conversationId, leadId, campaignId, organizationId });
+          if (updated === 0) log.info({ message: 'attachLead no-op (already attached)', conversationId, leadId });
+        } catch (err) {
+          log.error({ message: 'attachLead error', error: String(err) });
+        }
+        return;
       }
-    },
-    'events',
-    'messaging-service'
-  );
-
-  await rabbitmq.subscribeToEvents(
-    [EventType.BD_ACCOUNT_TELEGRAM_UPDATE],
-    async (event: any) => {
       if (event.type !== EventType.BD_ACCOUNT_TELEGRAM_UPDATE) return;
       const data = event.data || {};
       const updateKind = data.updateKind;

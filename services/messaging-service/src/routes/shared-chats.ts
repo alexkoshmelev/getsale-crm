@@ -11,31 +11,14 @@ import {
   ServiceCallError,
   validate,
 } from '@getsale/service-core';
-import { z } from 'zod';
 import { getLeadConversationOrThrow } from '../queries/conversation-queries';
 import { ensureConversation } from '../helpers';
 import { SYSTEM_MESSAGES } from '../system-messages';
-
-const SharedChatSettingsSchema = z.object({
-  titleTemplate: z.string().max(500).optional(),
-  extraUsernames: z.array(z.string().max(255)).max(50).optional(),
-});
-
-const CreateSharedChatSchema = z.object({
-  conversation_id: z.string().uuid().nullable().optional(),
-  lead_id: z.string().uuid().nullable().optional(),
-  title: z.string().max(255).optional(),
-  participant_usernames: z.array(z.string().max(255)).max(50).optional(),
-  /** BD account to use when conversation has none or when creating by lead_id. */
-  bd_account_id: z.string().uuid().optional(),
-}).refine((d) => (d.conversation_id != null && d.conversation_id !== '') || (d.lead_id != null && d.lead_id !== ''), {
-  message: 'Provide conversation_id or lead_id',
-  path: ['conversation_id'],
-});
-
-const MarkSharedChatSchema = z.object({
-  conversation_id: z.string().uuid(),
-});
+import {
+  MsgSharedChatSettingsSchema,
+  MsgCreateSharedChatSchema,
+  MsgMarkSharedChatSchema,
+} from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -61,7 +44,7 @@ export function sharedChatsRouter({ pool, log, bdAccountsClient, conflicts409Tot
     res.json({ titleTemplate, extraUsernames });
   }));
 
-  router.patch('/settings/shared-chat', validate(SharedChatSettingsSchema), asyncHandler(async (req, res) => {
+  router.patch('/settings/shared-chat', validate(MsgSharedChatSettingsSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { titleTemplate, extraUsernames } = req.body ?? {};
     const title = typeof titleTemplate === 'string' ? titleTemplate.trim() || SYSTEM_MESSAGES.SHARED_CHAT_TITLE_TEMPLATE : undefined;
@@ -88,7 +71,7 @@ export function sharedChatsRouter({ pool, log, bdAccountsClient, conflicts409Tot
     res.json({ titleTemplate: value.titleTemplate, extraUsernames: value.extraUsernames });
   }));
 
-  router.post('/create-shared-chat', validate(CreateSharedChatSchema), asyncHandler(async (req, res) => {
+  router.post('/create-shared-chat', validate(MsgCreateSharedChatSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
     const { conversation_id: bodyConversationId, lead_id: bodyLeadId, title: titleOverride, participant_usernames: participantUsernamesOverride, bd_account_id: requestBdAccountId } = req.body ?? {};
     let conversationId: string;
@@ -287,7 +270,7 @@ export function sharedChatsRouter({ pool, log, bdAccountsClient, conflicts409Tot
     });
   }));
 
-  router.post('/mark-shared-chat', validate(MarkSharedChatSchema), asyncHandler(async (req, res) => {
+  router.post('/mark-shared-chat', validate(MsgMarkSharedChatSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { conversation_id: conversationId } = req.body ?? {};
     const existing = await getLeadConversationOrThrow<{ id: string; shared_chat_created_at: Date | null }>(

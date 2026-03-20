@@ -136,6 +136,57 @@ export function nextSlotRetry(_schedule: Schedule): Date {
   return new Date(Date.now() + 15 * 60 * 1000);
 }
 
+export interface SendDelayRange {
+  minSeconds: number;
+  maxSeconds: number;
+}
+
+export function resolveDelayRange(
+  audience: { sendDelaySeconds?: unknown; sendDelayMinSeconds?: unknown; sendDelayMaxSeconds?: unknown } | null | undefined,
+  fallbackSeconds = 60
+): SendDelayRange {
+  const cap = 3600;
+  const toNum = (v: unknown): number | null => {
+    if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+    return Math.max(0, Math.min(cap, Math.floor(v)));
+  };
+  const minRaw = toNum(audience?.sendDelayMinSeconds);
+  const maxRaw = toNum(audience?.sendDelayMaxSeconds);
+  if (minRaw != null && maxRaw != null) {
+    return minRaw <= maxRaw
+      ? { minSeconds: minRaw, maxSeconds: maxRaw }
+      : { minSeconds: maxRaw, maxSeconds: minRaw };
+  }
+  const legacy = toNum(audience?.sendDelaySeconds);
+  const one = legacy ?? Math.max(0, Math.min(cap, Math.floor(fallbackSeconds)));
+  return { minSeconds: one, maxSeconds: one };
+}
+
+export function sampleDelaySeconds(range: SendDelayRange): number {
+  const min = Math.max(0, Math.floor(range.minSeconds));
+  const max = Math.max(min, Math.floor(range.maxSeconds));
+  if (min === max) return min;
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+export function staggeredFirstSendAtByOffset(
+  baseNow: Date,
+  offsetSeconds: number,
+  schedule: Schedule
+): Date {
+  const delayMs = Math.max(0, offsetSeconds) * 1000;
+  const raw = new Date(baseNow.getTime() + delayMs);
+  if (!schedule?.workingHours?.start || !schedule?.workingHours?.end || !schedule.daysOfWeek?.length) {
+    return raw;
+  }
+  let d = new Date(raw.getTime());
+  for (let i = 0; i < 24 * 4 * 14; i++) {
+    if (isWithinScheduleAt(d, schedule)) return d;
+    d = new Date(d.getTime() + 15 * 60 * 1000);
+  }
+  return raw;
+}
+
 /**
  * First message time for participant at queue index: base + index * sendDelaySeconds.
  * If a working-hours schedule exists, nudge forward in 15-minute steps until the time falls inside the window.

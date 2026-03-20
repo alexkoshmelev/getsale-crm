@@ -85,8 +85,12 @@ export function discoveryTasksRouter({ pool, rabbitmq, log, campaignServiceClien
     let total = 0;
     if (type === 'search' && Array.isArray(finalParams.queries)) {
       total = finalParams.queries.length;
-    } else if (type === 'parse' && Array.isArray(finalParams.chats)) {
-      total = finalParams.chats.length;
+    } else if (type === 'parse') {
+      if (Array.isArray(finalParams.chats) && finalParams.chats.length > 0) {
+        total = finalParams.chats.length;
+      } else if (Array.isArray(finalParams.sources) && finalParams.sources.length > 0) {
+        total = finalParams.sources.length;
+      }
     }
 
     const taskId = randomUUID();

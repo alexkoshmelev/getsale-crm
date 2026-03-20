@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useRouter } from 'next/navigation';
 import { Bell } from 'lucide-react';
@@ -10,7 +10,9 @@ import { fetchDueReminders, updateReminder } from '@/lib/api/crm';
 import { playNotificationSound } from '@/lib/notification-sound';
 import { formatShortDateTime } from '@/lib/format/date';
 
-const POLL_INTERVAL_MS = 45_000;
+/** Background poll — not on the critical path for first paint / home dashboard. */
+const POLL_INTERVAL_MS = 60_000;
+const INITIAL_DELAY_MS = 2_500;
 
 export function NotificationsDropdown() {
   const { t } = useTranslation();
@@ -25,7 +27,10 @@ export function NotificationsDropdown() {
     markAllRead,
   } = useNotificationsStore();
 
-  const fetchDue = useRef(() => {
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
+
+  const fetchDue = useCallback(() => {
     fetchDueReminders({ limit: 50 })
       .then((rows) => {
         const list = rows.map((r) => ({
@@ -36,18 +41,30 @@ export function NotificationsDropdown() {
           entity_id: r.entity_id,
         }));
         const hasNew = mergeDueReminders(list);
-        if (hasNew && !muted) {
+        if (hasNew && !mutedRef.current) {
           playNotificationSound();
         }
       })
       .catch(() => {});
-  });
+  }, [mergeDueReminders]);
 
+  // Defer first CRM hit so the active route (e.g. home stats) is not competing for connections.
   useEffect(() => {
-    fetchDue.current();
-    const id = setInterval(() => fetchDue.current(), POLL_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [mergeDueReminders, muted]);
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+    const initialTimer = window.setTimeout(() => {
+      fetchDue();
+      intervalId = setInterval(fetchDue, POLL_INTERVAL_MS);
+    }, INITIAL_DELAY_MS);
+    return () => {
+      window.clearTimeout(initialTimer);
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [fetchDue]);
+
+  // Fresh data when the user opens the panel (may be before the delayed background fetch).
+  useEffect(() => {
+    if (open) fetchDue();
+  }, [open, fetchDue]);
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {

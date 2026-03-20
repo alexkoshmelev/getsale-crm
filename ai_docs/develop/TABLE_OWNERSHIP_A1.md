@@ -13,7 +13,7 @@
 
 ## Текущие нарушения (до миграции)
 
-- **bd-accounts-service** пишет в `messages` и `conversations` (message-db, event-handlers, telegram-manager): создание сообщений, ensure conversation, удаление по событиям Telegram, правка по edit.
+- **bd-accounts-service** пишет в `messages` и `conversations` через **`telegram/message-db.ts`** и хендлеры **`telegram/event-handlers.ts`** (при наличии `messagingClient` — internal API messaging; иначе fallback SQL с метрикой **`bd_accounts_message_db_sql_bypass_total`**): создание, ensure conversation, удаление/правка по событиям Telegram.
 - **messaging-service** пишет в `bd_account_sync_chats` в одном месте (messages.ts при отправке) и читает `bd_account_sync_chats` для списков чатов и истории.
 
 ## План миграции (этапы)
@@ -39,7 +39,13 @@
 - **Messaging** переведён на чтение данных о чатах через этот API:
   - `chats.ts`: при запросе списка чатов с `bdAccountId` — вызов bd-accounts `GET /internal/sync-chats`, затем сборка ответа по CTE `sync_list` из JSON (без чтения `bd_account_sync_chats`).
   - `messages-list-helpers.ts`: `getHistoryExhausted` и `enrichMessagesWithSenderNames` принимают опциональный `apiOptions: { bdAccountsClient, organizationId }`; при передаче — запрос к `GET /internal/sync-chats` и выбор нужного чата по `telegram_chat_id`. В `messages.ts` при наличии bdAccountId и organizationId в API передаётся этот контекст.
-- Оставшееся чтение `bd_account_sync_chats` в messaging: ветка GET /chats без фильтра по bdAccountId (общий список по каналам) и GET /search — по-прежнему используют JOIN с `bd_account_sync_chats`; при необходимости можно вынести в отдельный внутренний endpoint (по одному вызову на bd_account_id из `latest_per_chat`).
+
+### Этап 4b (реализован 2026-03-20)
+- **bd-accounts** `GET /internal/search-sync-chats?q=&limit=` — поиск по синхронизированным чатам организации (тот же контракт строк, что раньше строился в messaging через JOIN к `bd_account_sync_chats` и `messages`/`contacts`).
+- **Messaging** больше не читает таблицу `bd_account_sync_chats`:
+  - GET `/chats` без `bdAccountId`: distinct `bd_account_id` из `messages` (в `withOrgContext`), затем параллельные вызовы `GET /internal/sync-chats`, сборка JSON и JOIN в SQL через `json_to_recordset` (см. `chats-list-helpers.ts`).
+  - GET `/search`: прокси на bd-accounts `GET /internal/search-sync-chats`.
+  - `getHistoryExhausted` / `enrichMessagesWithSenderNames`: без fallback SELECT к sync-таблице; при отсутствии `apiOptions` — безопасные значения по умолчанию.
 
 ## Контракты внутреннего API
 
@@ -53,4 +59,18 @@
 | 1 | ✅ | ensure + create message через internal API; bd-accounts MessageDb с messagingClient |
 | 2 | ✅ | edit/delete через PATCH и POST internal; event-handlers используют MessageDb |
 | 3 | ✅ | messaging не пишет в bd_account_sync_chats при отправке |
-| 4 | ✅ | bd-accounts GET /internal/sync-chats; messaging chats (при bdAccountId) и messages-list-helpers используют API; оставшиеся ветки GET /chats (без bdAccountId) и GET /search — в бэклоге при желании |
+| 4 | ✅ | bd-accounts GET /internal/sync-chats + GET /internal/search-sync-chats; messaging не выполняет SELECT/JOIN к `bd_account_sync_chats` |
+
+---
+
+## A3 (2026-03-20): Whitelist прямых мутаций `messages` из bd-accounts-service
+
+Владелец таблицы — **messaging-service**; любые новые пути записи в `messages` из bd-accounts должны идти через **internal HTTP** (или отдельный тикет на расширение whitelist).
+
+| Место | Операция | Обоснование |
+|--------|-----------|--------------|
+| `routes/accounts.ts` | `UPDATE messages SET bd_account_id = NULL` | Только **fallback**, если недоступен `POST messaging /internal/messages/orphan-by-bd-account` (см. [RUNBOOK_ORPHAN_MESSAGES.md](../../docs/RUNBOOK_ORPHAN_MESSAGES.md)). |
+| `telegram/message-db.ts` | `INSERT` / `UPDATE` / `DELETE` сообщений и ensure `conversations` | **Bypass**, если `messagingClient` не передан в `MessageDb`: прямой SQL. В проде клиент задаётся в `index.ts` (`MESSAGING_SERVICE_URL`). Наблюдаемость: счётчик **`bd_accounts_message_db_sql_bypass_total{operation}`** (`ensure_conversation`, `save_message`, `delete_by_telegram`, `edit_by_telegram`), лог `message_db_sql_bypass`, алерт **`BdAccountsMessageDbSqlBypass`** в Prometheus. При наличии клиента — только `POST/PATCH` internal messaging. Опционально **`BD_ACCOUNTS_MESSAGE_DB_STRICT`** — bypass запрещён, операции падают с `MESSAGE_DB_STRICT_NO_CLIENT` ([DEPLOYMENT.md](../../docs/DEPLOYMENT.md)). |
+| *(архив)* | — | Файл `src/telegram-manager.ts` **удалён** (2026-03): дублировал фасад `telegram/*` и не импортировался. Удаления в TG обрабатываются в `event-handlers.ts` через `MessageDb.deleteByTelegram` → internal `POST .../delete-by-telegram` при настроенном клиенте. |
+
+Проверка: `grep` по `INSERT INTO messages` / `UPDATE messages` в `services/bd-accounts-service` должен совпадать с таблицей выше или быть закрыт переносом в messaging.

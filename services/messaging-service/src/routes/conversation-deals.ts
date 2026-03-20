@@ -4,20 +4,9 @@ import { Counter } from 'prom-client';
 import { MessageDirection, MessageStatus, ConversationSystemEvent } from '@getsale/types';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
-import { z } from 'zod';
 import { getLeadConversationOrThrow } from '../queries/conversation-queries';
 import { SYSTEM_MESSAGES } from '../system-messages';
-
-const MarkWonSchema = z.object({
-  conversation_id: z.string().uuid(),
-  revenue_amount: z.number().nonnegative().max(999_999_999.99).optional().nullable(),
-  currency: z.string().min(1).max(10).default('EUR'),
-});
-
-const MarkLostSchema = z.object({
-  conversation_id: z.string().uuid(),
-  reason: z.string().max(2000).optional().nullable(),
-});
+import { MsgMarkWonSchema, MsgMarkLostSchema } from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -29,7 +18,7 @@ interface Deps {
 export function conversationDealsRouter({ pool, log, conflicts409Total, dealsWonTotal }: Deps): Router {
   const router = Router();
 
-  router.post('/mark-won', validate(MarkWonSchema), asyncHandler(async (req, res) => {
+  router.post('/mark-won', validate(MsgMarkWonSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { conversation_id: conversationId, revenue_amount: revenueAmountRaw, currency } = req.body;
     const c = await getLeadConversationOrThrow<{
@@ -94,7 +83,7 @@ export function conversationDealsRouter({ pool, log, conflicts409Total, dealsWon
     });
   }));
 
-  router.post('/mark-lost', validate(MarkLostSchema), asyncHandler(async (req, res) => {
+  router.post('/mark-lost', validate(MsgMarkLostSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { conversation_id: conversationId, reason } = req.body;
     const c = await getLeadConversationOrThrow<{

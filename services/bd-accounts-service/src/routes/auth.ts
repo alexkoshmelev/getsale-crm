@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
-import { z } from 'zod';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
@@ -9,6 +8,13 @@ import { asyncHandler, AppError, ErrorCodes, canPermission, validate } from '@ge
 import { TelegramManager } from '../telegram';
 import { getTelegramApiCredentials, getAccountOr404, requireAccountOwner, requireBidiOwnAccount } from '../helpers';
 import { encryptSession, decryptIfNeeded } from '../crypto';
+import {
+  BdAuthSendCodeSchema,
+  BdAuthVerifyCodeSchema,
+  BdAuthQrLoginPasswordSchema,
+  BdAuthConnectSchema,
+  BdAuthStartQrLoginSchema,
+} from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -17,33 +23,31 @@ interface Deps {
   telegramManager: TelegramManager;
 }
 
-const SendCodeSchema = z.object({
-  platform: z.literal('telegram'),
-  phoneNumber: z.string().min(1).max(32).trim(),
-});
-
-const VerifyCodeSchema = z.object({
-  accountId: z.string().uuid(),
-  phoneNumber: z.string().min(1).max(32).trim(),
-  phoneCode: z.string().min(1).max(16).trim(),
-  phoneCodeHash: z.string().min(1).max(512),
-  password: z.string().max(256).optional(),
-});
-
-const QrLoginPasswordSchema = z.object({
-  sessionId: z.string().min(1).max(256),
-  password: z.string().min(1).max(256),
-});
-
-const ConnectSchema = z.object({
-  platform: z.literal('telegram'),
-  phoneNumber: z.string().min(1).max(32).trim(),
-  sessionString: z.string().max(10000).optional(),
-});
-
 export function authRouter({ pool, rabbitmq, log, telegramManager }: Deps): Router {
   const router = Router();
   const checkPermission = canPermission(pool);
+  const normalizeProxyConfig = (raw: unknown): Record<string, unknown> | null => {
+    if (!raw || typeof raw !== 'object') return null;
+    const inCfg = raw as { type?: string; host?: string; port?: number; username?: string; password?: string };
+    const host = typeof inCfg.host === 'string' ? inCfg.host.trim() : '';
+    const port = Number(inCfg.port);
+    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+    const type = inCfg.type === 'http' ? 'http' : 'socks5';
+    if (type === 'http') {
+      throw new AppError(
+        400,
+        'HTTP/HTTPS proxy is not supported by current Telegram client. Please use SOCKS5 proxy.',
+        ErrorCodes.VALIDATION
+      );
+    }
+    return {
+      type,
+      host,
+      port,
+      ...(typeof inCfg.username === 'string' && inCfg.username.trim() ? { username: inCfg.username.trim() } : {}),
+      ...(typeof inCfg.password === 'string' && inCfg.password.trim() ? { password: inCfg.password.trim() } : {}),
+    };
+  };
 
   // Poll QR login status — literal path, must be before any /:id
   router.get('/qr-login-status', asyncHandler(async (req, res) => {
@@ -62,22 +66,25 @@ export function authRouter({ pool, rabbitmq, log, telegramManager }: Deps): Rout
   }));
 
   // Start QR-code login (no body)
-  router.post('/start-qr-login', asyncHandler(async (req, res) => {
+  router.post('/start-qr-login', validate(BdAuthStartQrLoginSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
+    const { proxyConfig } = req.body as { proxyConfig?: unknown };
     const { apiId, apiHash } = getTelegramApiCredentials();
+    const normalizedProxy = normalizeProxyConfig(proxyConfig);
 
     const sessionId = (await telegramManager.startQrLogin(
       organizationId,
       userId,
       apiId,
-      apiHash
+      apiHash,
+      normalizedProxy as any
     )).sessionId;
 
     res.json({ sessionId });
   }));
 
   // Submit 2FA password for QR login
-  router.post('/qr-login-password', validate(QrLoginPasswordSchema), asyncHandler(async (req, res) => {
+  router.post('/qr-login-password', validate(BdAuthQrLoginPasswordSchema), asyncHandler(async (req, res) => {
     const { sessionId, password } = req.body;
 
     const accepted = await telegramManager.submitQrLoginPassword(sessionId, password);
@@ -89,10 +96,11 @@ export function authRouter({ pool, rabbitmq, log, telegramManager }: Deps): Rout
   }));
 
   // Send authentication code (Telegram)
-  router.post('/send-code', validate(SendCodeSchema), asyncHandler(async (req, res) => {
+  router.post('/send-code', validate(BdAuthSendCodeSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
-    const { platform, phoneNumber } = req.body;
+    const { platform, phoneNumber, proxyConfig } = req.body;
     const { apiId, apiHash } = getTelegramApiCredentials();
+    const normalizedProxy = normalizeProxyConfig(proxyConfig);
 
     const otherOrgResult = await pool.query(
       'SELECT id FROM bd_accounts WHERE phone_number = $1 AND organization_id != $2 AND is_active = true',
@@ -116,14 +124,17 @@ export function authRouter({ pool, rabbitmq, log, telegramManager }: Deps): Rout
       }
       accountId = row.id;
       await pool.query(
-        `UPDATE bd_accounts SET created_by_user_id = $1 WHERE id = $2 AND created_by_user_id IS NULL`,
-        [userId, accountId]
+        `UPDATE bd_accounts
+         SET created_by_user_id = COALESCE(created_by_user_id, $1),
+             proxy_config = CASE WHEN $3::jsonb IS NULL THEN proxy_config ELSE $3::jsonb END
+         WHERE id = $2`,
+        [userId, accountId, normalizedProxy ? JSON.stringify(normalizedProxy) : null]
       );
     } else {
       const insertResult = await pool.query(
-        `INSERT INTO bd_accounts (organization_id, telegram_id, phone_number, api_id, api_hash, is_active, session_encrypted, created_by_user_id)
-         VALUES ($1, $2, $3, $4, $5, $6, true, $7) RETURNING id`,
-        [organizationId, phoneNumber, phoneNumber, String(apiId), encryptSession(apiHash), false, userId]
+        `INSERT INTO bd_accounts (organization_id, telegram_id, phone_number, api_id, api_hash, is_active, session_encrypted, created_by_user_id, proxy_config)
+         VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8) RETURNING id`,
+        [organizationId, phoneNumber, phoneNumber, String(apiId), encryptSession(apiHash), false, userId, normalizedProxy ? JSON.stringify(normalizedProxy) : null]
       );
       accountId = insertResult.rows[0].id;
     }
@@ -134,14 +145,15 @@ export function authRouter({ pool, rabbitmq, log, telegramManager }: Deps): Rout
       userId,
       phoneNumber,
       apiId,
-      apiHash
+      apiHash,
+      normalizedProxy as any
     );
 
     res.json({ accountId, phoneCodeHash });
   }));
 
   // Verify code and complete authentication
-  router.post('/verify-code', validate(VerifyCodeSchema), asyncHandler(async (req, res) => {
+  router.post('/verify-code', validate(BdAuthVerifyCodeSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
     const { accountId, phoneNumber, phoneCode, phoneCodeHash, password } = req.body;
 
@@ -206,10 +218,11 @@ export function authRouter({ pool, rabbitmq, log, telegramManager }: Deps): Rout
   }));
 
   // Connect BD account — legacy endpoint for existing sessions
-  router.post('/connect', validate(ConnectSchema), asyncHandler(async (req, res) => {
+  router.post('/connect', validate(BdAuthConnectSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
-    const { platform, phoneNumber, sessionString } = req.body;
+    const { platform, phoneNumber, sessionString, proxyConfig } = req.body;
     const { apiId, apiHash } = getTelegramApiCredentials();
+    const normalizedProxy = normalizeProxyConfig(proxyConfig);
 
     const existingResult = await pool.query(
       'SELECT id FROM bd_accounts WHERE phone_number = $1 AND organization_id = $2',
@@ -229,11 +242,14 @@ export function authRouter({ pool, rabbitmq, log, telegramManager }: Deps): Rout
       existingSessionString = existingRow
         ? decryptIfNeeded(existingRow.session_string, existingRow.session_encrypted) ?? undefined
         : undefined;
+      if (normalizedProxy) {
+        await pool.query('UPDATE bd_accounts SET proxy_config = $1 WHERE id = $2', [JSON.stringify(normalizedProxy), accountId]);
+      }
     } else {
       const insertResult = await pool.query(
-        `INSERT INTO bd_accounts (organization_id, telegram_id, phone_number, api_id, api_hash, is_active, session_encrypted)
-         VALUES ($1, $2, $3, $4, $5, $6, true) RETURNING id`,
-        [organizationId, phoneNumber, phoneNumber, String(apiId), encryptSession(apiHash), true]
+        `INSERT INTO bd_accounts (organization_id, telegram_id, phone_number, api_id, api_hash, is_active, session_encrypted, proxy_config)
+         VALUES ($1, $2, $3, $4, $5, $6, true, $7) RETURNING id`,
+        [organizationId, phoneNumber, phoneNumber, String(apiId), encryptSession(apiHash), true, normalizedProxy ? JSON.stringify(normalizedProxy) : null]
       );
       accountId = insertResult.rows[0].id;
     }
@@ -281,7 +297,7 @@ export function authRouter({ pool, rabbitmq, log, telegramManager }: Deps): Rout
 
     // Mark inactive before disconnect so reconnect logic (TIMEOUT → scheduleReconnectAll) does not re-add this account
     await pool.query(
-      'UPDATE bd_accounts SET is_active = false WHERE id = $1 AND organization_id = $2',
+      "UPDATE bd_accounts SET is_active = false, connection_state = 'disconnected', disconnect_reason = 'Disconnected by user', updated_at = NOW() WHERE id = $1 AND organization_id = $2",
       [id, user.organizationId]
     );
     await telegramManager.disconnectAccount(id);

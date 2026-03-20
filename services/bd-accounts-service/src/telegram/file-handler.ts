@@ -1,6 +1,7 @@
 // @ts-nocheck — GramJS types are incomplete
 import { Api } from 'telegram';
 import { isUsernameLike, resolveUsernameToInputPeer } from './resolve-username';
+import { telegramInvokeWithFloodRetry } from './telegram-invoke-flood';
 import type { TelegramManagerDeps, TelegramClientInfo, StructuredLog } from './types';
 import type { Pool } from 'pg';
 
@@ -100,17 +101,22 @@ export class FileHandler {
       const client = clientInfo.client as any;
       let peer: Api.TypeInputPeer | number | string = await this.resolvePeer(accountId, chatId);
       if (typeof peer === 'string' && peer.length > 0 && isUsernameLike(peer)) {
-        const resolved = await resolveUsernameToInputPeer(clientInfo.client, peer);
+        const resolved = await resolveUsernameToInputPeer(clientInfo.client, peer, {
+          log: this.log,
+          accountId,
+        });
         if (resolved) peer = resolved;
         else peer = await client.getInputEntity(peer);
       } else if (typeof peer === 'string' && peer.length > 0 && Number.isNaN(Number(peer))) {
         peer = await client.getInputEntity(peer);
       }
-      const message = await client.sendFile(peer, {
-        file,
-        caption: opts.caption || '',
-        ...(opts.replyTo != null ? { replyTo: opts.replyTo } : {}),
-      });
+      const message = await telegramInvokeWithFloodRetry(this.log, accountId, 'SendFile', () =>
+        client.sendFile(peer, {
+          file,
+          caption: opts.caption || '',
+          ...(opts.replyTo != null ? { replyTo: opts.replyTo } : {}),
+        })
+      );
       clientInfo.lastActivity = new Date();
       await this.pool.query(
         'UPDATE bd_accounts SET last_activity = NOW() WHERE id = $1',

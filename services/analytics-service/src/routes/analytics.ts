@@ -1,25 +1,16 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
-import { z } from 'zod';
 import { asyncHandler, requireUser, validate } from '@getsale/service-core';
+import type { z } from 'zod';
+import { AnPeriodQuerySchema, AnBdAnalyticsQuerySchema, type AnPeriodKey } from '../validation';
 
 interface Deps {
   pool: Pool;
   log: Logger;
 }
 
-export type PeriodKey = 'today' | 'week' | 'month' | 'year';
-
-const PeriodQuerySchema = z.object({
-  period: z.enum(['today', 'week', 'month', 'year']).default('month'),
-});
-
-const BdAnalyticsQuerySchema = z.object({
-  period: z.enum(['today', 'week', 'month', 'year']).default('month'),
-  bd_account_id: z.string().uuid().optional(),
-  folder_id: z.coerce.number().int().min(0).optional(),
-});
+export type PeriodKey = AnPeriodKey;
 
 /** Compute start and end (ISO strings) for a period. End is now; start is beginning of period. */
 export function getPeriodBounds(period: PeriodKey): { startDate: string; endDate: string } {
@@ -65,9 +56,9 @@ export function analyticsRouter({ pool, log }: Deps): Router {
   router.use(requireUser());
 
   // Summary for cards (Q18: period validated via Zod)
-  router.get('/summary', validate(PeriodQuerySchema, 'query'), asyncHandler(async (req, res) => {
+  router.get('/summary', validate(AnPeriodQuerySchema, 'query'), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const { period } = req.query as z.infer<typeof PeriodQuerySchema>;
+    const { period } = req.query as z.infer<typeof AnPeriodQuerySchema>;
     const { startDate, endDate } = getPeriodBounds(period);
 
     // Match default pipeline stage names: "Closed Won", "Closed Lost" (see auth-service signup, pipeline-service defaults)
@@ -267,9 +258,9 @@ export function analyticsRouter({ pool, log }: Deps): Router {
   }));
 
   // ─── BD Analytics ───────────────────────────────────────────────────────
-  router.get('/bd/new-chats', validate(BdAnalyticsQuerySchema, 'query'), asyncHandler(async (req, res) => {
+  router.get('/bd/new-chats', validate(AnBdAnalyticsQuerySchema, 'query'), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const { period, bd_account_id: bdAccountIdParam, folder_id: folderIdParam } = req.query as unknown as z.infer<typeof BdAnalyticsQuerySchema>;
+    const { period, bd_account_id: bdAccountIdParam, folder_id: folderIdParam } = req.query as unknown as z.infer<typeof AnBdAnalyticsQuerySchema>;
     const { startDate, endDate } = getPeriodBounds(period);
 
     const params: unknown[] = [organizationId, startDate, endDate];
@@ -355,9 +346,9 @@ export function analyticsRouter({ pool, log }: Deps): Router {
     res.json({ accounts, period: { start_date: startDate, end_date: endDate } });
   }));
 
-  router.get('/bd/contact-metrics', validate(BdAnalyticsQuerySchema, 'query'), asyncHandler(async (req, res) => {
+  router.get('/bd/contact-metrics', validate(AnBdAnalyticsQuerySchema, 'query'), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const { period, bd_account_id: bdAccountIdParam } = req.query as unknown as z.infer<typeof BdAnalyticsQuerySchema>;
+    const { period, bd_account_id: bdAccountIdParam } = req.query as unknown as z.infer<typeof AnBdAnalyticsQuerySchema>;
     const { startDate, endDate } = getPeriodBounds(period);
 
     const params: unknown[] = [organizationId, startDate, endDate];

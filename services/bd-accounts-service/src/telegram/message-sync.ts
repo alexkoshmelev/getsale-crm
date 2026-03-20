@@ -10,6 +10,7 @@ import {
 import { MessageChannel, MessageDirection, MessageStatus } from '@getsale/types';
 import { serializeMessage, getMessageText } from '../telegram-serialize';
 import type { TelegramManagerDeps, TelegramClientInfo, StructuredLog } from './types';
+import { telegramInvokeWithFloodRetry } from './telegram-invoke-flood';
 import type { ContactManager } from './contact-manager';
 import type { MessageDb } from './message-db';
 import type { Pool } from 'pg';
@@ -126,17 +127,19 @@ export class MessageSync {
 
         while (fetched < cap) {
           try {
-            const result = await client.invoke(
-              new Api.messages.GetHistory({
-                peer,
-                limit: Math.min(batchSize, cap - fetched),
-                offsetId,
-                offsetDate: 0,
-                maxId: 0,
-                minId: 0,
-                addOffset: 0,
-                hash: BigInt(0),
-              })
+            const result = await telegramInvokeWithFloodRetry(this.log, accountId, 'GetHistory(initial-sync)', () =>
+              client.invoke(
+                new Api.messages.GetHistory({
+                  peer,
+                  limit: Math.min(batchSize, cap - fetched),
+                  offsetId,
+                  offsetDate: 0,
+                  maxId: 0,
+                  minId: 0,
+                  addOffset: 0,
+                  hash: BigInt(0),
+                })
+              )
             );
 
             const rawMessages = (result as any).messages;
@@ -283,17 +286,19 @@ export class MessageSync {
 
       while (hasMore) {
         try {
-          const result = await client.invoke(
-            new Api.messages.GetHistory({
-              peer,
-              limit: Math.min(100, this.SYNC_MESSAGES_PER_CHAT_CAP - fetched),
-              offsetId,
-              offsetDate: 0,
-              maxId: 0,
-              minId: 0,
-              addOffset: 0,
-              hash: BigInt(0),
-            })
+          const result = await telegramInvokeWithFloodRetry(this.log, accountId, 'GetHistory(syncHistoryForChat)', () =>
+            client.invoke(
+              new Api.messages.GetHistory({
+                peer,
+                limit: Math.min(100, this.SYNC_MESSAGES_PER_CHAT_CAP - fetched),
+                offsetId,
+                offsetDate: 0,
+                maxId: 0,
+                minId: 0,
+                addOffset: 0,
+                hash: BigInt(0),
+              })
+            )
           );
           const rawMessages = (result as any).messages;
           if (!Array.isArray(rawMessages)) break;
@@ -437,17 +442,19 @@ export class MessageSync {
     const accessHashRaw = syncRow.access_hash;
 
     const doGetHistory = async (peer: any) =>
-      client.invoke(
-        new Api.messages.GetHistory({
-          peer,
-          limit,
-          offsetId,
-          offsetDate,
-          maxId: 0,
-          minId: 0,
-          addOffset: 0,
-          hash: BigInt(0),
-        })
+      telegramInvokeWithFloodRetry(this.log, accountId, 'GetHistory(load-older)', () =>
+        client.invoke(
+          new Api.messages.GetHistory({
+            peer,
+            limit,
+            offsetId,
+            offsetDate,
+            maxId: 0,
+            minId: 0,
+            addOffset: 0,
+            hash: BigInt(0),
+          })
+        )
       );
 
     let result: any;

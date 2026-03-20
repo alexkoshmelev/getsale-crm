@@ -1,4 +1,6 @@
 import { Logger } from '@getsale/logger';
+import type { Registry } from 'prom-client';
+import { Counter } from 'prom-client';
 
 export interface HttpClientOptions {
   baseUrl: string;
@@ -10,6 +12,35 @@ export interface HttpClientOptions {
   circuitBreakerThreshold?: number;
   /** Time in ms the circuit stays open before allowing a probe request (default 30 000) */
   circuitBreakerResetMs?: number;
+  /** B1: register inter-service call counters on this registry (service /metrics). */
+  metricsRegistry?: Registry;
+}
+
+const interServiceMetricsCache = new WeakMap<
+  Registry,
+  { requests: Counter; circuitRejects: Counter }
+>();
+
+function getInterServiceMetrics(registry: Registry) {
+  let m = interServiceMetricsCache.get(registry);
+  if (!m) {
+    m = {
+      requests: new Counter({
+        name: 'inter_service_http_requests_total',
+        help: 'Outbound ServiceHttpClient calls (one sample per completed logical request)',
+        labelNames: ['client', 'method', 'outcome'],
+        registers: [registry],
+      }),
+      circuitRejects: new Counter({
+        name: 'inter_service_http_circuit_reject_total',
+        help: 'Calls rejected while circuit breaker open',
+        labelNames: ['client'],
+        registers: [registry],
+      }),
+    };
+    interServiceMetricsCache.set(registry, m);
+  }
+  return m;
 }
 
 /** Optional context to forward to downstream services for attribution and tracing */
@@ -73,6 +104,7 @@ export class ServiceHttpClient {
   private log: Logger;
   private internalAuthSecret: string;
   private circuitBreaker: CircuitBreaker;
+  private interMetrics: ReturnType<typeof getInterServiceMetrics> | null;
   defaultContext?: RequestContext;
 
   constructor(options: HttpClientOptions, log: Logger) {
@@ -87,6 +119,11 @@ export class ServiceHttpClient {
       options.circuitBreakerThreshold ?? 5,
       options.circuitBreakerResetMs ?? 30_000,
     );
+    this.interMetrics = options.metricsRegistry ? getInterServiceMetrics(options.metricsRegistry) : null;
+  }
+
+  private recordInterRequest(method: string, outcome: string): void {
+    this.interMetrics?.requests.inc({ client: this.name, method, outcome });
   }
 
   /**
@@ -115,6 +152,8 @@ export class ServiceHttpClient {
     const timeout = options.timeoutMs ?? this.defaultTimeout;
 
     if (!this.circuitBreaker.canExecute()) {
+      this.interMetrics?.circuitRejects.inc({ client: this.name });
+      this.recordInterRequest(method, 'circuit_open');
       this.log.warn({
         message: `${this.name} circuit breaker OPEN — request rejected`,
         http_method: method,
@@ -171,6 +210,7 @@ export class ServiceHttpClient {
         const text = await res.text();
         if (res.status === 204 || text.trim() === '') {
           this.circuitBreaker.recordSuccess();
+          this.recordInterRequest(method, 'success');
           return undefined as T;
         }
         let data: T;
@@ -178,15 +218,18 @@ export class ServiceHttpClient {
           data = JSON.parse(text) as T;
         } catch {
           this.circuitBreaker.recordSuccess();
+          this.recordInterRequest(method, 'success');
           return undefined as T;
         }
         this.circuitBreaker.recordSuccess();
+        this.recordInterRequest(method, 'success');
         return data;
       } catch (err: unknown) {
         clearTimeout(timer);
         lastError = err instanceof Error ? err : new Error(String(err));
 
         if (err instanceof ServiceCallError && err.statusCode >= 400 && err.statusCode < 500) {
+          this.recordInterRequest(method, 'client_4xx');
           throw err;
         }
 
@@ -229,6 +272,7 @@ export class ServiceHttpClient {
       error: lastError?.message,
     });
 
+    this.recordInterRequest(method, classifyInterServiceOutcome(lastError));
     throw lastError;
   }
 
@@ -258,4 +302,14 @@ export class ServiceCallError extends Error {
     super(message);
     this.name = 'ServiceCallError';
   }
+}
+
+function classifyInterServiceOutcome(err: unknown): string {
+  if (err instanceof ServiceCallError) {
+    if (err.statusCode >= 400 && err.statusCode < 500) return 'client_4xx';
+    return 'server_or_downstream';
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/abort/i.test(msg) || (err as Error)?.name === 'AbortError') return 'timeout_abort';
+  return 'network_error';
 }

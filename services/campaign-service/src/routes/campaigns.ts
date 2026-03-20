@@ -5,9 +5,17 @@ import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
 import { CampaignStatus } from '@getsale/types';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes, validate, withOrgContext } from '@getsale/service-core';
+import { asyncHandler, AppError, ErrorCodes, validate, withOrgContext, parsePageLimit, parseLimit } from '@getsale/service-core';
 import { parseCsv, getBdAccountDisplayName, getSentTodayByAccount } from '../helpers';
-import { CampaignCreateSchema, CampaignPatchSchema, FromCsvBodySchema, ParticipantsBulkSchema, PresetCreateSchema } from '../validation';
+import {
+  CampaignCreateSchema,
+  CampaignPatchSchema,
+  FromCsvBodySchema,
+  FromUsernameListBodySchema,
+  ParticipantsBulkSchema,
+  PresetCreateSchema,
+} from '../validation';
+import { matchOrCreateContactsFromRows, parseUsernameListToRows, type CsvContactRow } from '../audience-contact-import';
 import type { QueryParam, CampaignRow, CampaignCountRow, CampaignRevenueRow, BdAccountRow } from '../types';
 
 interface Deps {
@@ -23,9 +31,11 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     const { organizationId } = req.user;
     const { status, page: pageRaw, limit: limitRaw } = req.query;
 
-    const page = Math.max(1, parseInt(String(pageRaw || '1'), 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(String(limitRaw || '20'), 10) || 20));
-    const offset = (page - 1) * limit;
+    const { page, limit, offset } = parsePageLimit(
+      { page: pageRaw, limit: limitRaw } as Record<string, unknown>,
+      20,
+      100
+    );
 
     let whereClause = 'WHERE c.organization_id = $1 AND c.deleted_at IS NULL';
     const params: QueryParam[] = [organizationId];
@@ -260,8 +270,8 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
 
   router.get('/contacts-for-picker', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const { limit = 500, outreachStatus, search, sourceKeyword, sourceTelegramChatId, sourceBdAccountId } = req.query;
-    const limitNum = Math.min(1000, Math.max(1, parseInt(String(limit), 10)));
+    const { limit: limitQ, outreachStatus, search, sourceKeyword, sourceTelegramChatId, sourceBdAccountId } = req.query;
+    const limitNum = parseLimit({ limit: limitQ } as Record<string, unknown>, 500, 1000);
     let query = `
       SELECT c.id, c.first_name, c.last_name, c.display_name, c.username, c.telegram_id, c.email, c.phone,
         CASE WHEN EXISTS (
@@ -511,13 +521,6 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     const idxUsername = col('username') >= 0 ? col('username') : -1;
     const idxPhone = col('phone') >= 0 ? col('phone') : -1;
 
-    const contactIds: string[] = [];
-    let created = 0, matched = 0;
-
-    interface CsvContactRow {
-      telegramId: string | null; email: string | null; username: string | null;
-      firstName: string; lastName: string | null; phone: string | null;
-    }
     const validRows: CsvContactRow[] = [];
     for (const row of dataRows) {
       const telegramId = idxTelegram >= 0 ? (row[idxTelegram] || '').trim().replace(/^@/, '') || null : null;
@@ -530,74 +533,29 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       validRows.push({ telegramId, email, username, firstName, lastName, phone });
     }
 
-    const BATCH_SIZE = 100;
-    for (let b = 0; b < validRows.length; b += BATCH_SIZE) {
-      const batch = validRows.slice(b, b + BATCH_SIZE);
-      const telegramIds = batch.map(r => r.telegramId).filter(Boolean) as string[];
-      const emails = batch.map(r => r.email).filter(Boolean) as string[];
-      const usernames = batch.map(r => r.username).filter(Boolean) as string[];
-
-      const matchByTg = new Map<string, string>();
-      const matchByEmail = new Map<string, string>();
-      const matchByUsername = new Map<string, string>();
-
-      if (telegramIds.length > 0) {
-        const r = await pool.query(
-          'SELECT id, telegram_id FROM contacts WHERE organization_id = $1 AND telegram_id = ANY($2::text[])',
-          [orgId, telegramIds]
-        );
-        for (const row of r.rows as { id: string; telegram_id: string }[]) matchByTg.set(row.telegram_id, row.id);
-      }
-      if (emails.length > 0) {
-        const r = await pool.query(
-          'SELECT id, email FROM contacts WHERE organization_id = $1 AND email = ANY($2::text[])',
-          [orgId, emails]
-        );
-        for (const row of r.rows as { id: string; email: string }[]) matchByEmail.set(row.email, row.id);
-      }
-      if (usernames.length > 0) {
-        const r = await pool.query(
-          'SELECT id, username FROM contacts WHERE organization_id = $1 AND username = ANY($2::text[])',
-          [orgId, usernames]
-        );
-        for (const row of r.rows as { id: string; username: string }[]) matchByUsername.set(row.username, row.id);
-      }
-
-      const toInsert: CsvContactRow[] = [];
-      const insertIds: string[] = [];
-
-      for (const row of batch) {
-        const existingId = (row.telegramId && matchByTg.get(row.telegramId))
-          || (row.email && matchByEmail.get(row.email))
-          || (row.username && matchByUsername.get(row.username))
-          || null;
-        if (existingId) {
-          matched++;
-          contactIds.push(existingId);
-        } else {
-          const newId = randomUUID();
-          insertIds.push(newId);
-          toInsert.push(row);
-          contactIds.push(newId);
-        }
-      }
-
-      if (toInsert.length > 0) {
-        const values: QueryParam[] = [];
-        const placeholders = toInsert.map((c, idx) => {
-          const off = idx * 8 + 1;
-          values.push(insertIds[idx], orgId, c.firstName, c.lastName, c.email, c.phone, c.telegramId, c.username);
-          return `($${off}, $${off + 1}, $${off + 2}, $${off + 3}, $${off + 4}, $${off + 5}, $${off + 6}, $${off + 7}, NOW(), NOW())`;
-        });
-        await pool.query(
-          `INSERT INTO contacts (id, organization_id, first_name, last_name, email, phone, telegram_id, username, created_at, updated_at)
-           VALUES ${placeholders.join(', ')}`,
-          values
-        );
-        created += toInsert.length;
-      }
-    }
+    const { contactIds, created, matched } = await matchOrCreateContactsFromRows(pool, orgId, validRows);
     res.json({ contactIds, created, matched });
+  }));
+
+  router.post('/:id/audience/from-usernames', validate(FromUsernameListBodySchema), asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    const { text } = req.body as { text: string };
+    const campaign = await pool.query(
+      'SELECT id, organization_id FROM campaigns WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
+    if (campaign.rows.length === 0) {
+      throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+    }
+    const orgId = campaign.rows[0].organization_id;
+
+    const { rows, skipped, invalidSamples } = parseUsernameListToRows(text);
+    if (rows.length === 0) {
+      return res.json({ contactIds: [], created: 0, matched: 0, skipped, invalidSamples });
+    }
+    const { contactIds, created, matched } = await matchOrCreateContactsFromRows(pool, orgId, rows);
+    res.json({ contactIds, created, matched, skipped, invalidSamples });
   }));
 
   router.post('/:id/participants-bulk', validate(ParticipantsBulkSchema), asyncHandler(async (req, res) => {

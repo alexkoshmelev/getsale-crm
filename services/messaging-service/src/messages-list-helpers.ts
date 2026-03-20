@@ -1,7 +1,7 @@
 import { Pool } from 'pg';
 import type { ServiceHttpClient } from '@getsale/service-core';
 import type { Logger } from '@getsale/logger';
-import type { MessageRow, HistoryExhaustedRow } from './types';
+import type { MessageRow } from './types';
 
 export interface MessagesListFilters {
   organizationId: string;
@@ -80,20 +80,16 @@ export async function getHistoryExhausted(
   telegramChatId: string,
   apiOptions?: SyncChatApiOptions
 ): Promise<boolean> {
-  if (apiOptions) {
-    const data = await apiOptions.bdAccountsClient.get<{ chats: Array<{ telegram_chat_id: string; history_exhausted: boolean }> }>(
-      `/internal/sync-chats?bdAccountId=${encodeURIComponent(bdAccountId)}`,
-      undefined,
-      { organizationId: apiOptions.organizationId }
-    );
-    const chat = data.chats?.find((c) => c.telegram_chat_id === telegramChatId);
-    return Boolean(chat?.history_exhausted);
+  if (!apiOptions) {
+    return false;
   }
-  const result = await pool.query(
-    'SELECT history_exhausted FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
-    [bdAccountId, telegramChatId]
+  const data = await apiOptions.bdAccountsClient.get<{ chats: Array<{ telegram_chat_id: string; history_exhausted: boolean }> }>(
+    `/internal/sync-chats?bdAccountId=${encodeURIComponent(bdAccountId)}`,
+    undefined,
+    { organizationId: apiOptions.organizationId }
   );
-  return result.rows.length > 0 && (result.rows[0] as HistoryExhaustedRow).history_exhausted === true;
+  const chat = data.chats?.find((c) => c.telegram_chat_id === telegramChatId);
+  return Boolean(chat?.history_exhausted);
 }
 
 /** Trigger load-older-history for first page when total is 0. No return. */
@@ -168,12 +164,6 @@ export async function enrichMessagesWithSenderNames(
     );
     const chat = data.chats?.find((c) => c.telegram_chat_id === channelId);
     peerType = chat?.peer_type;
-  } else {
-    const peerRow = await pool.query(
-      'SELECT peer_type FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
-      [bdAccountId, channelId]
-    );
-    peerType = (peerRow.rows[0] as { peer_type: string } | undefined)?.peer_type;
   }
   if (!peerType || (peerType !== 'chat' && peerType !== 'channel')) {
     return rows;

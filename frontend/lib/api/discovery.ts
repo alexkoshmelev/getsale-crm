@@ -1,16 +1,17 @@
 import { apiClient } from './client';
+import {
+  searchBdAccountTelegramGroups,
+  listBdAccountAdminedPublicChannels,
+  resolveBdAccountChatInputs,
+  type BdDiscoverySearchGroupItem,
+  type BdDiscoverySearchType,
+  type BdDiscoverySearchMode,
+  type BdResolveChatsResultItem,
+} from './bd-accounts';
 
-export interface SearchGroupItem {
-  chatId: string;
-  title: string;
-  peerType: string;
-  membersCount?: number;
-  username?: string;
-}
-
-export type SearchType = 'groups' | 'channels' | 'all';
-
-export type SearchMode = 'query' | 'hashtag';
+export type SearchGroupItem = BdDiscoverySearchGroupItem;
+export type SearchType = BdDiscoverySearchType;
+export type SearchMode = BdDiscoverySearchMode;
 
 export async function searchGroupsByKeyword(
   bdAccountId: string,
@@ -19,39 +20,20 @@ export async function searchGroupsByKeyword(
   type: SearchType = 'all',
   searchMode: SearchMode = 'query'
 ): Promise<SearchGroupItem[]> {
-  const params = new URLSearchParams({ q: query.trim() });
-  if (limit != null) params.set('limit', String(limit));
-  params.set('type', type);
-  if (searchMode === 'hashtag') params.set('searchMode', 'hashtag');
-  const { data } = await apiClient.get<SearchGroupItem[]>(
-    `/api/bd-accounts/${bdAccountId}/search-groups?${params.toString()}`
-  );
-  return Array.isArray(data) ? data : [];
+  return searchBdAccountTelegramGroups(bdAccountId, query, limit, type, searchMode);
 }
 
 export async function getAdminedPublicChannels(bdAccountId: string): Promise<SearchGroupItem[]> {
-  const { data } = await apiClient.get<SearchGroupItem[]>(
-    `/api/bd-accounts/${bdAccountId}/admined-public-channels`
-  );
-  return Array.isArray(data) ? data : [];
+  return listBdAccountAdminedPublicChannels(bdAccountId);
 }
 
-export interface ResolveChatsResultItem {
-  chatId?: string;
-  title?: string;
-  peerType?: string;
-  error?: string;
-}
+export type ResolveChatsResultItem = BdResolveChatsResultItem;
 
 export async function resolveChatsFromInputs(
   bdAccountId: string,
   inputs: string[]
 ): Promise<{ results: ResolveChatsResultItem[] }> {
-  const { data } = await apiClient.post<{ results: ResolveChatsResultItem[] }>(
-    `/api/bd-accounts/${bdAccountId}/resolve-chats`,
-    { inputs }
-  );
-  return data;
+  return resolveBdAccountChatInputs(bdAccountId, inputs);
 }
 
 export async function generateSearchQueries(topic: string): Promise<{ queries: string[] }> {
@@ -132,6 +114,8 @@ export async function parseStart(payload: {
   listName?: string;
   campaignId?: string;
   campaignName?: string;
+  /** Каналы без группы обсуждения: `reactions` → сбор по реакциям (best-effort). */
+  channelEngagement?: 'default' | 'reactions';
 }): Promise<{ taskId: string; campaignId?: string | null }> {
   const { data } = await apiClient.post<{ taskId: string; campaignId?: string | null }>('/api/crm/parse/start', payload);
   return data;

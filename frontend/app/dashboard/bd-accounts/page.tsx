@@ -3,7 +3,14 @@
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { useTranslation } from 'react-i18next';
-import { apiClient } from '@/lib/api/client';
+import {
+  listBdAccounts,
+  getBdAccountStatus,
+  getBdAccountDialogs,
+  disconnectBdAccount,
+  enableBdAccount,
+  deleteBdAccount,
+} from '@/lib/api/bd-accounts';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import { useWebSocketContext } from '@/lib/contexts/websocket-context';
 import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Power, PowerOff, ChevronRight } from 'lucide-react';
@@ -31,8 +38,8 @@ export default function BDAccountsPage() {
 
   const fetchAccounts = useCallback(async () => {
     try {
-      const response = await apiClient.get('/api/bd-accounts');
-      setAccounts(Array.isArray(response.data) ? response.data : []);
+      const rows = await listBdAccounts();
+      setAccounts(rows);
     } catch (err: unknown) {
       const e = err as { response?: { data?: { error?: string } } };
       reportError(err, { component: 'BDAccountsPage', action: 'fetchAccounts' });
@@ -65,12 +72,11 @@ export default function BDAccountsPage() {
 
   const fetchAccountStatus = async (accountId: string) => {
     try {
-      const response = await apiClient.get(`/api/bd-accounts/${accountId}/status`);
-      // Update account in list
+      const data = await getBdAccountStatus(accountId);
       setAccounts((prev) =>
-        prev.map((acc) => (acc.id === accountId ? { ...acc, ...response.data } : acc))
+        prev.map((acc) => (acc.id === accountId ? { ...acc, ...data } : acc))
       );
-      return response.data;
+      return data;
     } catch (error) {
       reportError(error, { component: 'BDAccountsPage', action: 'fetchAccountStatus' });
     }
@@ -79,8 +85,8 @@ export default function BDAccountsPage() {
   const fetchDialogs = async (accountId: string) => {
     setLoadingDialogs(true);
     try {
-      const response = await apiClient.get(`/api/bd-accounts/${accountId}/dialogs`);
-      setDialogs(response.data);
+      const data = await getBdAccountDialogs(accountId);
+      setDialogs(data as Dialog[]);
       setSelectedAccount(accountId);
     } catch (error: any) {
       reportError(error, { component: 'BDAccountsPage', action: 'fetchDialogs' });
@@ -95,7 +101,7 @@ export default function BDAccountsPage() {
 
     try {
       setError('');
-      await apiClient.post(`/api/bd-accounts/${accountId}/disconnect`);
+      await disconnectBdAccount(accountId);
       await fetchAccounts();
     } catch (error: any) {
       reportError(error, { component: 'BDAccountsPage', action: 'disconnect' });
@@ -106,7 +112,7 @@ export default function BDAccountsPage() {
   const handleEnable = async (accountId: string) => {
     try {
       setError('');
-      await apiClient.post(`/api/bd-accounts/${accountId}/enable`);
+      await enableBdAccount(accountId);
       await fetchAccounts();
     } catch (error: any) {
       reportError(error, { component: 'BDAccountsPage', action: 'enable' });
@@ -119,7 +125,7 @@ export default function BDAccountsPage() {
 
     try {
       setError('');
-      await apiClient.delete(`/api/bd-accounts/${accountId}`);
+      await deleteBdAccount(accountId);
       await fetchAccounts();
     } catch (error: any) {
       reportError(error, { component: 'BDAccountsPage', action: 'delete' });
@@ -172,14 +178,53 @@ export default function BDAccountsPage() {
                 </div>
                 <ChevronRight className="w-5 h-5 text-gray-400 shrink-0" />
               </Link>
-              {account.is_active ? (
+              {(account.connection_state ?? (account.is_active ? 'connected' : 'disconnected')) === 'connected' ? (
                 <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0" />
+              ) : (account.connection_state === 'reauth_required') ? (
+                <XCircle className="w-5 h-5 text-red-500 shrink-0" />
               ) : (
                 <XCircle className="w-5 h-5 text-gray-400 shrink-0" />
               )}
             </div>
 
             <div className="space-y-2 mb-4">
+              <p className={`text-xs ${
+                account.connection_state === 'reauth_required'
+                  ? 'text-red-600 dark:text-red-400'
+                  : account.connection_state === 'reconnecting'
+                    ? 'text-amber-600 dark:text-amber-400'
+                    : 'text-gray-500 dark:text-gray-400'
+              }`}>
+                {account.connection_state === 'reauth_required'
+                  ? 'Требуется повторный вход'
+                  : account.connection_state === 'reconnecting'
+                    ? 'Переподключение'
+                    : account.connection_state === 'connected'
+                      ? 'Подключен'
+                      : 'Отключен'}
+              </p>
+              <div className="flex items-center gap-2">
+                <span
+                  className={`inline-flex w-2.5 h-2.5 rounded-full ${
+                    account.proxy_status === 'ok' ? 'bg-green-500' :
+                    account.proxy_status === 'error' ? 'bg-red-500' :
+                    account.proxy_status === 'configured' ? 'bg-amber-500' :
+                    'bg-gray-400'
+                  }`}
+                  title={
+                    account.proxy_status === 'ok' ? 'Прокси: подключено' :
+                    account.proxy_status === 'error' ? `Прокси: ошибка${account.last_proxy_error ? ` (${account.last_proxy_error})` : ''}` :
+                    account.proxy_status === 'configured' ? 'Прокси: настроен, проверка при подключении' :
+                    'Прокси: не используется'
+                  }
+                />
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  {account.proxy_status === 'ok' ? 'Proxy OK' :
+                    account.proxy_status === 'error' ? 'Proxy Error' :
+                    account.proxy_status === 'configured' ? 'Proxy Configured' :
+                    'No Proxy'}
+                </span>
+              </div>
               {account.connected_at && (
                 <p className="text-sm text-gray-600 dark:text-gray-400">
                   Подключен: {new Date(account.connected_at).toLocaleDateString('ru-RU')}
@@ -212,7 +257,16 @@ export default function BDAccountsPage() {
               </Button>
               {canManageAccount(account) && (
                 <>
-                  {account.is_active ? (
+                  {account.connection_state === 'reauth_required' ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => connect.setShowConnectModal(true)}
+                      title="Переподключить"
+                    >
+                      <Power className="w-4 h-4" />
+                    </Button>
+                  ) : account.is_active ? (
                     <Button
                       variant="outline"
                       size="sm"

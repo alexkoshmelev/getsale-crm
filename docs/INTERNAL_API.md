@@ -4,6 +4,8 @@
 
 **Важно:** Бэкенды не должны быть доступны из интернета. Доступ только через API Gateway или из внутренней сети. См. [DEPLOYMENT.md](DEPLOYMENT.md) — раздел «Безопасность: gateway и бэкенды».
 
+**Инвентаризация HTTP-клиентов:** какой сервис куда ходит, `baseUrl` из env, локальные таймауты и `retries` — [SERVICE_HTTP_CLIENT_INVENTORY.md](SERVICE_HTTP_CLIENT_INVENTORY.md) (grep `new ServiceHttpClient`: только bd-accounts, messaging, crm, campaign, automation; analytics / activity / team / websocket — без этого клиента).
+
 ---
 
 ## Internal-only endpoints (service-to-service)
@@ -17,8 +19,9 @@
 | **messaging-service** | POST | `/internal/messages` | Создание/upsert сообщения (по bd_account_id, channel_id, telegram_message_id). |
 | **messaging-service** | PATCH | `/internal/messages/edit-by-telegram` | Редактирование сообщения по (bdAccountId, channelId, telegramMessageId, content, …). Заголовок `X-Organization-Id` обязателен (S4). |
 | **messaging-service** | POST | `/internal/messages/delete-by-telegram` | Удаление сообщений по (bdAccountId, channelId?, telegramMessageIds[]). Заголовок `X-Organization-Id` обязателен (S4). |
-| **messaging-service** | POST | `/internal/messages/orphan-by-bd-account` | S2/A1: обнуление `bd_account_id` у сообщений при удалении аккаунта. Body: `{ bdAccountId }`. Заголовок `X-Organization-Id` обязателен. Вызывается bd-accounts перед удалением аккаунта. |
+| **messaging-service** | POST | `/internal/messages/orphan-by-bd-account` | S2/A1: обнуление `bd_account_id` у сообщений при удалении аккаунта. Body: `{ bdAccountId }`. Заголовок `X-Organization-Id` обязателен. Вызывается bd-accounts перед удалением аккаунта. Fallback при недоступности messaging: [RUNBOOK_ORPHAN_MESSAGES.md](RUNBOOK_ORPHAN_MESSAGES.md). |
 | **bd-accounts-service** | GET | `/internal/sync-chats?bdAccountId=...` | Список чатов синхронизации для аккаунта. Заголовок `X-Organization-Id` обязателен. Возврат: `{ chats: [{ telegram_chat_id, title, peer_type, history_exhausted, folder_id, folder_ids }] }`. |
+| **bd-accounts-service** | GET | `/internal/search-sync-chats?q=&limit=` | Поиск по синхронизированным чатам организации (title, контакт из последнего сообщения). Заголовок `X-Organization-Id` обязателен. Возврат: `{ items: [{ channel, channel_id, bd_account_id, name }] }`. Используется messaging-service для GET `/api/messaging/search` (A1). |
 
 ---
 
@@ -43,11 +46,15 @@
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/bd-accounts/:bdAccountId/search-groups?q=...` | Поиск групп (Telegram). |
+| GET | `/api/bd-accounts/:bdAccountId/search-groups?q=&type=&limit=&maxPages=` | Поиск групп/каналов (Telegram). Query: `q` (≥2 символа), `type`=`groups`\|`channels`\|`all`, `limit` (1–100, по умолчанию 50), **`maxPages`** (1–15, по умолчанию 10) — сколько страниц SearchGlobal / SearchPosts запрашивать при пагинации. |
 | GET | `/api/bd-accounts/:bdAccountId/chats/:chatId/participants?limit=&offset=&excludeAdmins=` | Список участников чата. |
 | GET | `/api/bd-accounts/:bdAccountId/chats/:chatId/active-participants?...` | Активные участники. |
+| GET | `/api/bd-accounts/:bdAccountId/chats/:channelId/comment-participants?linkedChatId=&postLimit=&maxRepliesPerPost=&excludeAdmins=` | Уникальные авторы **комментариев** под недавними постами канала (GetHistory + GetReplies). Query: **`linkedChatId`** (обязательный, id группы обсуждения), `postLimit` 5–100, `maxRepliesPerPost` 20–500, `excludeAdmins`. Используется CRM parse для `type=channel` + `linkedChatId` ([`discovery-loop.ts`](../services/crm-service/src/discovery-loop.ts)). |
+| GET | `/api/bd-accounts/:bdAccountId/chats/:chatId/reaction-participants?depth=` | Участники, внесшие **реакции** на недавние сообщения канала (best-effort: GetHistory + при наличии — **`messages.getMessagesViews`** с `increment=false` для уточнения счётчиков + **`GetMessageReactionsList`** в GramJS; иначе пустой список). Сообщения с реакциями **сортируются по числу просмотров** (убывание), затем берётся ограниченное число постов — списка «кто просмотрел» у клиента MTProto **нет**, только счётчики ([`messages.getMessagesViews`](https://core.telegram.org/method/messages.getMessagesViews)). Query: **`depth`** — глубина истории в сообщениях, 20–200 (CRM передаёт из настроек parse). Используется CRM parse при **`channelEngagement: 'reactions'`** для канала без `linkedChatId` ([`chat-sync-reaction-users.ts`](../services/bd-accounts-service/src/telegram/chat-sync-reaction-users.ts)). |
 | POST | `/api/bd-accounts/:bdAccountId/chats/:chatId/leave` | Выход из чата (body `{}`). |
-| POST | `/api/bd-accounts/:bdAccountId/parse/resolve` | Парсинг источников. Body: `{ sources }`. |
+| POST | `/api/bd-accounts/:bdAccountId/parse/resolve` | Расширенный resolve для парсинга. Body: `{ sources: string[] }` (лимит длины массива как у `resolve-chats`). Ответ `{ results }`: успех — объекты **ResolvedSource** (`input`, `type`, `title`, `username?`, `chatId`, `membersCount?`, `linkedChatId?`, `canGetMembers`, `canGetMessages`); ошибка по строке — тот же каркас с `error` и пустыми полями. Реализация: [`chat-sync-resolve.ts`](../services/bd-accounts-service/src/telegram/chat-sync-resolve.ts). |
+
+**CRM (прокси):** `POST /api/crm/parse/resolve` с телом `{ sources, bdAccountId }` вызывает этот путь от имени органа ([`parse.ts`](../services/crm-service/src/routes/parse.ts)). **`POST /api/crm/parse/start`** — на верхнем уровне тела (рядом с `sources`, `accountIds`, `settings`) опционально **`channelEngagement`**: `default` \| `reactions` ([`ParseStartSchema`](../services/crm-service/src/validation.ts)); при `reactions` для источника `type=channel` без `linkedChatId` воркер выбирает стратегию **`reaction_users`** и дергает `reaction-participants` выше. SSE прогресса дополняется полями **`etaSeconds`**, **`speed`** (оценка по `parseStartedAtMs` и счётчикам чатов) — см. [`parse-progress-utils.ts`](../services/crm-service/src/parse-progress-utils.ts).
 
 **Headers:** при вызове от пользователя передавать `x-organization-id` (и при необходимости `x-user-id`).
 
@@ -96,6 +103,8 @@
 | POST | `/api/ai/chat/summarize` | Суммаризация. Body: `{ messages }`. |
 
 **Callers:** `messaging-service` (conversations: lead-context, summarize).
+
+**Таймаут HTTP-клиента:** по умолчанию **65s** (как у campaign-service → AI для длинных ответов модели); ретраи и circuit breaker — из `interServiceHttpDefaults` / `SERVICE_HTTP_*`. Переопределение: **`MESSAGING_AI_HTTP_TIMEOUT_MS`** (мс, не ниже 5000). См. [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ---
 
@@ -149,6 +158,8 @@
 
 **Caller:** `automation-service` (event-handlers: SLA breach, rule actions).
 
+**Таймаут HTTP-клиента:** по умолчанию **15s**; ретраи и circuit breaker — `interServiceHttpDefaults` / `SERVICE_HTTP_*`. Переопределение: **`AUTOMATION_CRM_HTTP_TIMEOUT_MS`** (мс, не ниже 3000). См. [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ---
 
 ## 9. Automation Service → Pipeline Service
@@ -165,6 +176,8 @@
 **Response:** `200` + `{ stage: { id, name } }`. `404` если лид для контакта не найден.
 
 **Caller:** `automation-service` (event-handlers: move lead stage). Передаёт `context: { organizationId, userId }` и при наличии в событии — `pipelineId` в body.
+
+**Таймаут HTTP-клиента:** по умолчанию **15s**; **`AUTOMATION_PIPELINE_HTTP_TIMEOUT_MS`** (мс, не ниже 3000). См. [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ---
 

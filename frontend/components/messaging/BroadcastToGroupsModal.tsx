@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
-import { apiClient } from '@/lib/api/client';
+import { postBdAccountSendBulk } from '@/lib/api/bd-accounts';
 import { fetchGroupSources, type GroupSource } from '@/lib/api/campaigns';
 
 interface BroadcastToGroupsModalProps {
@@ -43,11 +43,11 @@ export function BroadcastToGroupsModal({ accountId, accountName, onClose }: Broa
     setSending(true);
     setResult(null);
     try {
-      const res = await apiClient.post<{ sent: number; failed: { channelId: string; error: string }[] }>(
-        `/api/bd-accounts/${accountId}/send-bulk`,
-        { channelIds: Array.from(selectedIds), text: text.trim() },
-      );
-      setResult(res.data);
+      const res = await postBdAccountSendBulk(accountId, {
+        channelIds: Array.from(selectedIds),
+        text: text.trim(),
+      });
+      setResult(res);
     } catch (err: unknown) {
       const resp = (err as { response?: { data?: { message?: string; error?: string } } })?.response?.data;
       setResult({ sent: 0, failed: [{ channelId: '', error: resp?.message || resp?.error || String(err) }] });

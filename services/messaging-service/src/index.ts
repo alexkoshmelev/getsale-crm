@@ -1,7 +1,15 @@
-import { createServiceApp, ServiceHttpClient } from '@getsale/service-core';
+import { createServiceApp, ServiceHttpClient, interServiceHttpDefaults } from '@getsale/service-core';
 import { createLogger } from '@getsale/logger';
 import { Counter, Histogram } from 'prom-client';
 import { subscribeToEvents } from './event-handlers';
+
+/** Long-running LLM calls; align with campaign-service → ai (65s). Override: MESSAGING_AI_HTTP_TIMEOUT_MS. */
+function messagingAiTimeoutMs(): number {
+  const raw = process.env.MESSAGING_AI_HTTP_TIMEOUT_MS?.trim();
+  if (!raw) return 65_000;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 5_000 ? n : 65_000;
+}
 import { messagesRouter } from './routes/messages';
 import { chatsRouter } from './routes/chats';
 import { conversationsRouter } from './routes/conversations';
@@ -19,14 +27,19 @@ async function main() {
   const { pool, rabbitmq, log, registry } = ctx;
 
   const bdAccountsClient = new ServiceHttpClient({
+    ...interServiceHttpDefaults(),
     baseUrl: process.env.BD_ACCOUNTS_SERVICE_URL || 'http://bd-accounts-service:3007',
     name: 'bd-accounts-service',
-    retries: 2,
+    retries: 0,
+    metricsRegistry: registry,
   }, log);
 
   const aiClient = new ServiceHttpClient({
+    ...interServiceHttpDefaults(),
     baseUrl: process.env.AI_SERVICE_URL || 'http://localhost:3005',
     name: 'ai-service',
+    timeoutMs: messagingAiTimeoutMs(),
+    metricsRegistry: registry,
   }, log);
 
   try {

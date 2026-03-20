@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, requireUser } from '@getsale/service-core';
+import { asyncHandler, requireUser, validate } from '@getsale/service-core';
+import type { z } from 'zod';
+import { AcActivityListQuerySchema } from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -13,9 +15,10 @@ export function activityRouter({ pool, log }: Deps): Router {
 
   router.use(requireUser());
 
-  router.get('/', asyncHandler(async (req, res) => {
+  router.get('/', validate(AcActivityListQuerySchema, 'query'), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
-    const limit = Math.min(parseInt(String(req.query.limit), 10) || 50, 100);
+    const q = req.query as z.infer<typeof AcActivityListQuerySchema>;
+    const limit = Math.min(q.limit ?? 50, 100);
 
     const result = await pool.query(
       `SELECT 

@@ -1,9 +1,11 @@
+import { randomUUID } from 'crypto';
 import { Pool, PoolClient } from 'pg';
 import { Logger } from '@getsale/logger';
 import { CampaignStatus } from '@getsale/types';
 import { ServiceHttpClient, ServiceCallError } from '@getsale/service-core';
 import {
   Schedule,
+  SendDelayRange,
   StepConditions,
   evaluateStepConditions,
   isWithinSchedule,
@@ -14,11 +16,16 @@ import {
   expandSpintax,
   ensureLeadInPipeline,
   getSentTodayByAccount,
+  resolveDelayRange,
+  sampleDelaySeconds,
 } from './helpers';
+import { campaignMinGapDeferTotal } from './metrics';
 import type { CampaignStep, DueParticipantRow } from './types';
 
 const CAMPAIGN_SEND_INTERVAL_MS = parseInt(String(process.env.CAMPAIGN_SEND_INTERVAL_MS || 60000), 10);
 const CAMPAIGN_MAX_SENDS_PER_ACCOUNT_PER_DAY = parseInt(String(process.env.CAMPAIGN_MAX_SENDS_PER_ACCOUNT_PER_DAY || 20), 10);
+/** Min milliseconds between two campaign-initiated sends for the same bd_account_id within one worker batch (0 = off). Reduces TG flood risk when many participants share an account. */
+const CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT = parseInt(String(process.env.CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT || '0'), 10);
 const SEND_MAX_RETRIES = 3;
 const CAMPAIGN_BATCH_SIZE = 20;
 const CAMPAIGN_429_RETRY_AFTER_MINUTES = parseInt(String(process.env.CAMPAIGN_429_RETRY_AFTER_MINUTES || '30'), 10);
@@ -34,7 +41,7 @@ export interface CampaignLoopDeps {
 
 interface CampaignMeta {
   schedule: Schedule;
-  sendDelaySeconds: number;
+  sendDelayRange: SendDelayRange;
   pipeline_id: string | null;
   lead_creation_settings: { trigger?: string; default_stage_id?: string; default_responsible_id?: string } | null;
   randomizeWithAI?: boolean;
@@ -112,11 +119,16 @@ async function loadCampaignMeta(
   if (!c) return undefined;
 
   const schedule = (c.schedule as Schedule) ?? null;
-  const aud = (c.target_audience || {}) as { sendDelaySeconds?: number; randomizeWithAI?: boolean };
+  const aud = (c.target_audience || {}) as {
+    sendDelaySeconds?: number;
+    sendDelayMinSeconds?: number;
+    sendDelayMaxSeconds?: number;
+    randomizeWithAI?: boolean;
+  };
   const lcs = c.lead_creation_settings as CampaignMeta['lead_creation_settings'];
   const meta: CampaignMeta = {
     schedule,
-    sendDelaySeconds: Math.max(0, aud.sendDelaySeconds ?? 0),
+    sendDelayRange: resolveDelayRange(aud, 60),
     pipeline_id: c.pipeline_id ?? null,
     lead_creation_settings: lcs ?? null,
     randomizeWithAI: !!aud.randomizeWithAI,
@@ -150,10 +162,10 @@ async function advanceToNextStep(
   currentStep: number,
   steps: CampaignStep[],
   schedule: Schedule,
-  opts?: { enqueueOrder?: number; sendDelaySeconds?: number }
+  opts?: { enqueueOrder?: number; sendDelayRange?: SendDelayRange }
 ): Promise<void> {
   const enqueueOrder = opts?.enqueueOrder ?? 0;
-  const sendDelaySeconds = Math.max(0, opts?.sendDelaySeconds ?? 0);
+  const sampledDelaySeconds = sampleDelaySeconds(opts?.sendDelayRange ?? { minSeconds: 0, maxSeconds: 0 });
   const nextStep = steps[currentStep + 1];
   if (nextStep) {
     const nextTriggerType = nextStep.trigger_type || 'delay';
@@ -162,7 +174,7 @@ async function advanceToNextStep(
         ? null
         : (() => {
             const base = nextSendAtWithSchedule(new Date(), delayHoursFromStep(nextStep), schedule);
-            return new Date(base.getTime() + enqueueOrder * sendDelaySeconds * 1000);
+            return new Date(base.getTime() + enqueueOrder * sampledDelaySeconds * 1000);
           })();
     await client.query(
       `UPDATE campaign_participants SET current_step = $1, status = 'sent', next_send_at = $2, updated_at = NOW() WHERE id = $3`,
@@ -185,9 +197,52 @@ function isNotConnectedError(err: unknown): boolean {
   return /not connected|account is not connected/i.test(msg);
 }
 
+/** Human-readable reason from messaging-service / downstream JSON body. */
+function campaignSendDownstreamReason(err: unknown): string {
+  if (err instanceof ServiceCallError) {
+    const b = err.body;
+    if (b != null && typeof b === 'object') {
+      const o = b as { message?: unknown; error?: unknown };
+      const m = typeof o.message === 'string' ? o.message.trim() : '';
+      const e = typeof o.error === 'string' ? o.error.trim() : '';
+      if (m) return m;
+      if (e) return e;
+    }
+    return typeof err.message === 'string' ? err.message : String(err);
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Permanent client errors: retries only add latency and log noise (Telegram peer/privacy/deactivated, etc.).
+ */
+function isNonRetryableCampaignSendError(err: unknown): boolean {
+  if (!(err instanceof ServiceCallError)) return false;
+  if (err.statusCode === 409) return true;
+  if (err.statusCode === 413) return true;
+  if (err.statusCode !== 400) return false;
+  const msg = campaignSendDownstreamReason(err).toLowerCase();
+  const needles = [
+    'user or chat not found',
+    'telegram: recipient only accepts messages from premium',
+    "telegram: recipient's privacy settings block",
+    'telegram: sending to this chat is not allowed',
+    'not a mutual contact per their privacy',
+    'telegram: premium is required',
+    'recipient telegram account is deactivated',
+    'privacy_premium_required',
+    'user_privacy_restricted',
+    'chat_write_forbidden',
+    'user_not_mutual_contact',
+    'file too large',
+    'maximum file size',
+  ];
+  return needles.some((n) => msg.includes(n));
+}
+
 async function sendMessageWithRetry(
   messagingClient: ServiceHttpClient,
-  payload: { contactId: string; channelId: string; content: string; bdAccountId: string },
+  payload: { contactId: string; channelId: string; content: string; bdAccountId: string; idempotencyKey: string },
   headers: { userId: string; organizationId: string },
   maxRetries: number,
   log: Logger
@@ -203,10 +258,19 @@ async function sendMessageWithRetry(
         content: payload.content,
         bdAccountId: payload.bdAccountId,
         source: 'campaign',
+        idempotencyKey: payload.idempotencyKey,
       }, undefined, { userId: headers.userId, organizationId: headers.organizationId });
     } catch (err) {
       lastErr = err;
       if (err instanceof ServiceCallError && err.statusCode === 429) {
+        throw err;
+      }
+      if (isNonRetryableCampaignSendError(err)) {
+        log.info({
+          message: 'Campaign send: non-retryable error, skipping further attempts',
+          attempt,
+          reason: campaignSendDownstreamReason(err),
+        });
         throw err;
       }
       const isNotConnected = isNotConnectedError(err);
@@ -274,7 +338,8 @@ async function processParticipant(
   steps: CampaignStep[],
   meta: CampaignMeta | undefined,
   sentMap: Map<string, number>,
-  deps: CampaignLoopDeps
+  deps: CampaignLoopDeps,
+  lastCampaignSendAtMsByBdAccount?: Map<string, number>
 ): Promise<void> {
   const { log, messagingClient, pipelineClient, bdAccountsClient, aiClient } = deps;
   const schedule = meta?.schedule ?? null;
@@ -294,7 +359,7 @@ async function processParticipant(
   if (!shouldSend) {
     await advanceToNextStep(client, row.participant_id, row.current_step, steps, schedule, {
       enqueueOrder: row.enqueue_order,
-      sendDelaySeconds: meta?.sendDelaySeconds ?? 0,
+      sendDelayRange: meta?.sendDelayRange ?? { minSeconds: 0, maxSeconds: 0 },
     });
     await client.query('COMMIT');
     return;
@@ -341,10 +406,11 @@ async function processParticipant(
   await simulateHumanBehavior(bdAccountsClient, row.bd_account_id, row.channel_id, content.length, row.organization_id, log);
 
   let msgJson: { id?: string };
+  const idempotencyKey = `campaign:${row.campaign_id}:participant:${row.participant_id}:step:${row.current_step}`;
   try {
     msgJson = await sendMessageWithRetry(
       messagingClient,
-      { contactId: row.contact_id, channelId: row.channel_id, content, bdAccountId: row.bd_account_id },
+      { contactId: row.contact_id, channelId: row.channel_id, content, bdAccountId: row.bd_account_id, idempotencyKey },
       { userId: systemUserId, organizationId: row.organization_id },
       SEND_MAX_RETRIES,
       log
@@ -400,14 +466,15 @@ async function processParticipant(
 
   await advanceToNextStep(client, row.participant_id, row.current_step, steps, schedule, {
     enqueueOrder: row.enqueue_order,
-    sendDelaySeconds: meta?.sendDelaySeconds ?? 0,
+    sendDelayRange: meta?.sendDelayRange ?? { minSeconds: 0, maxSeconds: 0 },
   });
   await client.query(
     `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status) VALUES ($1, $2, $3, NOW(), 'sent')`,
-    [row.participant_id, row.current_step, msgJson?.id || null]
+    [row.participant_id, row.current_step, msgJson?.id || randomUUID()]
   );
   await client.query('COMMIT');
   sentMap.set(row.bd_account_id, (sentMap.get(row.bd_account_id) ?? 0) + 1);
+  lastCampaignSendAtMsByBdAccount?.set(row.bd_account_id, Date.now());
 
   const lcs = meta?.lead_creation_settings;
   const pipelineId = meta?.pipeline_id;
@@ -423,7 +490,7 @@ async function processParticipant(
     if (stageId) await ensureLeadInPipeline(pipelineClient, log, row.organization_id, row.contact_id, pipelineId, stageId, systemUserId, lcs?.default_responsible_id);
   }
 
-  const sendDelaySeconds = meta?.sendDelaySeconds ?? 0;
+  const sendDelaySeconds = sampleDelaySeconds(meta?.sendDelayRange ?? { minSeconds: 0, maxSeconds: 0 });
   if (sendDelaySeconds > 0) await new Promise((r) => setTimeout(r, sendDelaySeconds * 1000));
 }
 
@@ -435,6 +502,7 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
     const campaignMetaCache = new Map<string, CampaignMeta>();
     const stepsCache = new Map<string, CampaignStep[]>();
     const processedCampaignIds = new Set<string>();
+    const lastCampaignSendAtMsByBdAccount = new Map<string, number>();
 
     for (let i = 0; i < CAMPAIGN_BATCH_SIZE; i++) {
       let client: PoolClient | null = null;
@@ -448,6 +516,29 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
           break;
         }
         processedCampaignIds.add(row.campaign_id);
+
+        if (CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT > 0) {
+          const lastMs = lastCampaignSendAtMsByBdAccount.get(row.bd_account_id) ?? 0;
+          const now = Date.now();
+          const elapsed = now - lastMs;
+          if (lastMs > 0 && elapsed < CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT) {
+            const deferMs = CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT - elapsed;
+            const retryAt = new Date(now + deferMs);
+            await client.query(
+              `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
+              [retryAt.toISOString(), row.participant_id]
+            );
+            await client.query('COMMIT');
+            log.info({
+              message: 'Campaign send deferred: min gap per BD account',
+              bdAccountId: row.bd_account_id,
+              participantId: row.participant_id,
+              deferMs,
+            });
+            campaignMinGapDeferTotal.inc();
+            continue;
+          }
+        }
 
         const meta = await loadCampaignMeta(pool, row.campaign_id, campaignMetaCache);
         const steps = await loadCampaignSteps(pool, row.campaign_id, stepsCache);
@@ -488,7 +579,7 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
           continue;
         }
 
-        await processParticipant(client, pool, row, step, steps, meta, sentMap, deps);
+        await processParticipant(client, pool, row, step, steps, meta, sentMap, deps, lastCampaignSendAtMsByBdAccount);
       } catch (e) {
         await client?.query('ROLLBACK').catch(() => {});
         log.warn({

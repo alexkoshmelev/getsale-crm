@@ -1,7 +1,8 @@
-import { createServiceApp, ServiceHttpClient } from '@getsale/service-core';
+import { createServiceApp, ServiceHttpClient, interServiceHttpDefaults } from '@getsale/service-core';
 import { createLogger } from '@getsale/logger';
 import { subscribeToEvents } from './event-handlers';
 import { startCampaignLoop } from './campaign-loop';
+import { campaignMinGapDeferTotal } from './metrics';
 import { campaignsRouter } from './routes/campaigns';
 import { templatesRouter } from './routes/templates';
 import { sequencesRouter } from './routes/sequences';
@@ -14,31 +15,40 @@ async function main() {
     port: parseInt(process.env.PORT || '3012', 10),
     poolConfig: { max: 20 },
   });
-  const { pool, rabbitmq, log } = ctx;
+  const { pool, rabbitmq, log, registry } = ctx;
+  ctx.registry.registerMetric(campaignMinGapDeferTotal);
 
   const pipelineClient = new ServiceHttpClient({
+    ...interServiceHttpDefaults(),
     baseUrl: process.env.PIPELINE_SERVICE_URL || 'http://localhost:3008',
     name: 'pipeline-service',
+    metricsRegistry: registry,
   }, log);
 
   const messagingClient = new ServiceHttpClient({
+    ...interServiceHttpDefaults(),
     baseUrl: process.env.MESSAGING_SERVICE_URL || 'http://localhost:3003',
     name: 'messaging-service',
-    retries: 2,
+    retries: 0,
+    metricsRegistry: registry,
   }, log);
 
   const bdAccountsClient = new ServiceHttpClient({
+    ...interServiceHttpDefaults(),
     baseUrl: process.env.BD_ACCOUNTS_SERVICE_URL || 'http://localhost:3007',
     name: 'bd-accounts-service',
-    retries: 2,
+    retries: 0,
+    metricsRegistry: registry,
   }, log);
 
   const aiServiceUrl = process.env.AI_SERVICE_URL || 'http://localhost:3005';
   const aiClient = new ServiceHttpClient({
+    ...interServiceHttpDefaults(),
     baseUrl: aiServiceUrl,
     name: 'ai-service',
     retries: 1,
     timeoutMs: 65_000,
+    metricsRegistry: registry,
   }, log);
   log.info({
     message: 'AI service client configured for campaign rephrase',

@@ -1,58 +1,22 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
-import { z } from 'zod';
 import { RabbitMQClient } from '@getsale/utils';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { TelegramManager } from '../telegram';
 import { serializeMessage } from '../telegram-serialize';
 import { MAX_FILE_SIZE_BYTES, BULK_SEND_DELAY_MS, getAccountOr404, getErrorMessage, getErrorCode, getRetryAfterSeconds, requireBidiCanWriteAccount } from '../helpers';
-
-const SendMessageSchema = z.object({
-  chatId: z.string().min(1).max(256),
-  text: z.string().optional(),
-  fileBase64: z.string().optional(),
-  fileName: z.string().max(512).optional(),
-  replyToMessageId: z.union([z.string(), z.number()]).optional(),
-}).refine((d) => (d.text != null && d.text !== '') || (d.fileBase64 != null && d.fileBase64 !== ''), { message: 'text or fileBase64 is required' });
-
-const SendBulkSchema = z.object({
-  channelIds: z.array(z.string().min(1).max(256)).min(1).max(100),
-  text: z.string().min(1).max(100_000),
-});
-
-const ForwardMessageSchema = z.object({
-  fromChatId: z.string().min(1).max(256),
-  toChatId: z.string().min(1).max(256),
-  telegramMessageId: z.coerce.number().int().positive(),
-});
-
-const DraftSchema = z.object({
-  channelId: z.string().min(1).max(256),
-  text: z.string().max(100_000).optional(),
-  replyToMsgId: z.union([z.string(), z.number()]).optional(),
-});
-
-const DeleteMessageSchema = z.object({
-  channelId: z.string().min(1).max(256),
-  telegramMessageId: z.coerce.number().int().nonnegative(),
-});
-
-const CreateSharedChatSchema = z.object({
-  title: z.string().min(1).max(255).trim(),
-  lead_telegram_user_id: z.coerce.number().int().positive().optional().nullable(),
-  lead_username: z.string().max(128).trim().optional().nullable(),
-  extra_usernames: z.array(z.string().max(128).trim()).optional(),
-});
-
-const ReactionBodySchema = z.object({
-  chatId: z.string().min(1).max(256),
-  reaction: z.array(z.string().max(64)).optional(),
-});
-
-const ChatIdBodySchema = z.object({
-  chatId: z.string().min(1).max(256),
-});
+import { telegramSendErrorToAppError } from '../telegram-send-error-map';
+import {
+  BdSendMessageSchema,
+  BdSendBulkSchema,
+  BdForwardMessageSchema,
+  BdDraftSchema,
+  BdDeleteMessageSchema,
+  BdCreateSharedChatSchema,
+  BdReactionBodySchema,
+  BdChatIdBodySchema,
+} from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -63,9 +27,19 @@ interface Deps {
 
 export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   const router = Router();
+  const assertAccountNotReauthRequired = async (accountId: string, organizationId: string): Promise<void> => {
+    const r = await pool.query(
+      'SELECT connection_state FROM bd_accounts WHERE id = $1 AND organization_id = $2 LIMIT 1',
+      [accountId, organizationId]
+    );
+    const state = r.rows[0]?.connection_state;
+    if (state === 'reauth_required') {
+      throw new AppError(409, 'Telegram session expired. Reconnect account via QR or phone login.', ErrorCodes.BAD_REQUEST);
+    }
+  };
 
   // POST /:id/send — send message or file via Telegram
-  router.post('/:id/send', validate(SendMessageSchema), asyncHandler(async (req, res) => {
+  router.post('/:id/send', validate(BdSendMessageSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const { chatId, text, fileBase64, fileName, replyToMessageId } = req.body;
@@ -75,6 +49,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
       throw new AppError(403, 'Sending messages is disabled for demo accounts. Connect a real Telegram account to send messages.', ErrorCodes.FORBIDDEN);
     }
     await requireBidiCanWriteAccount(pool, id, req.user);
+    await assertAccountNotReauthRequired(id, organizationId);
     if (!telegramManager.isConnected(id)) {
       throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
     }
@@ -96,6 +71,8 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
         message = await telegramManager.sendMessage(id, chatId, typeof text === 'string' ? text : '', { replyTo });
       }
     } catch (sendErr: unknown) {
+      const mapped = telegramSendErrorToAppError(sendErr);
+      if (mapped) throw mapped;
       const errMsg = getErrorMessage(sendErr);
       const code = getErrorCode(sendErr);
       const isClientError =
@@ -182,7 +159,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   }));
 
   // POST /:id/send-bulk — send one message to multiple chats
-  router.post('/:id/send-bulk', validate(SendBulkSchema), asyncHandler(async (req, res) => {
+  router.post('/:id/send-bulk', validate(BdSendBulkSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const { channelIds, text } = req.body;
@@ -222,7 +199,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   }));
 
   // POST /:id/forward — forward message to another chat
-  router.post('/:id/forward', validate(ForwardMessageSchema), asyncHandler(async (req, res) => {
+  router.post('/:id/forward', validate(BdForwardMessageSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const { fromChatId, toChatId, telegramMessageId } = req.body;
@@ -243,7 +220,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   }));
 
   // POST /:id/draft — save draft in Telegram
-  router.post('/:id/draft', validate(DraftSchema), asyncHandler(async (req, res) => {
+  router.post('/:id/draft', validate(BdDraftSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const { channelId, text, replyToMsgId } = req.body;
@@ -269,7 +246,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   }));
 
   // POST /:id/delete-message — delete message in Telegram
-  router.post('/:id/delete-message', validate(DeleteMessageSchema), asyncHandler(async (req, res) => {
+  router.post('/:id/delete-message', validate(BdDeleteMessageSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const { channelId, telegramMessageId } = req.body;
@@ -285,7 +262,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   }));
 
   // POST /:id/create-shared-chat — create Telegram supergroup and invite users
-  router.post('/:id/create-shared-chat', validate(CreateSharedChatSchema), asyncHandler(async (req, res) => {
+  router.post('/:id/create-shared-chat', validate(BdCreateSharedChatSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id: accountId } = req.params;
     const { title, lead_telegram_user_id: leadTelegramUserId, lead_username: leadUsername, extra_usernames: extraUsernamesRaw } = req.body;
@@ -375,7 +352,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   }));
 
   // POST /:id/messages/:telegramMessageId/reaction — set reactions on a message
-  router.post('/:id/messages/:telegramMessageId/reaction', validate(ReactionBodySchema), asyncHandler(async (req, res) => {
+  router.post('/:id/messages/:telegramMessageId/reaction', validate(BdReactionBodySchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id: accountId, telegramMessageId } = req.params;
     const { chatId, reaction: reactionBody } = req.body;
@@ -411,12 +388,13 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   }));
 
   // POST /:id/typing — send typing indicator (no-op if account not connected, so campaign human sim does not fail)
-  router.post('/:id/typing', validate(ChatIdBodySchema), asyncHandler(async (req, res) => {
+  router.post('/:id/typing', validate(BdChatIdBodySchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const { chatId } = req.body;
 
     await getAccountOr404(pool, id, organizationId, 'id');
+    await assertAccountNotReauthRequired(id, organizationId);
     if (!telegramManager.isConnected(id)) {
       return res.json({ success: true });
     }
@@ -425,12 +403,13 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   }));
 
   // POST /:id/read — mark messages as read (no-op if account not connected, so campaign human sim does not fail)
-  router.post('/:id/read', validate(ChatIdBodySchema), asyncHandler(async (req, res) => {
+  router.post('/:id/read', validate(BdChatIdBodySchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const { chatId } = req.body;
 
     await getAccountOr404(pool, id, organizationId, 'id');
+    await assertAccountNotReauthRequired(id, organizationId);
     if (!telegramManager.isConnected(id)) {
       return res.json({ success: true });
     }

@@ -1,5 +1,5 @@
 import { Counter } from 'prom-client';
-import { createServiceApp, ServiceHttpClient } from '@getsale/service-core';
+import { createServiceApp, ServiceHttpClient, interServiceHttpDefaults } from '@getsale/service-core';
 import { RedisClient } from '@getsale/utils';
 import { companiesRouter } from './routes/companies';
 import { contactsRouter } from './routes/contacts';
@@ -21,17 +21,20 @@ async function main() {
   const { pool, rabbitmq, log, registry } = ctx;
 
   const bdAccountsClient = new ServiceHttpClient({
+    ...interServiceHttpDefaults(),
     baseUrl: process.env.BD_ACCOUNTS_SERVICE_URL || 'http://bd-accounts-service:3007',
     name: 'bd-accounts-service',
-    timeoutMs: 60000,
-    retries: 0,
+    timeoutMs: 60_000,
+    metricsRegistry: registry,
   }, log);
 
   const campaignServiceClient = new ServiceHttpClient({
+    ...interServiceHttpDefaults(),
     baseUrl: process.env.CAMPAIGN_SERVICE_URL || 'http://campaign-service:3012',
     name: 'campaign-service',
-    timeoutMs: 60000,
+    timeoutMs: 60_000,
     retries: 0,
+    metricsRegistry: registry,
   }, log);
 
   const dealCreatedTotal = new Counter({

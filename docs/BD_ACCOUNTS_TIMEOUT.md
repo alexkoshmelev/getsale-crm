@@ -21,12 +21,18 @@ Error: TIMEOUT
 
 ## Что делает сервис
 
-- **Keepalive:** каждую минуту вызывается `updates.GetState()`, чтобы Telegram не переставал слать апдейты.
+- **Keepalive:** каждые **30 секунд** вызывается `updates.GetState()`, чтобы Telegram не переставал слать апдейты.
 - **Обработка TIMEOUT:** при TIMEOUT из `updates.js` сервис планирует переподключение **только этого** аккаунта (debounce 8 с), чтобы не обрывать долгие запросы других (например GetDialogs).
 - **Логирование:** TIMEOUT логируется как **warning** с текстом вроде «Update loop TIMEOUT (GramJS), scheduling reconnect», а не как error.
 
 ## Рекомендации
 
 - **Мониторинг/алерты:** не считать TIMEOUT критичной ошибкой; при желании фильтровать по сообщению или уровню (warning).
-- **Если таймауты учащаются:** проверить сеть до Telegram, нагрузку на инстанс; при необходимости уменьшить интервал keepalive в `TelegramManager.UPDATE_KEEPALIVE_MS` (сейчас 1 мин).
+- **Если таймауты учащаются:** проверить сеть до Telegram, нагрузку на инстанс; при необходимости скорректировать интервал keepalive в `TelegramManager.UPDATE_KEEPALIVE_MS` (сейчас 30 сек).
 - **Версия GramJS:** в `package.json` указана `telegram: ^2.26.22`. При обновлении библиотеки сверяться с [changelog](https://github.com/gram-js/gramjs/releases) на тему update loop и таймаутов.
+
+## Proxy policy (актуально)
+
+- В текущей интеграции поддерживается только **SOCKS5** для подключения GramJS.
+- HTTP/HTTPS proxy на auth/patch потоках отклоняется валидацией.
+- Это соответствует рабочему профилю использования GramJS proxy options для MTProto-сессий: SOCKS5/MTProxy, а не HTTP CONNECT как основной канал.

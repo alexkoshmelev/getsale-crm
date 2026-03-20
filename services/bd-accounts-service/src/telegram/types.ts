@@ -43,6 +43,7 @@ export interface QrSessionInternal extends QrLoginState {
   userId: string;
   apiId: number;
   apiHash: string;
+  proxyConfigRaw?: ProxyConfig | null;
   passwordResolve?: (password: string) => void;
 }
 

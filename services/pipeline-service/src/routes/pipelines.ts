@@ -1,20 +1,8 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
-import { z } from 'zod';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate, withOrgContext } from '@getsale/service-core';
-
-const PipelineCreateSchema = z.object({
-  name: z.string().max(200).trim().optional(),
-  description: z.string().max(2000).trim().optional().nullable(),
-  isDefault: z.boolean().optional(),
-});
-
-const PipelineUpdateSchema = z.object({
-  name: z.string().max(200).trim().optional(),
-  description: z.string().max(2000).trim().optional().nullable(),
-  isDefault: z.boolean().optional(),
-});
+import { PlPipelineCreateSchema, PlPipelineUpdateSchema } from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -43,7 +31,7 @@ export function pipelinesRouter({ pool, log }: Deps): Router {
     res.json(result.rows);
   }));
 
-  router.post('/', validate(PipelineCreateSchema), asyncHandler(async (req, res) => {
+  router.post('/', validate(PlPipelineCreateSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { name, description, isDefault } = req.body;
 
@@ -70,7 +58,7 @@ export function pipelinesRouter({ pool, log }: Deps): Router {
     res.status(201).json(pipeline);
   }));
 
-  router.put('/:id', validate(PipelineUpdateSchema), asyncHandler(async (req, res) => {
+  router.put('/:id', validate(PlPipelineUpdateSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const { name, description, isDefault } = req.body;

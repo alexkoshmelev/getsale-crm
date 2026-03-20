@@ -2,13 +2,9 @@ import { Router } from 'express';
 import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
-import { z } from 'zod';
+import { AuSwitchWorkspaceSchema } from '../validation';
 import { extractBearerToken, signAccessToken } from '../helpers';
 import { AUTH_COOKIE_ACCESS, AUTH_COOKIE_OPTS, ACCESS_MAX_AGE_SEC } from '../cookies';
-
-const SwitchWorkspaceSchema = z.object({
-  organizationId: z.string().uuid(),
-});
 
 interface Deps {
   pool: Pool;
@@ -30,7 +26,7 @@ export function workspacesRouter({ pool }: Deps): Router {
     res.json(rows.rows);
   }));
 
-  router.post('/switch-workspace', validate(SwitchWorkspaceSchema), asyncHandler(async (req, res) => {
+  router.post('/switch-workspace', validate(AuSwitchWorkspaceSchema), asyncHandler(async (req, res) => {
     const decoded = extractBearerToken(req, req.cookies?.[AUTH_COOKIE_ACCESS]);
     const { organizationId } = req.body;
 

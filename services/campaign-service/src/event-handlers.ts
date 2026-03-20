@@ -9,7 +9,9 @@ import {
   CHANNEL_TELEGRAM,
   ensureLeadInPipeline,
   delayHoursFromStep,
-  staggeredFirstSendAt,
+  resolveDelayRange,
+  sampleDelaySeconds,
+  staggeredFirstSendAtByOffset,
   type Schedule,
 } from './helpers';
 
@@ -94,7 +96,12 @@ async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
       const delayMs = Math.max(humanJitterMs, stepDelayHours * 3_600_000);
       const nextSendAt = new Date(Date.now() + delayMs);
       await pool.query(
-        `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
+        `UPDATE campaign_participants
+         SET status = 'sent',
+             next_send_at = $1,
+             metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('lastReplyAt', NOW()::text),
+             updated_at = NOW()
+         WHERE id = $2`,
         [nextSendAt, p.id]
       );
       log.info({
@@ -211,7 +218,14 @@ async function addContactToDynamicCampaigns(
   const pipelineIdStr = pipelineId;
 
   for (const c of campaigns.rows) {
-    const aud = (c.target_audience || {}) as { dynamicPipelineId?: string; dynamicStageIds?: string[]; bdAccountId?: string; sendDelaySeconds?: number };
+    const aud = (c.target_audience || {}) as {
+      dynamicPipelineId?: string;
+      dynamicStageIds?: string[];
+      bdAccountId?: string;
+      sendDelaySeconds?: number;
+      sendDelayMinSeconds?: number;
+      sendDelayMaxSeconds?: number;
+    };
     if (!aud.dynamicPipelineId || aud.dynamicPipelineId !== pipelineIdStr || !Array.isArray(aud.dynamicStageIds) || !aud.dynamicStageIds.includes(stageIdStr)) continue;
 
     let bdAccountId: string | null = aud.bdAccountId ? (await pool.query('SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2 AND is_active = true', [aud.bdAccountId, organizationId])).rows[0]?.id || null : null;
@@ -233,15 +247,14 @@ async function addContactToDynamicCampaigns(
     if (!channelId) continue;
 
     const schedule = (c.schedule as Schedule) ?? null;
-    const rawDelay = aud.sendDelaySeconds;
-    const staggerSeconds =
-      rawDelay !== undefined && rawDelay !== null ? Math.max(0, Number(rawDelay)) : 60;
+    const delayRange = resolveDelayRange(aud, 60);
     const ord = await pool.query(
       'SELECT COALESCE(MAX(enqueue_order), -1) + 1 AS n FROM campaign_participants WHERE campaign_id = $1',
       [c.id]
     );
     const enqueueOrder = Number(ord.rows[0]?.n ?? 0);
-    const nextSendAt = staggeredFirstSendAt(new Date(), enqueueOrder, staggerSeconds, schedule);
+    const sampledDelay = sampleDelaySeconds(delayRange);
+    const nextSendAt = staggeredFirstSendAtByOffset(new Date(), enqueueOrder * sampledDelay, schedule);
     await pool.query(
       `INSERT INTO campaign_participants (campaign_id, contact_id, bd_account_id, channel_id, status, current_step, next_send_at, enqueue_order)
        VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6)

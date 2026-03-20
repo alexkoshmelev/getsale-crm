@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { apiClient } from '@/lib/api/client';
+import { fetchBdAccountChatAvatarBlob } from '@/lib/api/bd-accounts';
 import { blobUrlCache, avatarChatKey } from '@/lib/cache/blob-url-cache';
 import type { Lead } from '@/lib/api/pipeline';
 
@@ -41,11 +41,10 @@ function LeadAvatarInner({ lead, bdAccountId, className = 'w-9 h-9' }: LeadAvata
       setSrc(cached);
       return () => { mounted.current = false; setSrc(null); };
     }
-    apiClient
-      .get(`/api/bd-accounts/${bdAccountId}/chats/${telegramId}/avatar`, { responseType: 'blob' })
-      .then((res) => {
-        if (mounted.current && res.data instanceof Blob && res.data.size > 0) {
-          const u = URL.createObjectURL(res.data);
+    fetchBdAccountChatAvatarBlob(bdAccountId, telegramId)
+      .then((blob) => {
+        if (mounted.current && blob) {
+          const u = URL.createObjectURL(blob);
           blobUrlCache.set(key, u);
           setSrc(u);
         }

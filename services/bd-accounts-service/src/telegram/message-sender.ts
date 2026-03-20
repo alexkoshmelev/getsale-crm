@@ -2,6 +2,7 @@
 import { Api } from 'telegram';
 import { getErrorMessage } from '../helpers';
 import { isUsernameLike, resolveUsernameToInputPeer } from './resolve-username';
+import { telegramInvokeWithFloodRetry } from './telegram-invoke-flood';
 import type { TelegramManagerDeps, TelegramClientInfo, StructuredLog } from './types';
 import type { Pool } from 'pg';
 
@@ -83,7 +84,9 @@ export class MessageSender {
     };
 
     const trySend = async (peer: Api.TypeInputPeer | number | string): Promise<Api.Message> => {
-      const message = await client.sendMessage(peer, params);
+      const message = await telegramInvokeWithFloodRetry(this.log, accountId, 'SendMessage', () =>
+        client.sendMessage(peer, params)
+      );
       clientInfo.lastActivity = new Date();
       await this.pool.query(
         'UPDATE bd_accounts SET last_activity = NOW() WHERE id = $1',
@@ -108,7 +111,7 @@ export class MessageSender {
 
       // Username: resolve via contacts.ResolveUsername first (guaranteed delivery, no cache dependency)
       if (typeof peer === 'string' && peer.length > 0 && isUsernameLike(peer)) {
-        const resolved = await resolveUsernameToInputPeer(client, peer);
+        const resolved = await resolveUsernameToInputPeer(client, peer, { log: this.log, accountId });
         if (resolved) {
           if (SEND_DELAY_AFTER_RESOLVE_MS > 0) {
             await new Promise((r) => setTimeout(r, SEND_DELAY_AFTER_RESOLVE_MS));
@@ -150,7 +153,7 @@ export class MessageSender {
           }
 
           if (typeof peerRetry === 'string' && peerRetry.length > 0 && isUsernameLike(peerRetry)) {
-            const resolved = await resolveUsernameToInputPeer(client, peerRetry);
+            const resolved = await resolveUsernameToInputPeer(client, peerRetry, { log: this.log, accountId });
             if (resolved) return trySend(resolved);
             peerRetry = await client.getInputEntity(peerRetry);
           } else if (typeof peerRetry === 'string' && peerRetry.length > 0 && Number.isNaN(Number(peerRetry))) {
@@ -189,8 +192,10 @@ export class MessageSender {
             throw e;
           }
         })();
-      await clientInfo.client.invoke(
-        new Api.messages.SetTyping({ peer, action: new Api.SendMessageTypingAction() })
+      await telegramInvokeWithFloodRetry(this.log, accountId, 'SetTyping', () =>
+        clientInfo.client.invoke(
+          new Api.messages.SetTyping({ peer, action: new Api.SendMessageTypingAction() })
+        )
       );
     } catch (error: unknown) {
       this.log.warn({ message: 'setTyping failed', accountId, chatId, error: getErrorMessage(error) });
@@ -218,12 +223,16 @@ export class MessageSender {
           }
         })();
       if ((entity as any).className === 'InputPeerChannel') {
-        await clientInfo.client.invoke(
-          new Api.channels.ReadHistory({ channel: entity as any, maxId: 0 })
+        await telegramInvokeWithFloodRetry(this.log, accountId, 'channels.ReadHistory', () =>
+          clientInfo.client.invoke(
+            new Api.channels.ReadHistory({ channel: entity as any, maxId: 0 })
+          )
         );
       } else {
-        await clientInfo.client.invoke(
-          new Api.messages.ReadHistory({ peer: entity, maxId: 0 })
+        await telegramInvokeWithFloodRetry(this.log, accountId, 'messages.ReadHistory', () =>
+          clientInfo.client.invoke(
+            new Api.messages.ReadHistory({ peer: entity, maxId: 0 })
+          )
         );
       }
     } catch (error: unknown) {
@@ -249,12 +258,14 @@ export class MessageSender {
         ? peerResolved
         : await client.getInputEntity(peerResolved);
       const replyTo = opts.replyToMsgId != null ? { replyToMsgId: opts.replyToMsgId } : undefined;
-      await client.invoke(
-        new ApiAny.messages.SaveDraft({
-          peer,
-          message: text || '',
-          ...(replyTo ? { replyTo } : {}),
-        })
+      await telegramInvokeWithFloodRetry(this.log, accountId, 'SaveDraft', () =>
+        client.invoke(
+          new ApiAny.messages.SaveDraft({
+            peer,
+            message: text || '',
+            ...(replyTo ? { replyTo } : {}),
+          })
+        )
       );
       clientInfo.lastActivity = new Date();
     } catch (error: unknown) {
@@ -279,13 +290,15 @@ export class MessageSender {
     const fromPeer = typeof fromResolved === 'object' && (fromResolved as any)?.className ? fromResolved : await client.getInputEntity(fromResolved);
     const toPeer = typeof toResolved === 'object' && (toResolved as any)?.className ? toResolved : await client.getInputEntity(toResolved);
     const randomId = BigInt(Math.floor(Math.random() * 1e15)) * BigInt(1e5) + BigInt(Math.floor(Math.random() * 1e5));
-    const result = await client.invoke(
-      new Api.messages.ForwardMessages({
-        fromPeer,
-        toPeer,
-        id: [telegramMessageId],
-        randomId: [randomId],
-      })
+    const result = await telegramInvokeWithFloodRetry(this.log, accountId, 'ForwardMessages', () =>
+      client.invoke(
+        new Api.messages.ForwardMessages({
+          fromPeer,
+          toPeer,
+          id: [telegramMessageId],
+          randomId: [randomId],
+        })
+      )
     );
     clientInfo.lastActivity = new Date();
     await this.pool.query(

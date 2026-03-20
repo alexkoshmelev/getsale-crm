@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { Pool } from 'pg';
 import { CampaignParticipantFilter } from '@getsale/types';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes } from '@getsale/service-core';
+import { asyncHandler, AppError, ErrorCodes, parsePageLimit } from '@getsale/service-core';
 
 interface Deps {
   pool: Pool;
@@ -244,7 +244,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
   router.get('/:id/participants', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
-    const { page = 1, limit = 50, status, filter, bdAccountId, sentFrom, sentTo } = req.query;
+    const { page: pageQ, limit: limitQ, status, filter, bdAccountId, sentFrom, sentTo } = req.query;
     const campaign = await pool.query(
       'SELECT id FROM campaigns WHERE id = $1 AND organization_id = $2',
       [id, organizationId]
@@ -252,9 +252,11 @@ export function participantsRouter({ pool, log }: Deps): Router {
     if (campaign.rows.length === 0) {
       throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
     }
-    const pageNum = Math.max(1, parseInt(String(page), 10));
-    const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10)));
-    const offset = (pageNum - 1) * limitNum;
+    const { page: pageNum, limit: limitNum, offset } = parsePageLimit(
+      { page: pageQ, limit: limitQ } as Record<string, unknown>,
+      50,
+      100
+    );
     let whereStatus = '';
     let whereFilter = '';
     const params: any[] = [id];
@@ -325,16 +327,18 @@ export function participantsRouter({ pool, log }: Deps): Router {
       params
     );
     const rows = (result.rows as any[]).map((r) => {
-      const phase =
-        r.participant_status === 'failed'
-          ? 'failed'
-          : r.shared_chat_created_at
-            ? 'shared'
-            : r.participant_status === 'replied'
-              ? 'replied'
-              : r.first_message_read
-                ? 'read'
-                : 'sent';
+      const st = String(r.participant_status ?? '');
+      const hasSent = r.sent_at != null;
+      const phase = (() => {
+        if (st === 'failed') return 'failed';
+        if (r.shared_chat_created_at) return 'shared';
+        if (st === 'replied') return 'replied';
+        if (hasSent && r.first_message_read) return 'read';
+        if (hasSent) return 'sent';
+        if (st === 'completed') return 'skipped';
+        if (st === 'pending') return 'pending';
+        return 'scheduled';
+      })();
       let last_error: string | null = null;
       if (r.participant_metadata != null) {
         try {

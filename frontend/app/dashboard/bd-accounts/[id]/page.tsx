@@ -3,7 +3,16 @@
 import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { apiClient } from '@/lib/api/client';
+import { getAccountDisplayName, getAccountInitials } from '@/lib/bd-account-display';
+import type { BDAccount, BDAccountProxyConfig } from '@/lib/types/bd-account';
+import {
+  disconnectBdAccount,
+  enableBdAccount,
+  deleteBdAccount,
+  patchBdAccount,
+  getBdAccount,
+  fetchBdAccountAvatarBlob,
+} from '@/lib/api/bd-accounts';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import {
   ArrowLeft,
@@ -27,61 +36,12 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 
-interface ProxyConfig {
-  type: 'socks5' | 'http';
-  host: string;
-  port: number;
-  username?: string;
-  password?: string;
-}
-
-interface BDAccountDetail {
-  id: string;
-  organization_id: string;
-  telegram_id: string;
-  phone_number: string | null;
-  is_active: boolean;
-  connected_at: string | null;
-  last_activity: string | null;
-  created_at: string;
-  sync_status?: string;
-  sync_progress_done?: number;
-  sync_progress_total?: number;
-  sync_error?: string | null;
-  is_owner?: boolean;
-  first_name?: string | null;
-  last_name?: string | null;
-  username?: string | null;
-  bio?: string | null;
-  photo_file_id?: string | null;
-  display_name?: string | null;
-  proxy_config?: ProxyConfig | null;
-}
-
-function getDisplayName(account: BDAccountDetail): string {
-  if (account.display_name?.trim()) return account.display_name.trim();
-  const first = (account.first_name ?? '').trim();
-  const last = (account.last_name ?? '').trim();
-  if (first || last) return [first, last].filter(Boolean).join(' ');
-  if (account.username?.trim()) return account.username.trim();
-  if (account.phone_number?.trim()) return account.phone_number.trim();
-  return account.telegram_id || account.id;
-}
-
-function getInitials(account: BDAccountDetail): string {
-  const name = getDisplayName(account);
-  const parts = name.replace(/@/g, '').trim().split(/\s+/);
-  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase().slice(0, 2);
-  if (name.length >= 2) return name.slice(0, 2).toUpperCase();
-  return name.slice(0, 1).toUpperCase() || '?';
-}
-
 export default function BDAccountCardPage() {
   const params = useParams();
   const router = useRouter();
   const { user: currentUser } = useAuthStore();
   const id = typeof params.id === 'string' ? params.id : '';
-  const [account, setAccount] = useState<BDAccountDetail | null>(null);
+  const [account, setAccount] = useState<BDAccount | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
@@ -102,12 +62,11 @@ export default function BDAccountCardPage() {
     if (!id) return;
     setLoading(true);
     setError(null);
-    apiClient
-      .get(`/api/bd-accounts/${id}`)
-      .then((res) => {
-        setAccount(res.data);
-        setDisplayNameValue(res.data.display_name ?? '');
-        const pc = res.data.proxy_config;
+    getBdAccount(id)
+      .then((data) => {
+        setAccount(data);
+        setDisplayNameValue(data.display_name ?? '');
+        const pc = data.proxy_config;
         if (pc && pc.host) {
           setProxyType(pc.type || 'socks5');
           setProxyHost(pc.host);
@@ -116,24 +75,22 @@ export default function BDAccountCardPage() {
           setProxyPass(pc.password || '');
         }
       })
-      .catch((err: any) => {
-        setError(err.response?.data?.error || err.message || 'Не удалось загрузить аккаунт');
+      .catch((err: unknown) => {
+        const e = err as { response?: { data?: { error?: string; message?: string } }; message?: string };
+        setError(e.response?.data?.error || e.response?.data?.message || e.message || 'Не удалось загрузить аккаунт');
       })
       .finally(() => setLoading(false));
   }, [id]);
 
   useEffect(() => {
     if (!id || !account) return;
-    apiClient
-      .get(`/api/bd-accounts/${id}/avatar`, { responseType: 'blob' })
-      .then((res) => {
-        if (res.data instanceof Blob && res.data.size > 0) {
-          const u = URL.createObjectURL(res.data);
-          blobUrlRef.current = u;
-          setAvatarSrc(u);
-        }
-      })
-      .catch(() => {});
+    fetchBdAccountAvatarBlob(id).then((blob) => {
+      if (blob) {
+        const u = URL.createObjectURL(blob);
+        blobUrlRef.current = u;
+        setAvatarSrc(u);
+      }
+    });
     return () => {
       if (blobUrlRef.current) {
         URL.revokeObjectURL(blobUrlRef.current);
@@ -148,7 +105,7 @@ export default function BDAccountCardPage() {
     setSavingDisplayName(true);
     setActionError(null);
     try {
-      await apiClient.patch(`/api/bd-accounts/${id}`, { display_name: displayNameValue.trim() || null });
+      await patchBdAccount(id, { display_name: displayNameValue.trim() || null });
       setAccount((prev) => (prev ? { ...prev, display_name: displayNameValue.trim() || null } : null));
       setEditingDisplayName(false);
     } catch (err: any) {
@@ -162,7 +119,7 @@ export default function BDAccountCardPage() {
     if (!confirm('Отключить аккаунт? Получение сообщений будет приостановлено до включения.')) return;
     setActionError(null);
     try {
-      await apiClient.post(`/api/bd-accounts/${id}/disconnect`);
+      await disconnectBdAccount(id);
       setAccount((prev) => (prev ? { ...prev, is_active: false } : null));
     } catch (err: any) {
       setActionError(err.response?.data?.error || err.response?.data?.message || 'Ошибка отключения');
@@ -172,7 +129,7 @@ export default function BDAccountCardPage() {
   const handleEnable = async () => {
     setActionError(null);
     try {
-      await apiClient.post(`/api/bd-accounts/${id}/enable`);
+      await enableBdAccount(id);
       setAccount((prev) => (prev ? { ...prev, is_active: true } : null));
     } catch (err: any) {
       setActionError(err.response?.data?.error || err.response?.data?.message || 'Ошибка включения');
@@ -183,7 +140,7 @@ export default function BDAccountCardPage() {
     if (!confirm('Удалить аккаунт навсегда? История сообщений останется, аккаунт будет отвязан.')) return;
     setActionError(null);
     try {
-      await apiClient.delete(`/api/bd-accounts/${id}`);
+      await deleteBdAccount(id);
       router.push('/dashboard/bd-accounts');
     } catch (err: any) {
       setActionError(err.response?.data?.error || err.response?.data?.message || 'Ошибка удаления');
@@ -198,8 +155,8 @@ export default function BDAccountCardPage() {
       const payload = proxyType === 'none'
         ? { proxy_config: null }
         : { proxy_config: { type: proxyType, host: proxyHost.trim(), port: Number(proxyPort), username: proxyUser.trim() || undefined, password: proxyPass.trim() || undefined } };
-      await apiClient.patch(`/api/bd-accounts/${id}`, payload);
-      setAccount((prev) => prev ? { ...prev, proxy_config: proxyType === 'none' ? null : payload.proxy_config as ProxyConfig } : null);
+      await patchBdAccount(id, payload);
+      setAccount((prev) => prev ? { ...prev, proxy_config: proxyType === 'none' ? null : (payload.proxy_config as BDAccountProxyConfig) } : null);
     } catch (err: any) {
       setActionError(err.response?.data?.error || err.response?.data?.message || 'Error saving proxy');
     } finally {
@@ -251,7 +208,7 @@ export default function BDAccountCardPage() {
               />
             ) : (
               <div className="w-24 h-24 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-700 dark:text-blue-300 font-semibold text-2xl">
-                {getInitials(account)}
+                {getAccountInitials(account)}
               </div>
             )}
           </div>
@@ -275,7 +232,7 @@ export default function BDAccountCardPage() {
               ) : (
                 <>
                   <h1 className="text-xl font-bold text-gray-900 dark:text-white">
-                    {getDisplayName(account)}
+                    {getAccountDisplayName(account)}
                   </h1>
                   {account.is_owner && (
                     <button
@@ -291,7 +248,9 @@ export default function BDAccountCardPage() {
               )}
             </div>
             <p className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-1">
-              {account.is_active ? (
+              {account.connection_state === 'reauth_required' ? (
+                <><XCircle className="w-4 h-4 text-red-500" /> Требуется повторный вход</>
+              ) : account.is_active ? (
                 <><CheckCircle2 className="w-4 h-4 text-green-500" /> Подключён</>
               ) : (
                 <><XCircle className="w-4 h-4 text-gray-400" /> Отключён</>
@@ -337,6 +296,12 @@ export default function BDAccountCardPage() {
               <dd className="font-medium text-gray-900 dark:text-white mt-0.5">
                 {new Date(account.last_activity).toLocaleString('ru-RU')}
               </dd>
+            </div>
+          )}
+          {account.last_error_code && (
+            <div>
+              <dt className="text-gray-500 dark:text-gray-400">Последняя ошибка</dt>
+              <dd className="font-medium text-gray-900 dark:text-white mt-0.5">{account.last_error_code}</dd>
             </div>
           )}
         </dl>
@@ -417,7 +382,12 @@ export default function BDAccountCardPage() {
           </Link>
           {account.is_owner && (
             <>
-              {account.is_active ? (
+              {account.connection_state === 'reauth_required' ? (
+                <Button variant="outline" size="sm" onClick={() => router.push('/dashboard/bd-accounts')}>
+                  <Power className="w-4 h-4 mr-2" />
+                  Переподключить через QR/телефон
+                </Button>
+              ) : account.is_active ? (
                 <Button variant="outline" size="sm" onClick={handleDisconnect} title="Отключить (временно)">
                   <PowerOff className="w-4 h-4 mr-2" />
                   Отключить

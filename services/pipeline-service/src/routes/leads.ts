@@ -1,19 +1,12 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
 import crypto from 'crypto';
-import { z } from 'zod';
 import { Counter } from 'prom-client';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes, validate, withOrgContext } from '@getsale/service-core';
-
-const LeadCreateSchema = z.object({
-  contactId: z.string().uuid('contactId must be a valid UUID'),
-  pipelineId: z.string().uuid('pipelineId must be a valid UUID'),
-  stageId: z.string().uuid().optional(),
-  responsibleId: z.string().uuid().optional(),
-});
+import { asyncHandler, AppError, ErrorCodes, validate, withOrgContext, parsePageLimit, buildPagedResponse } from '@getsale/service-core';
+import { PlLeadCreateSchema, type PlLeadCreateInput } from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -48,8 +41,11 @@ export function leadsRouter({ pool, rabbitmq, log, eventPublishTotal }: Deps): R
     }
 
     const stageIdTrim = typeof stageId === 'string' ? stageId.trim() : null;
-    const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10) || 20));
+    const { page: pageNum, limit: limitNum, offset } = parsePageLimit(
+      { page, limit } as Record<string, unknown>,
+      20,
+      100
+    );
 
     const params: unknown[] = [organizationId, pipelineId.trim()];
     let where = 'l.organization_id = $1 AND l.pipeline_id = $2 AND l.deleted_at IS NULL';
@@ -61,7 +57,7 @@ export function leadsRouter({ pool, rabbitmq, log, eventPublishTotal }: Deps): R
     const countResult = await pool.query(`SELECT COUNT(*)::int AS total FROM leads l WHERE ${where}`, params);
     const total = countResult.rows[0]?.total ?? 0;
 
-    params.push(limitNum, (pageNum - 1) * limitNum);
+    params.push(limitNum, offset);
     const limitIdx = params.length - 1;
     const offsetIdx = params.length;
 
@@ -78,16 +74,13 @@ export function leadsRouter({ pool, rabbitmq, log, eventPublishTotal }: Deps): R
       params
     );
 
-    res.json({
-      items: result.rows,
-      pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) },
-    });
+    res.json(buildPagedResponse(result.rows, total, pageNum, limitNum));
   }));
 
   // Add contact to funnel
-  router.post('/leads', validate(LeadCreateSchema), asyncHandler(async (req, res) => {
+  router.post('/leads', validate(PlLeadCreateSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
-    const { contactId, pipelineId, stageId, responsibleId } = req.body as z.infer<typeof LeadCreateSchema>;
+    const { contactId, pipelineId, stageId, responsibleId } = req.body as PlLeadCreateInput;
 
     const contactCheck = await pool.query('SELECT 1 FROM contacts WHERE id = $1 AND organization_id = $2', [contactId, organizationId]);
     if (contactCheck.rows.length === 0) throw new AppError(404, 'Contact not found', ErrorCodes.NOT_FOUND);

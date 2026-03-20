@@ -1,16 +1,8 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
-import { z } from 'zod';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes, requireUser, validate } from '@getsale/service-core';
-
-const ProfileUpdateSchema = z.object({
-  firstName: z.string().max(200).trim().optional().nullable(),
-  lastName: z.string().max(200).trim().optional().nullable(),
-  avatarUrl: z.string().max(2000).trim().optional().nullable(),
-  timezone: z.string().max(128).optional().nullable(),
-  preferences: z.record(z.unknown()).optional(),
-});
+import { asyncHandler, requireUser, validate } from '@getsale/service-core';
+import { UsProfileUpdateSchema } from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -41,7 +33,7 @@ export function profileRouter({ pool, log }: Deps): Router {
     res.json(result.rows[0]);
   }));
 
-  router.put('/profile', validate(ProfileUpdateSchema), asyncHandler(async (req, res) => {
+  router.put('/profile', validate(UsProfileUpdateSchema), asyncHandler(async (req, res) => {
     const { id, organizationId } = req.user;
     const { firstName, lastName, avatarUrl, timezone, preferences } = req.body;
 

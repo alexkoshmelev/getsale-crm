@@ -1,37 +1,12 @@
 import type { Note, Reminder } from '@/lib/api/crm';
 import type { RightPanelTab } from '@/components/messaging/RightWorkspacePanel';
+import type { BDAccount, BdSyncFolder } from '@/lib/types/bd-account';
 
 // ─── Domain Interfaces ───────────────────────────────────────────────
 
-export interface BDAccount {
-  id: string;
-  phone_number: string;
-  telegram_id: string;
-  is_active: boolean;
-  connected_at?: string;
-  last_activity?: string;
-  created_at: string;
-  sync_status?: string;
-  owner_id?: string | null;
-  is_owner?: boolean;
-  first_name?: string | null;
-  last_name?: string | null;
-  username?: string | null;
-  display_name?: string | null;
-  /** Суммарное количество непрочитанных по аккаунту (только по чатам из sync) */
-  unread_count?: number;
-  /** Демо-аккаунт: только данные в БД, отправка отключена */
-  is_demo?: boolean;
-}
+export type { BDAccount };
 
-export interface SyncFolder {
-  id: string;
-  folder_id: number;
-  folder_title: string;
-  order_index: number;
-  is_user_created?: boolean;
-  icon?: string | null;
-}
+export type SyncFolder = BdSyncFolder;
 
 export interface Chat {
   channel: string;

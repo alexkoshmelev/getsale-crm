@@ -11,19 +11,10 @@ export function formatLogArgs(...args: unknown[]): string {
 
 export function buildTelegramProxy(cfg: ProxyConfig | null | undefined): Record<string, unknown> | undefined {
   if (!cfg || !cfg.host || !cfg.port) return undefined;
-  if (cfg.type === 'socks5') {
-    return {
-      ip: cfg.host,
-      port: cfg.port,
-      socksType: 5,
-      ...(cfg.username ? { username: cfg.username } : {}),
-      ...(cfg.password ? { password: cfg.password } : {}),
-    };
-  }
   return {
     ip: cfg.host,
     port: cfg.port,
-    MTProxy: false,
+    socksType: 5,
     ...(cfg.username ? { username: cfg.username } : {}),
     ...(cfg.password ? { password: cfg.password } : {}),
   };

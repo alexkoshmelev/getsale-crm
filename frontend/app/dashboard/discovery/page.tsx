@@ -6,6 +6,9 @@ import {
   Loader2, Play, Pause, Square, Plus, Search, Sparkles, CheckSquare, Settings
 } from 'lucide-react';
 import { apiClient } from '@/lib/api/client';
+import { listBdAccounts } from '@/lib/api/bd-accounts';
+import type { BDAccount } from '@/lib/types/bd-account';
+import { getAccountDisplayName } from '@/lib/bd-account-display';
 import { reportWarning } from '@/lib/error-reporter';
 import {
   fetchDiscoveryTasks,
@@ -34,26 +37,6 @@ import clsx from 'clsx';
 import { formatDistanceToNow } from 'date-fns';
 import { ru } from 'date-fns/locale';
 
-interface BdAccount {
-  id: string;
-  display_name?: string | null;
-  first_name?: string | null;
-  last_name?: string | null;
-  username?: string | null;
-  phone_number?: string | null;
-  is_active?: boolean;
-}
-
-function getAccountDisplayName(account: BdAccount): string {
-  if (account.display_name?.trim()) return account.display_name.trim();
-  const first = (account.first_name ?? '').trim();
-  const last = (account.last_name ?? '').trim();
-  if (first || last) return [first, last].filter(Boolean).join(' ');
-  if (account.username?.trim()) return account.username.trim();
-  if (account.phone_number?.trim()) return account.phone_number.trim();
-  return '—';
-}
-
 interface Campaign {
   id: string;
   name: string;
@@ -62,12 +45,18 @@ interface Campaign {
 type TabType = 'tasks' | 'new_search' | 'new_parse';
 
 const TASKS_PAGE_SIZE = 10;
+const MAX_DISCOVERY_BD_ACCOUNTS = 10;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function toggleAccountId(ids: string[], id: string): string[] {
+  if (ids.includes(id)) return ids.filter((x) => x !== id);
+  return [...ids, id].slice(-MAX_DISCOVERY_BD_ACCOUNTS);
+}
 
 export default function ContactDiscoveryPage() {
   const { t, i18n } = useTranslation();
   const [activeTab, setActiveTab] = useState<TabType>('tasks');
-  const [accounts, setAccounts] = useState<BdAccount[]>([]);
+  const [accounts, setAccounts] = useState<BDAccount[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,32 +66,21 @@ export default function ContactDiscoveryPage() {
   const [taskPage, setTaskPage] = useState(1);
   const [loadingTasks, setLoadingTasks] = useState(false);
   const [selectedTask, setSelectedTask] = useState<DiscoveryTask | null>(null);
-  const [selectedChatsForParse, setSelectedChatsForParse] = useState<(SearchGroupItem & { disabled?: boolean })[]>([]);
 
   // Search task form state
   const [searchName, setSearchName] = useState('');
-  const [searchAccountId, setSearchAccountId] = useState('');
+  const [searchAccountIds, setSearchAccountIds] = useState<string[]>([]);
   const [searchType, setSearchType] = useState<SearchType>('all');
   const [queriesText, setQueriesText] = useState('');
   const [aiTopic, setAiTopic] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
-
-  // Parse task form state
-  const [parseName, setParseName] = useState('');
-  const [parseAccountId, setParseAccountId] = useState('');
-  const [parseLinksText, setParseLinksText] = useState('');
-  const [parseMode, setParseMode] = useState<'all' | 'active'>('all');
-  const [postDepth, setPostDepth] = useState<number | ''>(100);
-  const [excludeAdmins, setExcludeAdmins] = useState(false);
-  const [leaveAfter, setLeaveAfter] = useState(false);
-  const [exportCampaignId, setExportCampaignId] = useState('');
-  const [newCampaignName, setNewCampaignName] = useState('');
 
   // New parse flow (smart resolve + strategy)
   const [parseStep, setParseStep] = useState<1 | 2 | 3 | 4>(1);
   const [parseResolveAccountId, setParseResolveAccountId] = useState('');
   const [resolvedSources, setResolvedSources] = useState<ResolvedSource[]>([]);
   const [parseDepth, setParseDepth] = useState<'fast' | 'standard' | 'deep'>('standard');
+  const [parseChannelEngagement, setParseChannelEngagement] = useState<'default' | 'reactions'>('default');
   const [parseExcludeAdmins, setParseExcludeAdmins] = useState(true);
   const [parseListName, setParseListName] = useState('');
   const [parseAccountIds, setParseAccountIds] = useState<string[]>([]);
@@ -116,12 +94,11 @@ export default function ContactDiscoveryPage() {
   }, [accounts, parseResolveAccountId]);
   
   const loadAccounts = useCallback(() => {
-    apiClient.get<BdAccount[]>('/api/bd-accounts').then((r) => {
-      const list = Array.isArray(r.data) ? r.data.filter((a) => a.is_active !== false) : [];
+    listBdAccounts().then((rows) => {
+      const list = rows.filter((a) => a.is_active !== false);
       setAccounts(list);
       if (list.length > 0) {
-        setSearchAccountId(list[0].id);
-        setParseAccountId(list[0].id);
+        setSearchAccountIds([list[0].id]);
         setParseResolveAccountId((prev) => prev || list[0].id);
       }
     }).catch(() => setAccounts([]));
@@ -195,67 +172,26 @@ export default function ContactDiscoveryPage() {
   const handleCreateSearchTask = () => {
     const lines = queriesText.split(/\n/).map((s) => s.trim()).filter(Boolean);
     if (!searchName.trim()) return setError(t('discovery.errors.enterTaskName'));
-    if (!searchAccountId) return setError(t('discovery.errors.selectBdAccount'));
+    const bdIds = searchAccountIds.filter((id) => UUID_REGEX.test(id)).slice(0, MAX_DISCOVERY_BD_ACCOUNTS);
+    if (bdIds.length === 0) return setError(t('discovery.errors.selectBdAccount'));
     if (lines.length === 0) return setError(t('discovery.errors.enterQueries'));
-    
+
     setError(null);
+    const bdParams =
+      bdIds.length === 1 ? { bdAccountId: bdIds[0] } : { accountIds: bdIds };
     createDiscoveryTask({
       name: searchName.trim(),
       type: 'search',
       params: {
-        bdAccountId: searchAccountId,
+        ...bdParams,
         searchType,
         queries: lines,
-        limitPerQuery: 50
-      }
+        limitPerQuery: 50,
+      },
     }).then(() => {
       setSearchName('');
       setQueriesText('');
       setAiTopic('');
-      setActiveTab('tasks');
-      setTaskPage(1);
-      loadTasks(1);
-    }).catch(e => setError(e?.message || t('discovery.errors.createFailed')));
-  };
-
-  const handleCreateParseTask = () => {
-    if (!parseName.trim()) return setError(t('discovery.errors.enterTaskName'));
-    if (!parseAccountId) return setError(t('discovery.errors.selectBdAccount'));
-    
-    let targetChats: { chatId: string, title?: string, peerType?: string }[] = [];
-    if (selectedChatsForParse.length > 0) {
-      targetChats = selectedChatsForParse.filter(c => !c.disabled).map(c => ({ chatId: c.chatId, title: c.title, peerType: c.peerType }));
-      if (targetChats.length === 0) return setError(t('discovery.errors.selectOneGroup'));
-    } else {
-      const lines = parseLinksText.split(/\n/).map((s) => s.trim()).filter(Boolean);
-      if (lines.length === 0) return setError(t('discovery.errors.enterLinksOrSelect'));
-      targetChats = lines.map(l => ({ chatId: l }));
-    }
-
-    if (parseMode === 'active' && (!postDepth || postDepth < 1 || postDepth > 2000)) {
-       return setError(t('discovery.errors.postDepthRange'));
-    }
-
-    setError(null);
-    createDiscoveryTask({
-      name: parseName.trim(),
-      type: 'parse',
-      params: {
-        bdAccountId: parseAccountId,
-        chats: targetChats,
-        parseMode,
-        postDepth: parseMode === 'active' ? postDepth : undefined,
-        excludeAdmins,
-        leaveAfter,
-        campaignId: exportCampaignId || undefined,
-        campaignName: !exportCampaignId && newCampaignName.trim() ? newCampaignName.trim() : undefined,
-      }
-    }).then(() => {
-      setParseName('');
-      setParseLinksText('');
-      setSelectedChatsForParse([]);
-      setNewCampaignName('');
-      setExportCampaignId('');
       setActiveTab('tasks');
       setTaskPage(1);
       loadTasks(1);
@@ -275,13 +211,21 @@ export default function ContactDiscoveryPage() {
      if (task.type !== 'search') return;
      const groups = task.results?.groups || [];
      if (groups.length === 0) return setError(t('discovery.errors.noGroupsInTask'));
-     const bdAccountId = task.params?.bdAccountId ?? task.params?.accountId;
+     const rawIds = Array.isArray((task.params as { accountIds?: unknown })?.accountIds)
+       ? (task.params as { accountIds: string[] }).accountIds.filter((x) => typeof x === 'string' && UUID_REGEX.test(x))
+       : [];
+     const bdAccountId =
+       rawIds[0] ??
+       (typeof (task.params as { bdAccountId?: string })?.bdAccountId === 'string'
+         ? (task.params as { bdAccountId: string }).bdAccountId
+         : undefined) ??
+       (typeof (task.params as { accountId?: string })?.accountId === 'string'
+         ? (task.params as { accountId: string }).accountId
+         : undefined);
      if (!bdAccountId) return setError(t('discovery.errors.noBdAccountInTask'));
-     setSelectedChatsForParse(groups);
-     setParseAccountId(bdAccountId);
-     setParseName(`Parse from: ${task.name}`);
+     const idsForParse = rawIds.length > 0 ? rawIds.slice(0, MAX_DISCOVERY_BD_ACCOUNTS) : [bdAccountId];
      setResolvedSources(
-       groups.map((g: any) => ({
+       groups.map((g: SearchGroupItem) => ({
          input: g.chatId,
          chatId: String(g.chatId ?? ''),
          title: g.title != null ? String(g.title) : String(g.chatId ?? ''),
@@ -291,7 +235,8 @@ export default function ContactDiscoveryPage() {
        }))
      );
      setParseResolveAccountId(bdAccountId);
-     setParseAccountIds([bdAccountId]);
+     setParseAccountIds(idsForParse);
+     setParseListName(`Parse from: ${task.name}`);
      setParseStep(2);
      setActiveTab('new_parse');
      setSelectedTask(null);
@@ -330,6 +275,7 @@ export default function ContactDiscoveryPage() {
         accountIds,
         listName: parseListName.trim() || undefined,
         ...(parseCreateCampaign && parseListName.trim() ? { campaignName: parseListName.trim() } : {}),
+        ...(parseChannelEngagement === 'reactions' ? { channelEngagement: 'reactions' as const } : {}),
       });
       setParseTaskId(taskId);
       setParseStep(3);
@@ -362,6 +308,7 @@ export default function ContactDiscoveryPage() {
     setResolvedSources([]);
     setParseTaskId(null);
     setParseResult(null);
+    setParseChannelEngagement('default');
   };
 
   const renderProgressBar = (progress: number, total: number) => {
@@ -593,15 +540,21 @@ export default function ContactDiscoveryPage() {
              </div>
              
              <div>
-                <label className="block text-sm font-medium mb-1">{t('discovery.bdAccount')}</label>
-                <select
-                  value={searchAccountId}
-                  onChange={(e) => setSearchAccountId(e.target.value)}
-                  className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800"
-                >
-                  <option value="" disabled>{t('discovery.selectAccount')}</option>
-                  {accounts.map(a => <option key={a.id} value={a.id}>{getAccountDisplayName(a)}</option>)}
-                </select>
+                <label className="block text-sm font-medium mb-2">{t('parsing.accountsLabel')}</label>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">{t('parsing.accountsHint')}</p>
+                <div className="flex flex-wrap gap-2">
+                  {accounts.map((a) => (
+                    <label key={a.id} className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={searchAccountIds.includes(a.id)}
+                        onChange={() => setSearchAccountIds((prev) => toggleAccountId(prev, a.id))}
+                        className="w-4 h-4 rounded text-blue-600"
+                      />
+                      <span className="text-sm">{getAccountDisplayName(a)}</span>
+                    </label>
+                  ))}
+                </div>
              </div>
 
              <div>
@@ -678,6 +631,8 @@ export default function ContactDiscoveryPage() {
                    onDepthChange={setParseDepth}
                    excludeAdmins={parseExcludeAdmins}
                    onExcludeAdminsChange={setParseExcludeAdmins}
+                   channelEngagement={parseChannelEngagement}
+                   onChannelEngagementChange={setParseChannelEngagement}
                    listName={parseListName}
                    onListNameChange={setParseListName}
                    createCampaign={parseCreateCampaign}

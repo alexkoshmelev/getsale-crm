@@ -119,6 +119,20 @@ export function AccountList({
                   ) : (
                     <span className="text-xs text-amber-600 dark:text-amber-400 font-medium shrink-0">{t('messaging.syncing')}</span>
                   )}
+                  <span
+                    className={`inline-flex w-2 h-2 rounded-full shrink-0 ${
+                      account.proxy_status === 'ok' ? 'bg-green-500' :
+                      account.proxy_status === 'error' ? 'bg-red-500' :
+                      account.proxy_status === 'configured' ? 'bg-amber-500' :
+                      'bg-gray-400'
+                    }`}
+                    title={
+                      account.proxy_status === 'ok' ? 'Proxy OK' :
+                      account.proxy_status === 'error' ? (account.last_proxy_error || 'Proxy Error') :
+                      account.proxy_status === 'configured' ? 'Proxy Configured' :
+                      'No Proxy'
+                    }
+                  />
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -127,7 +141,9 @@ export function AccountList({
                     {account.unread_count! > 99 ? '99+' : account.unread_count}
                   </span>
                 )}
-                {account.is_active ? (
+                {account.connection_state === 'reauth_required' ? (
+                  <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                ) : account.is_active ? (
                   <CheckCircle2 className="w-4 h-4 text-green-500 dark:text-green-400 flex-shrink-0" />
                 ) : (
                   <XCircle className="w-4 h-4 text-muted-foreground flex-shrink-0" />

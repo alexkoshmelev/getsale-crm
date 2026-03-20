@@ -9,6 +9,7 @@ import {
   fetchCampaignAgents,
   fetchContactsForPicker,
   uploadAudienceFromCsv,
+  uploadAudienceFromUsernameList,
   fetchGroupSources,
   fetchGroupSourceContacts,
   fetchTelegramSourceKeywords,
@@ -34,6 +35,18 @@ interface CampaignAudienceScheduleProps {
   campaign: Campaign;
   onUpdate: () => void;
 }
+
+function formatSeconds(value: number): string {
+  const v = Math.max(0, Math.floor(value));
+  const m = Math.floor(v / 60);
+  const s = v % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+const DELAY_MIN_SECONDS = 60;
+const DELAY_MAX_SECONDS = 3600;
+const DELAY_DEFAULT_MIN_SECONDS = 180;
+const DELAY_DEFAULT_MAX_SECONDS = 300;
 
 const DAYS_OF_WEEK = [
   { value: 0, labelKey: 'campaigns.daySun' },
@@ -69,9 +82,17 @@ export function CampaignAudienceSchedule({
     const single = campaign.target_audience?.bdAccountId;
     return single ? [single] : [];
   });
-  const [sendDelaySeconds, setSendDelaySeconds] = useState<number>(() =>
-    campaign.target_audience?.sendDelaySeconds ?? 60
-  );
+  const [sendDelayMinSeconds, setSendDelayMinSeconds] = useState<number>(() => {
+    const legacy = campaign.target_audience?.sendDelaySeconds;
+    const raw = campaign.target_audience?.sendDelayMinSeconds ?? (legacy != null ? legacy : DELAY_DEFAULT_MIN_SECONDS);
+    return Math.max(DELAY_MIN_SECONDS, Math.min(DELAY_MAX_SECONDS, Math.floor(raw)));
+  });
+  const [sendDelayMaxSeconds, setSendDelayMaxSeconds] = useState<number>(() => {
+    const legacy = campaign.target_audience?.sendDelaySeconds;
+    const raw = campaign.target_audience?.sendDelayMaxSeconds ?? (legacy != null ? legacy : DELAY_DEFAULT_MAX_SECONDS);
+    const clamped = Math.max(DELAY_MIN_SECONDS, Math.min(DELAY_MAX_SECONDS, Math.floor(raw)));
+    return Math.max(clamped, sendDelayMinSeconds);
+  });
   type AudienceSource = 'database' | 'file' | 'group';
   const [audienceSource, setAudienceSource] = useState<AudienceSource>(() => {
     const s = (campaign.target_audience?.filters as { audienceSource?: AudienceSource })?.audienceSource;
@@ -82,7 +103,17 @@ export function CampaignAudienceSchedule({
   const [csvLoading, setCsvLoading] = useState(false);
   const [csvError, setCsvError] = useState<string | null>(null);
   const [csvResult, setCsvResult] = useState<{ created: number; matched: number } | null>(null);
+  const [usernameListText, setUsernameListText] = useState('');
+  const [usernameListLoading, setUsernameListLoading] = useState(false);
+  const [usernameListError, setUsernameListError] = useState<string | null>(null);
+  const [usernameListResult, setUsernameListResult] = useState<{
+    created: number;
+    matched: number;
+    skipped: number;
+  } | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const delayTrackRef = useRef<HTMLDivElement | null>(null);
+  const [draggingDelayThumb, setDraggingDelayThumb] = useState<'min' | 'max' | null>(null);
   const [leadSectionOpen, setLeadSectionOpen] = useState(() => !!(campaign.lead_creation_settings?.trigger && (campaign.pipeline_id || campaign.lead_creation_settings)));
   const csvInputRef = useRef<HTMLInputElement>(null);
   const [timezone, setTimezone] = useState<string>(() =>
@@ -169,13 +200,16 @@ export function CampaignAudienceSchedule({
     enrichContactsBeforeStart?: boolean;
     randomizeWithAI?: boolean;
     sendDelaySeconds?: number;
+    sendDelayMinSeconds?: number;
+    sendDelayMaxSeconds?: number;
   } & LeadOverrides) => {
     const ids = overrides?.contactIds ?? contactIds;
     const src = overrides?.audienceSource ?? audienceSource;
     const accIds = overrides?.bdAccountIds ?? (overrides?.bdAccountId !== undefined ? [overrides.bdAccountId!] : bdAccountIds);
     const enrich = overrides?.enrichContactsBeforeStart ?? enrichContactsBeforeStart;
     const randomizeAI = overrides?.randomizeWithAI ?? randomizeWithAI;
-    const delay = overrides?.sendDelaySeconds ?? sendDelaySeconds;
+    const delayMin = Math.max(DELAY_MIN_SECONDS, Math.min(DELAY_MAX_SECONDS, Math.floor(overrides?.sendDelayMinSeconds ?? sendDelayMinSeconds)));
+    const delayMax = Math.max(delayMin, Math.min(DELAY_MAX_SECONDS, Math.floor(overrides?.sendDelayMaxSeconds ?? sendDelayMaxSeconds)));
     const trigger = overrides?.leadTrigger ?? leadTrigger;
     const pipeline = overrides?.leadPipelineId ?? leadPipelineId;
     const stage = overrides?.leadStageId ?? leadStageId;
@@ -193,7 +227,9 @@ export function CampaignAudienceSchedule({
           contactIds: ids.length > 0 ? ids : undefined,
           bdAccountId: accIds.length === 1 ? accIds[0] : undefined,
           bdAccountIds: accIds.length > 0 ? accIds : undefined,
-          sendDelaySeconds: Math.max(0, Math.min(3600, delay)),
+          sendDelaySeconds: delayMin, // legacy compatibility for old workers/reads
+          sendDelayMinSeconds: delayMin,
+          sendDelayMaxSeconds: delayMax,
           enrichContactsBeforeStart: enrich,
           randomizeWithAI: randomizeAI,
         },
@@ -215,7 +251,40 @@ export function CampaignAudienceSchedule({
     } finally {
       setSaving(false);
     }
-  }, [campaignId, contactIds, audienceSource, bdAccountIds, companyId, pipelineId, sendDelaySeconds, enrichContactsBeforeStart, randomizeWithAI, leadTrigger, leadPipelineId, leadStageId, leadResponsibleId, onUpdate]);
+  }, [campaignId, contactIds, audienceSource, bdAccountIds, companyId, pipelineId, sendDelayMinSeconds, sendDelayMaxSeconds, enrichContactsBeforeStart, randomizeWithAI, leadTrigger, leadPipelineId, leadStageId, leadResponsibleId, onUpdate]);
+
+  const percentFromSeconds = (seconds: number): number =>
+    ((seconds - DELAY_MIN_SECONDS) / (DELAY_MAX_SECONDS - DELAY_MIN_SECONDS)) * 100;
+
+  const secondsFromClientX = useCallback((clientX: number): number => {
+    const el = delayTrackRef.current;
+    if (!el) return sendDelayMinSeconds;
+    const rect = el.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return Math.round(DELAY_MIN_SECONDS + ratio * (DELAY_MAX_SECONDS - DELAY_MIN_SECONDS));
+  }, [sendDelayMinSeconds]);
+
+  useEffect(() => {
+    if (!draggingDelayThumb || !isDraft) return;
+    const onMove = (e: MouseEvent) => {
+      const v = secondsFromClientX(e.clientX);
+      if (draggingDelayThumb === 'min') {
+        setSendDelayMinSeconds(Math.min(v, sendDelayMaxSeconds));
+      } else {
+        setSendDelayMaxSeconds(Math.max(v, sendDelayMinSeconds));
+      }
+    };
+    const onUp = () => {
+      setDraggingDelayThumb(null);
+      saveAudience({ sendDelayMinSeconds, sendDelayMaxSeconds });
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [draggingDelayThumb, isDraft, saveAudience, secondsFromClientX, sendDelayMaxSeconds, sendDelayMinSeconds]);
 
   return (
     <div className="space-y-8 max-w-2xl">
@@ -312,6 +381,69 @@ export function CampaignAudienceSchedule({
             )}
             <p className="text-xs text-muted-foreground">{t('campaigns.uploadCsvHint')}</p>
             {contactIds.length > 0 && <p className="text-sm text-foreground">{t('campaigns.contactsSelected', { count: contactIds.length })}</p>}
+
+            <div className="pt-4 mt-4 border-t border-border space-y-2">
+              <p className="text-sm font-medium text-foreground">{t('campaigns.usernameListTitle')}</p>
+              <p className="text-xs text-muted-foreground">{t('campaigns.usernameListHint')}</p>
+              <textarea
+                className="w-full min-h-[140px] px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm font-mono focus:outline-hidden focus:ring-2 focus:ring-ring disabled:opacity-60"
+                value={usernameListText}
+                onChange={(e) => {
+                  setUsernameListText(e.target.value);
+                  setUsernameListError(null);
+                  setUsernameListResult(null);
+                }}
+                placeholder={t('campaigns.usernameListPlaceholder')}
+                disabled={!isDraft || usernameListLoading}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={!isDraft || usernameListLoading || !usernameListText.trim()}
+                onClick={async () => {
+                  if (!isDraft || !usernameListText.trim()) return;
+                  setUsernameListError(null);
+                  setUsernameListResult(null);
+                  setUsernameListLoading(true);
+                  try {
+                    const data = await uploadAudienceFromUsernameList(campaignId, { text: usernameListText });
+                    setContactIds(data.contactIds);
+                    saveAudience({ contactIds: data.contactIds });
+                    setUsernameListResult({
+                      created: data.created,
+                      matched: data.matched,
+                      skipped: data.skipped,
+                    });
+                  } catch (err: unknown) {
+                    let message = t('campaigns.usernameListError', { defaultValue: 'Import failed' });
+                    if (err && typeof err === 'object' && 'response' in err) {
+                      const res = (err as { response?: { data?: { error?: string; message?: string }; status?: number } }).response;
+                      if (res?.data?.error) message = res.data.error;
+                      else if (res?.data?.message) message = res.data.message;
+                      else if (res?.status) message = `${message} (${res.status})`;
+                    } else if (err instanceof Error) message = err.message;
+                    else if (typeof err === 'string') message = err;
+                    setUsernameListError(message);
+                    console.error('Username list import failed', err);
+                  } finally {
+                    setUsernameListLoading(false);
+                  }
+                }}
+              >
+                {usernameListLoading ? t('campaigns.uploading', { defaultValue: 'Загрузка...' }) : t('campaigns.usernameListSubmit')}
+              </Button>
+              {usernameListError && <p className="text-sm text-destructive">{usernameListError}</p>}
+              {usernameListResult && !usernameListError && (
+                <p className="text-sm text-foreground">
+                  {t('campaigns.usernameListResult', {
+                    created: usernameListResult.created,
+                    matched: usernameListResult.matched,
+                    skipped: usernameListResult.skipped,
+                    total: usernameListResult.created + usernameListResult.matched,
+                  })}
+                </p>
+              )}
+            </div>
           </div>
         )}
 
@@ -392,28 +524,66 @@ export function CampaignAudienceSchedule({
       <section className="rounded-xl border border-border bg-card p-6">
         <h3 className="text-sm font-semibold text-foreground mb-1">{t('campaigns.sendDelayLabel')}</h3>
         <p className="text-xs text-muted-foreground mb-3">{t('campaigns.sendDelayHint')}</p>
-        <div className="flex flex-wrap gap-2">
-          {([
-            { value: 30, label: t('campaigns.delaySeconds', { count: 30 }) },
-            { value: 60, label: t('campaigns.delayMinutes', { count: 1 }) },
-            { value: 120, label: t('campaigns.delayMinutes', { count: 2 }) },
-            { value: 300, label: t('campaigns.delayMinutes', { count: 5 }) },
-            { value: 600, label: t('campaigns.delayMinutes', { count: 10 }) },
-          ] as const).map((opt) => (
+        <div className="space-y-4">
+          <div
+            ref={delayTrackRef}
+            className="relative h-8"
+            onMouseDown={(e) => {
+              if (!isDraft) return;
+              const v = secondsFromClientX(e.clientX);
+              const distToMin = Math.abs(v - sendDelayMinSeconds);
+              const distToMax = Math.abs(v - sendDelayMaxSeconds);
+              if (distToMin <= distToMax) {
+                const nextMin = Math.min(v, sendDelayMaxSeconds);
+                setSendDelayMinSeconds(nextMin);
+                saveAudience({ sendDelayMinSeconds: nextMin, sendDelayMaxSeconds });
+              } else {
+                const nextMax = Math.max(v, sendDelayMinSeconds);
+                setSendDelayMaxSeconds(nextMax);
+                saveAudience({ sendDelayMinSeconds, sendDelayMaxSeconds: nextMax });
+              }
+            }}
+          >
+            <div className="absolute top-1/2 -translate-y-1/2 h-1.5 w-full rounded-full bg-muted/60" />
+            <div
+              className="absolute top-1/2 -translate-y-1/2 h-1.5 rounded-full bg-primary"
+              style={{
+                left: `${percentFromSeconds(sendDelayMinSeconds)}%`,
+                right: `${100 - percentFromSeconds(sendDelayMaxSeconds)}%`,
+              }}
+            />
             <button
-              key={opt.value}
               type="button"
               disabled={!isDraft}
-              onClick={() => { setSendDelaySeconds(opt.value); saveAudience({ sendDelaySeconds: opt.value }); }}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
-                sendDelaySeconds === opt.value
-                  ? 'border-primary bg-primary/10 text-primary'
-                  : 'border-border bg-card text-muted-foreground hover:border-primary/50'
-              } disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              {opt.label}
-            </button>
-          ))}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setDraggingDelayThumb('min');
+              }}
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-primary border-2 border-background shadow"
+              style={{ left: `${percentFromSeconds(sendDelayMinSeconds)}%`, zIndex: draggingDelayThumb === 'min' ? 40 : 20 }}
+              aria-label="Delay min"
+            />
+            <button
+              type="button"
+              disabled={!isDraft}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setDraggingDelayThumb('max');
+              }}
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-primary border-2 border-background shadow"
+              style={{ left: `${percentFromSeconds(sendDelayMaxSeconds)}%`, zIndex: draggingDelayThumb === 'max' ? 40 : 30 }}
+              aria-label="Delay max"
+            />
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-muted-foreground -mt-1">
+            <span>{formatSeconds(DELAY_MIN_SECONDS)}</span>
+            <span>{formatSeconds(DELAY_MAX_SECONDS)}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {`Range: ${formatSeconds(sendDelayMinSeconds)} - ${formatSeconds(sendDelayMaxSeconds)}`}
+          </p>
         </div>
       </section>
 

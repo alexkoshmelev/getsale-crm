@@ -11,7 +11,7 @@ import {
   type Company, type Contact,
 } from '@/lib/api/crm';
 import { resolveContact } from '@/lib/api/messaging';
-import { apiClient } from '@/lib/api/client';
+import { listBdAccounts } from '@/lib/api/bd-accounts';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Select, type SelectOption } from '@/components/ui/Select';
@@ -66,10 +66,8 @@ export function ContactDetail({
       .catch((err: unknown) => {
         const status = (err as { response?: { status?: number } })?.response?.status;
         if (status === 404 && contact.telegram_id) {
-          apiClient
-            .get<{ id: string; is_active?: boolean }[]>('/api/bd-accounts')
-            .then((res) => {
-              const list = Array.isArray(res.data) ? res.data : [];
+          listBdAccounts()
+            .then((list) => {
               const account = list.find((a) => a.is_active !== false) ?? list[0];
               if (account?.id)
                 setAvatarResolution({ bd_account_id: account.id, channel_id: contact.telegram_id! });

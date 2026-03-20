@@ -6,8 +6,12 @@ import { randomBytes, randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
-import { z } from 'zod';
 import type { RedisClient } from '@getsale/utils';
+import {
+  AuTwoFactorVerifySetupSchema,
+  AuTwoFactorDisableSchema,
+  AuTwoFactorValidateSchema,
+} from '../validation';
 import {
   extractBearerToken,
   signAccessToken,
@@ -23,21 +27,6 @@ const VALIDATE_RATE_LIMIT = 5;
 const VALIDATE_RATE_WINDOW_MS = 15 * 60 * 1000;
 const RECOVERY_CODE_COUNT = 8;
 const RECOVERY_CODE_LENGTH = 8;
-
-const VerifySetupSchema = z.object({
-  token: z.string().min(6).max(10),
-  secret: z.string().min(1),
-});
-
-const Disable2FASchema = z.object({
-  token: z.string().min(6).max(10),
-});
-
-const Validate2FASchema = z.object({
-  tempToken: z.string().min(1),
-  token: z.string().min(6).max(10).optional(),
-  recoveryCode: z.string().min(1).optional(),
-}).refine((d) => d.token != null || d.recoveryCode != null, { message: 'Verification code or recovery code is required', path: ['token'] });
 
 interface Deps {
   pool: Pool;
@@ -81,7 +70,7 @@ export function twoFactorRouter({ pool, log, redis }: Deps): Router {
     res.json({ secret: secret.base32, qrCodeUrl });
   }));
 
-  router.post('/verify-setup', validate(VerifySetupSchema), asyncHandler(async (req, res) => {
+  router.post('/verify-setup', validate(AuTwoFactorVerifySetupSchema), asyncHandler(async (req, res) => {
     const { userId } = authenticateRequest(req);
     const { token, secret } = req.body;
 
@@ -129,7 +118,7 @@ export function twoFactorRouter({ pool, log, redis }: Deps): Router {
     res.json({ enabled: true, recoveryCodes });
   }));
 
-  router.post('/disable', validate(Disable2FASchema), asyncHandler(async (req, res) => {
+  router.post('/disable', validate(AuTwoFactorDisableSchema), asyncHandler(async (req, res) => {
     const { userId } = authenticateRequest(req);
     const { token } = req.body;
 
@@ -177,7 +166,7 @@ export function twoFactorRouter({ pool, log, redis }: Deps): Router {
     res.json({ disabled: true });
   }));
 
-  router.post('/validate', validate(Validate2FASchema), asyncHandler(async (req, res) => {
+  router.post('/validate', validate(AuTwoFactorValidateSchema), asyncHandler(async (req, res) => {
     await checkRateLimit(redis, {
       keyPrefix: 'auth_rate:2fa_validate',
       clientId: getClientIp(req) || 'unknown',

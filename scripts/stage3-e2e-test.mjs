@@ -677,7 +677,11 @@ async function runStage4Scenarios(h, pipelineId) {
   console.log('\n--- Проверка метрик: GET /metrics — STAGE_5 + SLA ---');
   const metricsChecks = [
     { url: CRM_URL, name: 'crm-service', metrics: ['deal_created_total', 'deal_stage_changed_total'] },
-    { url: PIPELINE_URL, name: 'pipeline-service', metrics: ['event_publish_total', 'event_publish_failed_total'] },
+    {
+      url: PIPELINE_URL,
+      name: 'pipeline-service',
+      metrics: ['event_publish_total', 'event_publish_failed_total', 'rabbitmq_dlq_messages_total'],
+    },
     { url: AUTOMATION_URL, name: 'automation-service', metrics: ['automation_events_total', 'automation_processed_total', 'automation_skipped_total', 'automation_failed_total', 'deal_created_total', 'automation_dlq_total', 'automation_sla_published_total', 'automation_sla_processed_total', 'automation_sla_skipped_total'] },
   ];
   for (const { url, name, metrics } of metricsChecks) {

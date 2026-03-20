@@ -51,8 +51,71 @@ export class ConnectionManager {
     this.dialogFiltersCache = deps.dialogFiltersCache;
   }
 
+  private getFatalAuthCode(message: string): string | null {
+    const msg = String(message || '').toUpperCase();
+    const fatalCodes = [
+      'AUTH_KEY_UNREGISTERED',
+      'SESSION_REVOKED',
+      'AUTH_KEY_INVALID',
+      'USER_DEACTIVATED',
+      'PHONE_NUMBER_BANNED',
+    ];
+    for (const code of fatalCodes) {
+      if (msg.includes(code)) return code;
+    }
+    return null;
+  }
+
+  private async markReauthRequired(accountId: string, errorMessage: string): Promise<void> {
+    const code = this.getFatalAuthCode(errorMessage) ?? 'AUTH_SESSION_INVALID';
+    await this.pool.query(
+      `UPDATE bd_accounts
+       SET connection_state = 'reauth_required',
+           disconnect_reason = $2,
+           last_error_code = $3,
+           last_error_at = NOW(),
+           is_active = false,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [accountId, errorMessage.slice(0, 2000), code]
+    );
+    await this.updateAccountStatus(accountId, 'error', `${code}: ${errorMessage}`);
+    await this.disconnectAccount(accountId);
+  }
+
+  private async setConnectionState(
+    accountId: string,
+    state: 'connected' | 'reconnecting' | 'disconnected'
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE bd_accounts
+       SET connection_state = $2::varchar,
+           disconnect_reason = CASE WHEN $2::text = 'connected' THEN NULL ELSE disconnect_reason END,
+           last_error_code = CASE WHEN $2::text = 'connected' THEN NULL ELSE last_error_code END,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [accountId, state]
+    );
+  }
+
   setSessionManager(sm: SessionManager): void { this.sessionManager = sm; }
   setEventHandlerSetup(ehs: EventHandlerSetup): void { this.eventHandlerSetup = ehs; }
+
+  private async handleClientRuntimeError(accountId: string, err: unknown): Promise<void> {
+    const msg = getErrorMessage(err);
+    const fatalCode = this.getFatalAuthCode(msg);
+    if (fatalCode) {
+      this.log.error({ message: 'Fatal Telegram auth error, reauth required', accountId, fatalCode, error: msg });
+      await this.markReauthRequired(accountId, msg);
+      return;
+    }
+    if (msg === 'TIMEOUT' || msg.includes('TIMEOUT')) {
+      this.log.warn({ message: 'Telegram client runtime TIMEOUT, scheduling reconnect', accountId });
+      this.scheduleReconnectAfterTimeout(accountId);
+      return;
+    }
+    this.log.warn({ message: 'Telegram runtime warning', accountId, error: msg });
+  }
 
   // --- Distributed locking ---
   private lockKey(accountId: string): string {
@@ -112,10 +175,7 @@ export class ConnectionManager {
       try {
         await client.invoke(new Api.updates.GetState());
       } catch (e: unknown) {
-        const msg = getErrorMessage(e);
-        if (msg !== 'TIMEOUT' && !msg.includes('builder.resolve')) {
-          this.log.warn({ message: `GetState keepalive failed for ${accountId}`, error: msg });
-        }
+        await this.handleClientRuntimeError(accountId, e);
       }
     }, this.UPDATE_KEEPALIVE_MS);
     this.updateKeepaliveIntervals.set(accountId, interval);
@@ -176,16 +236,6 @@ export class ConnectionManager {
       await client.connect();
       this.log.info({ message: `Connected account ${accountId} (${phoneNumber})` });
 
-      (client as any)._errorHandler = async (err: unknown) => {
-        const msg = getErrorMessage(err);
-        if (msg === 'TIMEOUT' || msg.includes('TIMEOUT')) {
-          this.log.warn({ message: 'Update loop TIMEOUT (GramJS), scheduling reconnect', accountId });
-          this.scheduleReconnectAfterTimeout(accountId);
-        } else {
-          this.log.error({ message: 'Telegram client error', accountId, error: msg });
-        }
-      };
-
       await new Promise(resolve => setTimeout(resolve, 2000));
 
       try {
@@ -225,13 +275,20 @@ export class ConnectionManager {
       this.clients.set(accountId, clientInfo);
       this.startLockHeartbeat(accountId, this.instanceId);
       this.startUpdateKeepalive(accountId, client);
+      await this.setConnectionState(accountId, 'connected');
       await this.updateAccountStatus(accountId, 'connected', 'Successfully connected');
 
       return client;
     } catch (error: unknown) {
       if (!this.clients.has(accountId)) await this.releaseLock(accountId);
-      this.log.error({ message: `Error connecting account ${accountId}`, error: getErrorMessage(error) });
-      await this.updateAccountStatus(accountId, 'error', error.message || 'Connection failed');
+      const msg = getErrorMessage(error);
+      this.log.error({ message: `Error connecting account ${accountId}`, error: msg });
+      const fatalCode = this.getFatalAuthCode(msg);
+      if (fatalCode) {
+        await this.markReauthRequired(accountId, msg);
+      } else {
+        await this.updateAccountStatus(accountId, 'error', msg || 'Connection failed');
+      }
       throw error;
     }
   }
@@ -265,6 +322,7 @@ export class ConnectionManager {
     } catch (error: unknown) {
       this.log.warn({ message: `Failed to release lock for account ${accountId} (proceeding)`, error: getErrorMessage(error) });
     }
+    await this.setConnectionState(accountId, 'disconnected');
   }
 
   async updateAccountStatus(accountId: string, status: string, message?: string): Promise<void> {
@@ -289,19 +347,23 @@ export class ConnectionManager {
 
   // --- Reconnect ---
   scheduleReconnectAfterTimeout(accountId: string): void {
-    const existing = this.reconnectAfterTimeoutTimeouts.get(accountId);
-    if (existing) {
-      clearTimeout(existing);
-      this.reconnectAfterTimeoutTimeouts.delete(accountId);
-    }
-    const timeout = setTimeout(() => {
-      this.reconnectAfterTimeoutTimeouts.delete(accountId);
-      this.reconnectOneAccountAfterTimeout(accountId).catch((err) => {
-        this.log.error({ message: 'reconnectOneAccountAfterTimeout failed', accountId, error: String(err) });
-      });
-    }, this.RECONNECT_AFTER_TIMEOUT_DEBOUNCE_MS);
-    this.reconnectAfterTimeoutTimeouts.set(accountId, timeout);
-    this.log.info({ message: 'TIMEOUT from update loop — scheduled reconnect of account in N s', accountId, debounceSec: this.RECONNECT_AFTER_TIMEOUT_DEBOUNCE_MS / 1000 });
+    this.pool.query('SELECT connection_state, is_active FROM bd_accounts WHERE id = $1', [accountId]).then((r) => {
+      const s = r.rows[0] as { connection_state?: string; is_active?: boolean } | undefined;
+      if (!s || s.connection_state === 'reauth_required' || s.is_active === false) return;
+      const existing = this.reconnectAfterTimeoutTimeouts.get(accountId);
+      if (existing) {
+        clearTimeout(existing);
+        this.reconnectAfterTimeoutTimeouts.delete(accountId);
+      }
+      const timeout = setTimeout(() => {
+        this.reconnectAfterTimeoutTimeouts.delete(accountId);
+        this.reconnectOneAccountAfterTimeout(accountId).catch((err) => {
+          this.log.error({ message: 'reconnectOneAccountAfterTimeout failed', accountId, error: String(err) });
+        });
+      }, this.RECONNECT_AFTER_TIMEOUT_DEBOUNCE_MS);
+      this.reconnectAfterTimeoutTimeouts.set(accountId, timeout);
+      this.log.info({ message: 'TIMEOUT from update loop — scheduled reconnect of account in N s', accountId, debounceSec: this.RECONNECT_AFTER_TIMEOUT_DEBOUNCE_MS / 1000 });
+    }).catch(() => {});
   }
 
   private async reconnectOneAccountAfterTimeout(accountId: string): Promise<void> {
@@ -377,19 +439,23 @@ export class ConnectionManager {
   scheduleReconnect(accountId: string): void {
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo) return;
+    this.pool.query('SELECT connection_state, is_active FROM bd_accounts WHERE id = $1', [accountId]).then((r) => {
+      const s = r.rows[0] as { connection_state?: string; is_active?: boolean } | undefined;
+      if (!s || s.connection_state === 'reauth_required' || s.is_active === false) return;
+      this.setConnectionState(accountId, 'reconnecting').catch(() => {});
 
-    if (clientInfo.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
-      this.log.error({ message: `Max reconnect attempts reached for ${accountId}` });
-      this.updateAccountStatus(accountId, 'error', 'Max reconnect attempts reached');
-      return;
-    }
+      if (clientInfo.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+        this.log.error({ message: `Max reconnect attempts reached for ${accountId}` });
+        this.updateAccountStatus(accountId, 'error', 'Max reconnect attempts reached');
+        return;
+      }
 
-    const existing = this.reconnectIntervals.get(accountId);
-    if (existing) {
-      clearInterval(existing);
-    }
+      const existing = this.reconnectIntervals.get(accountId);
+      if (existing) {
+        clearInterval(existing);
+      }
 
-    const interval = setTimeout(async () => {
+      const interval = setTimeout(async () => {
       try {
         clientInfo.reconnectAttempts++;
         this.log.info({ message: `Attempting to reconnect account ${accountId} (attempt ${clientInfo.reconnectAttempts})` });
@@ -418,13 +484,20 @@ export class ConnectionManager {
 
         clientInfo.reconnectAttempts = 0;
         this.reconnectIntervals.delete(accountId);
-      } catch (error: unknown) {
-        this.log.error({ message: `Reconnection failed for ${accountId}`, error: getErrorMessage(error) });
-        this.scheduleReconnect(accountId);
-      }
-    }, this.RECONNECT_DELAY);
+        } catch (error: unknown) {
+          const msg = getErrorMessage(error);
+          const fatalCode = this.getFatalAuthCode(msg);
+          if (fatalCode) {
+            await this.markReauthRequired(accountId, msg);
+            return;
+          }
+          this.log.error({ message: `Reconnection failed for ${accountId}`, error: msg });
+          this.scheduleReconnect(accountId);
+        }
+      }, this.RECONNECT_DELAY);
 
-    this.reconnectIntervals.set(accountId, interval);
+      this.reconnectIntervals.set(accountId, interval);
+    }).catch(() => {});
   }
 
   // --- Lifecycle ---
@@ -433,7 +506,7 @@ export class ConnectionManager {
       const result = await this.pool.query(
         `SELECT id, organization_id, phone_number, api_id, api_hash, session_string, session_encrypted
          FROM bd_accounts
-         WHERE is_active = true AND (is_demo IS NOT TRUE) AND session_string IS NOT NULL AND session_string != ''`
+         WHERE is_active = true AND (is_demo IS NOT TRUE) AND session_string IS NOT NULL AND session_string != '' AND COALESCE(connection_state, '') != 'reauth_required'`
       );
 
       for (const account of result.rows) {

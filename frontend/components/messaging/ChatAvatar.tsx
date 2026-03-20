@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { Users } from 'lucide-react';
-import { apiClient } from '@/lib/api/client';
+import { fetchBdAccountChatAvatarBlob, isLikelyAvatarImageBlob } from '@/lib/api/bd-accounts';
 import { blobUrlCache, avatarChatKey } from '@/lib/cache/blob-url-cache';
 import type { Chat } from '@/app/dashboard/messaging/types';
 import { getChatDisplayName, getChatInitials } from '@/app/dashboard/messaging/utils';
@@ -33,16 +33,12 @@ function ChatAvatarInner({ bdAccountId, chatId, chat, className = 'w-10 h-10' }:
     }
     const accountId = bdAccountId.trim();
     const cId = chatId.trim();
-    apiClient
-      .get(`/api/bd-accounts/${accountId}/chats/${cId}/avatar`, { responseType: 'blob' })
-      .then((res) => {
-        if (!mounted.current) return;
-        const blob = res.data;
-        if (blob instanceof Blob && blob.size > 0 && (blob.type.startsWith('image/') || blob.type === 'application/octet-stream')) {
-          const u = URL.createObjectURL(blob);
-          blobUrlCache.set(key, u);
-          setSrc(u);
-        }
+    fetchBdAccountChatAvatarBlob(accountId, cId)
+      .then((blob) => {
+        if (!mounted.current || !blob || !isLikelyAvatarImageBlob(blob)) return;
+        const u = URL.createObjectURL(blob);
+        blobUrlCache.set(key, u);
+        setSrc(u);
       })
       .catch(() => {});
     return () => { mounted.current = false; setSrc(null); };

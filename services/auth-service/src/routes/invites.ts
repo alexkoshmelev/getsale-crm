@@ -1,17 +1,13 @@
 import { Router } from 'express';
 import { Pool } from 'pg';
-import { z } from 'zod';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes } from '@getsale/service-core';
+import { AuInviteTokenParamSchema } from '../validation';
 import { extractBearerToken } from '../helpers';
 import { AUTH_COOKIE_ACCESS } from '../cookies';
 
-const InviteTokenParamSchema = z.object({
-  token: z.string().min(1, 'Token is required').max(512).regex(/^[a-zA-Z0-9_-]+$/, 'Invalid token format'),
-});
-
 function parseInviteToken(params: { token?: string }): string {
-  const parsed = InviteTokenParamSchema.safeParse(params);
+  const parsed = AuInviteTokenParamSchema.safeParse(params);
   if (!parsed.success) {
     throw new AppError(400, 'Invalid invite token format', ErrorCodes.BAD_REQUEST);
   }

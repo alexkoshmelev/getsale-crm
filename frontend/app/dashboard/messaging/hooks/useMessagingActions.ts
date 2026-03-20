@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
+import {
+  postBdAccountChatLoadOlderHistory,
+  clearBdAccountDraft,
+  postBdAccountForward,
+  deleteBdAccountChat,
+  patchBdAccountChatFolders,
+  createBdAccountCustomFolder,
+  reorderBdAccountSyncFolders,
+  patchBdAccountSyncFolder,
+  deleteBdAccountSyncFolder,
+} from '@/lib/api/bd-accounts';
 import { reportError, reportWarning } from '@/lib/error-reporter';
 import { useToast } from '@/lib/contexts/toast-context';
 import type { Chat, Message, SyncFolder, LeadContext } from '../types';
@@ -71,10 +82,8 @@ export function useMessagingActions(
     try {
       if (s.selectedChat.channel === 'telegram' && !s.historyExhausted) {
         try {
-          const loadRes = await apiClient.post<{ added?: number; exhausted?: boolean }>(
-            `/api/bd-accounts/${s.selectedAccountId}/chats/${s.selectedChat.channel_id}/load-older-history`,
-          );
-          if (loadRes.data?.exhausted === true) s.setHistoryExhausted(true);
+          const loadRes = await postBdAccountChatLoadOlderHistory(s.selectedAccountId, s.selectedChat.channel_id);
+          if (loadRes.exhausted === true) s.setHistoryExhausted(true);
         } catch { /* continue */ }
       }
       const response = await apiClient.get('/api/messaging/messages', {
@@ -135,7 +144,7 @@ export function useMessagingActions(
         const seen = new Set<string>();
         return next.filter((m) => { if (seen.has(m.id)) return false; seen.add(m.id); return true; });
       });
-      if (s.selectedAccountId && s.selectedChat) apiClient.post(`/api/bd-accounts/${s.selectedAccountId}/draft`, { channelId: s.selectedChat.channel_id, text: '' }).catch((err) => {
+      if (s.selectedAccountId && s.selectedChat) clearBdAccountDraft(s.selectedAccountId, s.selectedChat.channel_id).catch((err) => {
         reportWarning('Clear draft after send failed', { error: err, component: 'useMessagingActions', action: 'sendMessage' });
       });
       if (s.selectedChat.conversation_id) s.setNewLeads((prev) => prev.filter((c) => c.conversation_id !== s.selectedChat!.conversation_id));
@@ -191,7 +200,7 @@ export function useMessagingActions(
     if (telegramId == null) { toast.error(t('messaging.forwardError')); return; }
     s.setForwardingToChatId(toChatId);
     try {
-      await apiClient.post(`/api/bd-accounts/${s.selectedAccountId}/forward`, { fromChatId: s.selectedChat.channel_id, toChatId, telegramMessageId: telegramId });
+      await postBdAccountForward(s.selectedAccountId, { fromChatId: s.selectedChat.channel_id, toChatId, telegramMessageId: telegramId });
       s.setForwardModal(null); s.setForwardingToChatId(null);
       if (toChatId === s.selectedChat.channel_id) await fetchMessages(s.selectedAccountId, s.selectedChat);
     } catch (err: unknown) {
@@ -226,7 +235,7 @@ export function useMessagingActions(
     if (!window.confirm(t('messaging.deleteChatConfirm'))) return;
     s.setChatContextMenu(null);
     try {
-      await apiClient.delete(`/api/bd-accounts/${s.selectedAccountId}/chats/${chat.channel_id}`);
+      await deleteBdAccountChat(s.selectedAccountId, chat.channel_id);
       s.setChats((prev) => prev.filter((c) => c.channel_id !== chat.channel_id));
       s.setPinnedChannelIds((prev) => prev.filter((id) => id !== chat.channel_id));
       if (s.selectedChat?.channel_id === chat.channel_id) { s.setSelectedChat(null); s.setMessages([]); }
@@ -245,7 +254,7 @@ export function useMessagingActions(
     const hasFolder = current.includes(folderId);
     const newIds = hasFolder ? current.filter((id) => id !== folderId) : [...current, folderId];
     try {
-      await apiClient.patch(`/api/bd-accounts/${s.selectedAccountId}/chats/${chat.channel_id}/folder`, { folder_ids: newIds });
+      await patchBdAccountChatFolders(s.selectedAccountId, chat.channel_id, newIds);
       const updated = { ...chat, folder_ids: newIds, folder_id: newIds[0] ?? null };
       s.setChats((prev) => prev.map((c) => c.channel_id === chat.channel_id ? updated : c));
       s.setChatContextMenu((prev) =>
@@ -257,7 +266,7 @@ export function useMessagingActions(
   const handleChatFoldersClear = useCallback(async (chat: Chat) => {
     if (!s.selectedAccountId) return;
     try {
-      await apiClient.patch(`/api/bd-accounts/${s.selectedAccountId}/chats/${chat.channel_id}/folder`, { folder_ids: [] });
+      await patchBdAccountChatFolders(s.selectedAccountId, chat.channel_id, []);
       const updated = { ...chat, folder_ids: [], folder_id: null };
       s.setChats((prev) => prev.map((c) => c.channel_id === chat.channel_id ? updated : c));
       s.setChatContextMenu((prev) =>
@@ -268,25 +277,25 @@ export function useMessagingActions(
 
   const handleCreateFolder = useCallback(async (folder_title: string, icon: string | null) => {
     if (!s.selectedAccountId) return null;
-    const res = await apiClient.post<SyncFolder>(`/api/bd-accounts/${s.selectedAccountId}/sync-folders/custom`, { folder_title: folder_title.trim().slice(0, 12) || t('messaging.folderNewDefault'), icon });
-    return res.data ?? null;
+    return createBdAccountCustomFolder(s.selectedAccountId, {
+      folder_title: folder_title.trim().slice(0, 12) || t('messaging.folderNewDefault'),
+      icon,
+    });
   }, [s.selectedAccountId, t]);
 
   const handleReorderFolders = useCallback(async (order: string[]) => {
     if (!s.selectedAccountId) return null;
-    const res = await apiClient.patch<SyncFolder[]>(`/api/bd-accounts/${s.selectedAccountId}/sync-folders/order`, { order });
-    return Array.isArray(res.data) ? res.data : null;
+    return reorderBdAccountSyncFolders(s.selectedAccountId, order);
   }, [s.selectedAccountId]);
 
   const handleUpdateFolder = useCallback(async (folderRowId: string, data: { folder_title?: string; icon?: string | null }) => {
     if (!s.selectedAccountId) return null;
-    const res = await apiClient.patch<SyncFolder>(`/api/bd-accounts/${s.selectedAccountId}/sync-folders/${folderRowId}`, data);
-    return res.data ?? null;
+    return patchBdAccountSyncFolder(s.selectedAccountId, folderRowId, data);
   }, [s.selectedAccountId]);
 
   const handleDeleteFolder = useCallback(async (folderRowId: string) => {
     if (!s.selectedAccountId) return;
-    await apiClient.delete(`/api/bd-accounts/${s.selectedAccountId}/sync-folders/${folderRowId}`);
+    await deleteBdAccountSyncFolder(s.selectedAccountId, folderRowId);
   }, [s.selectedAccountId]);
 
   const handleFolderDeleted = useCallback((folderId: number) => { s.setSelectedFolderId((prev) => prev === folderId ? 0 : prev); }, []);

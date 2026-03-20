@@ -88,21 +88,27 @@ export function getSyncListQuery(): string {
   `;
 }
 
-/** SQL for default chats list (no bdAccountId; uses latest_per_chat + bd_account_sync_chats). */
-export function getDefaultChatsQuery(channelParam: string): string {
+/**
+ * Default chats list (no bdAccountId). Sync metadata comes from $2::json (bd-accounts internal API),
+ * not from reading bd_account_sync_chats in messaging (A1).
+ * $1 = organization_id, $2 = json array of { bd_account_id, telegram_chat_id, title, peer_type, folder_id }.
+ * $3 = channel filter when hasChannelFilter.
+ */
+export function getDefaultChatsQuery(hasChannelFilter: boolean): string {
+  const channelSql = hasChannelFilter ? ' AND m.channel = $3' : '';
   return `
     WITH latest_per_chat AS (
       SELECT DISTINCT ON (m.organization_id, m.channel, m.channel_id, m.bd_account_id)
         m.organization_id, m.channel, m.channel_id, m.bd_account_id, m.contact_id
       FROM messages m
-      WHERE m.organization_id = $1${channelParam}
+      WHERE m.organization_id = $1${channelSql}
       ORDER BY m.organization_id, m.channel, m.channel_id, m.bd_account_id, COALESCE(m.telegram_date, m.created_at) DESC NULLS LAST
     ),
     unread_per_chat AS (
       SELECT m.organization_id, m.channel, m.channel_id, m.bd_account_id,
              COUNT(*) FILTER (WHERE m.unread = true) AS unread_count
       FROM messages m
-      WHERE m.organization_id = $1${channelParam}
+      WHERE m.organization_id = $1${channelSql}
       GROUP BY m.organization_id, m.channel, m.channel_id, m.bd_account_id
     )
     SELECT
@@ -149,7 +155,13 @@ export function getDefaultChatsQuery(channelParam: string): string {
     FROM latest_per_chat m
     LEFT JOIN contacts c ON c.id = m.contact_id
     LEFT JOIN unread_per_chat u ON u.organization_id = m.organization_id AND u.channel = m.channel AND u.channel_id = m.channel_id AND u.bd_account_id = m.bd_account_id
-    LEFT JOIN bd_account_sync_chats s ON s.bd_account_id = m.bd_account_id AND s.telegram_chat_id = m.channel_id
+    LEFT JOIN json_to_recordset($2::json) AS s(
+      bd_account_id uuid,
+      telegram_chat_id text,
+      title text,
+      peer_type text,
+      folder_id int
+    ) ON s.bd_account_id = m.bd_account_id AND s.telegram_chat_id = m.channel_id
     LEFT JOIN bd_accounts ba ON ba.id = m.bd_account_id
     LEFT JOIN conversations conv ON conv.organization_id = m.organization_id AND conv.bd_account_id IS NOT DISTINCT FROM m.bd_account_id AND conv.channel = m.channel AND conv.channel_id = m.channel_id
     LEFT JOIN LATERAL (
@@ -162,7 +174,7 @@ export function getDefaultChatsQuery(channelParam: string): string {
     ) l ON true
     LEFT JOIN stages st ON st.id = l.stage_id
     LEFT JOIN pipelines p ON p.id = l.pipeline_id
-    WHERE m.organization_id = $1${channelParam}
+    WHERE m.organization_id = $1${channelSql}
     ORDER BY last_message_at DESC NULLS LAST
   `;
 }
@@ -206,9 +218,9 @@ export async function runSyncListQuery(
 export async function runDefaultChatsQuery(
   client: PoolClient,
   params: (string | number)[],
-  channelParam: string
+  hasChannelFilter: boolean
 ): Promise<ChatListRow[]> {
-  const result = await client.query(getDefaultChatsQuery(channelParam), params);
+  const result = await client.query(getDefaultChatsQuery(hasChannelFilter), params);
   const rows = result.rows as ChatListRow[];
   return normalizeChatRows(rows);
 }

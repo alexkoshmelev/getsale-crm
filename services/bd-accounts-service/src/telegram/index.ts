@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import type { Counter } from 'prom-client';
 import { ServiceHttpClient } from '@getsale/service-core';
 import { RabbitMQClient, RedisClient } from '@getsale/utils';
 import { Logger } from '@getsale/logger';
@@ -25,6 +26,7 @@ import { MessageDb } from './message-db';
 import { ContactManager } from './contact-manager';
 import { MessageSync } from './message-sync';
 import { ChatSync } from './chat-sync';
+import { dialogMatchesFilter, getFilterIncludeExcludePeerIds } from './chat-sync-dialogs';
 import { MessageSender } from './message-sender';
 import { FileHandler } from './file-handler';
 import { ReactionHandler } from './reaction-handler';
@@ -57,7 +59,8 @@ export class TelegramManager {
     rabbitmq: RabbitMQClient,
     redis?: RedisClient | null,
     logger?: Logger,
-    messagingClient?: ServiceHttpClient | null
+    messagingClient?: ServiceHttpClient | null,
+    messageDbSqlBypassCounter?: Counter | null
   ) {
     const svcLog: Logger = logger ?? { info() {}, warn() {}, error() {} } as Logger;
     const log = {
@@ -86,7 +89,7 @@ export class TelegramManager {
     this.authHandler = new AuthHandler(this.deps);
     this.qrLogin = new QrLogin(this.deps);
     this.eventHandlerSetup = new EventHandlerSetup(this.deps);
-    this.messageDb = new MessageDb(pool, log, messagingClient ?? null);
+    this.messageDb = new MessageDb(pool, log, messagingClient ?? null, messageDbSqlBypassCounter ?? null);
     this.contactManager = new ContactManager(this.deps);
     this.messageHandler = new MessageHandler(this.deps);
     this.messageSync = new MessageSync(this.deps);
@@ -194,6 +197,17 @@ export class TelegramManager {
   async getActiveParticipants(accountId: string, chatId: string, depth: number, excludeAdmins?: boolean) {
     return this.chatSync.getActiveParticipants(accountId, chatId, depth, excludeAdmins);
   }
+  async getCommentGroupParticipants(
+    accountId: string,
+    channelId: string,
+    linkedChatId: string,
+    options?: { postLimit?: number; maxRepliesPerPost?: number; excludeAdmins?: boolean }
+  ) {
+    return this.chatSync.getCommentGroupParticipants(accountId, channelId, linkedChatId, options);
+  }
+  async getReactionContributors(accountId: string, chatId: string, options?: { historyLimit?: number }) {
+    return this.chatSync.getReactionContributors(accountId, chatId, options);
+  }
   async leaveChat(accountId: string, chatId: string): Promise<void> { return this.chatSync.leaveChat(accountId, chatId); }
   async resolveChatFromInput(accountId: string, input: string) { return this.chatSync.resolveChatFromInput(accountId, input); }
   async resolveSourceFromInput(accountId: string, input: string): Promise<ResolvedSource> { return this.chatSync.resolveSourceFromInput(accountId, input); }
@@ -210,17 +224,17 @@ export class TelegramManager {
     return this.chatSync.deleteMessageInTelegram(accountId, channelId, telegramMessageId);
   }
 
-  // Static methods delegated to ChatSync
+  // Static helpers live in chat-sync-dialogs.ts (C3)
   static dialogMatchesFilter(
     dialog: { id: string; isUser?: boolean; isGroup?: boolean; isChannel?: boolean },
     filterRaw: unknown,
     includePeerIds: Set<string>,
     excludePeerIds: Set<string>
   ): boolean {
-    return ChatSync.dialogMatchesFilter(dialog, filterRaw, includePeerIds, excludePeerIds);
+    return dialogMatchesFilter(dialog, filterRaw, includePeerIds, excludePeerIds);
   }
   static getFilterIncludeExcludePeerIds(filterRaw: unknown): { include: Set<string>; exclude: Set<string> } {
-    return ChatSync.getFilterIncludeExcludePeerIds(filterRaw);
+    return getFilterIncludeExcludePeerIds(filterRaw);
   }
 
   // --- Sending ---

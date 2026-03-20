@@ -69,6 +69,48 @@ groups:
           summary: "RabbitMQ event publish failures"
           description: "Event publish failure rate above 0.1/s for 5 minutes."
 
+      # Consumer DLQ: incremented when a handler fails after max retries (see shared/utils rabbitmq.ts).
+      # Metric is registered on each backend /metrics; scrape any service that consumes domain events.
+      - alert: RabbitMqConsumerDlq
+        expr: sum(increase(rabbitmq_dlq_messages_total[15m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RabbitMQ consumer DLQ received messages"
+          description: "At least one domain event was moved to a service DLQ (*.dlq). Inspect queue label on rabbitmq_dlq_messages_total, fix root cause, then requeue from Management UI if needed."
+
+      # A2: bd-accounts wrote to messages locally because messaging orphan internal API failed (see RUNBOOK_ORPHAN_MESSAGES.md).
+      - alert: BdAccountsMessagingOrphanFallback
+        expr: increase(bd_accounts_messaging_orphan_fallback_total[1h]) >= 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BD-accounts used local orphan fallback for messages"
+          description: "At least one account delete fell back to UPDATE messages in bd-accounts. Check messaging-service health and logs for 'orphaning messages locally'. See docs/RUNBOOK_ORPHAN_MESSAGES.md."
+
+      # A3: MessageDb ran direct SQL to messages/conversations (no messaging client — misconfig or tests). Normal prod: counter stays 0.
+      - alert: BdAccountsMessageDbSqlBypass
+        expr: increase(bd_accounts_message_db_sql_bypass_total[1h]) >= 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BD-accounts MessageDb used SQL bypass for messages"
+          description: "Telegram persistence hit local SQL instead of messaging internal API. Check MESSAGING_SERVICE_URL, messaging-service health, and logs for 'message_db_sql_bypass'. See ai_docs/develop/TABLE_OWNERSHIP_A1.md (A3)."
+
+      # B3: campaign-service worker defers sends when CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT is set and the same bd_account_id sent recently (see services/campaign-service/src/campaign-loop.ts).
+      # Counter stays at 0 if env is 0 (default). Elevated rate may mean aggressive gap tuning or very dense queues per account.
+      - alert: CampaignMinGapDeferElevated
+        expr: increase(campaign_min_gap_defer_total[30m]) > 50
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Campaign worker: many min-gap deferrals"
+          description: "campaign_min_gap_defer_total rose by more than 50 in 30m. Review CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT and campaign load per BD account. See docs/DEPLOYMENT.md (campaign-service worker)."
+
       - alert: AIRateLimitHits
         expr: rate(http_requests_total{status="429", job="ai-service"}[15m]) > 1
         for: 15m
@@ -77,3 +119,26 @@ groups:
         annotations:
           summary: "AI rate limiting triggered frequently"
           description: "AI service returning 429 status codes frequently."
+
+      # B1: ServiceHttpClient outbound calls (inter_service_http_*), per scraping job + downstream client label.
+      - alert: InterServiceHttpErrorShareElevated
+        expr: |
+          sum by (job, client) (increase(inter_service_http_requests_total{outcome!="success",outcome!="circuit_open"}[15m]))
+          /
+          sum by (job, client) (increase(inter_service_http_requests_total[15m]))
+          > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated inter-service HTTP failures ({{ $labels.job }} → {{ $labels.client }})"
+          description: "More than 25% of outbound ServiceHttpClient calls ended with non-success outcome in 15m (excluding circuit_open). See docs/DEPLOYMENT.md (inter_service_http_*)."
+
+      - alert: InterServiceHttpCircuitReject
+        expr: sum by (job, client) (increase(inter_service_http_circuit_reject_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker rejected outbound calls ({{ $labels.job }} → {{ $labels.client }})"
+          description: "ServiceHttpClient circuit open — requests were not sent. Check downstream health and SERVICE_HTTP_CB_* / timeouts."

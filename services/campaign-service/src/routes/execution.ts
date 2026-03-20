@@ -6,7 +6,7 @@ import { EventType, CampaignStartedEvent, CampaignPausedEvent } from '@getsale/e
 import { CampaignStatus } from '@getsale/types';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, withOrgContext } from '@getsale/service-core';
-import { staggeredFirstSendAt, type Schedule } from '../helpers';
+import { resolveDelayRange, sampleDelaySeconds, staggeredFirstSendAtByOffset, type Schedule } from '../helpers';
 
 interface Deps {
   pool: Pool;
@@ -49,13 +49,12 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
       bdAccountId?: string;
       bdAccountIds?: string[];
       sendDelaySeconds?: number;
+      sendDelayMinSeconds?: number;
+      sendDelayMaxSeconds?: number;
     };
     const limit = Math.min(audience.limit ?? 5000, 10000);
     const schedule = (campaign.schedule ?? {}) as Schedule;
-    const staggerSeconds =
-      typeof audience.sendDelaySeconds === 'number' && Number.isFinite(audience.sendDelaySeconds)
-        ? Math.max(0, audience.sendDelaySeconds)
-        : 60;
+    const delayRange = resolveDelayRange(audience, 60);
 
     let contactsQuery: string;
     const queryParams: any[] = [organizationId];
@@ -110,6 +109,16 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
     const contactsResult = await pool.query(contactsQuery, queryParams);
     const contacts = contactsResult.rows;
 
+    const hadExplicitContactIds =
+      Array.isArray(audience.contactIds) && audience.contactIds.length > 0;
+    if (hadExplicitContactIds && contacts.length === 0) {
+      throw new AppError(
+        400,
+        'None of the selected contacts have a Telegram ID or username. Add Telegram data to contacts or enable enrich-before-start.',
+        ErrorCodes.VALIDATION
+      );
+    }
+
     const bdAccountIdsRaw = audience.bdAccountIds ?? (audience.bdAccountId ? [audience.bdAccountId] : []);
     const bdAccountIdsFiltered = bdAccountIdsRaw.filter((id): id is string => typeof id === 'string');
     let accountIds: string[] = [];
@@ -133,7 +142,7 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
 
     const now = new Date();
     let insertedCount = 0;
-    let queueIndex = 0;
+    let cumulativeOffsetSeconds = 0;
     let contactIndex = 0;
     for (const row of contacts) {
       let bdAccountId = accountIds.length > 0 ? accountIds[contactIndex % accountIds.length]! : null;
@@ -153,17 +162,17 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
         }
       }
       if (!channelId || !bdAccountId) continue;
-      const nextSendAt = staggeredFirstSendAt(now, queueIndex, staggerSeconds, schedule);
+      const nextSendAt = staggeredFirstSendAtByOffset(now, cumulativeOffsetSeconds, schedule);
       const ins = await pool.query(
         `INSERT INTO campaign_participants (campaign_id, contact_id, bd_account_id, channel_id, status, current_step, next_send_at, enqueue_order)
          VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6)
          ON CONFLICT (campaign_id, contact_id) DO NOTHING
          RETURNING id`,
-        [id, row.contact_id, bdAccountId, channelId, nextSendAt, queueIndex]
+        [id, row.contact_id, bdAccountId, channelId, nextSendAt, insertedCount]
       );
       if (ins.rowCount && ins.rows.length > 0) {
         insertedCount++;
-        queueIndex++;
+        cumulativeOffsetSeconds += sampleDelaySeconds(delayRange);
       }
     }
 

@@ -1,4 +1,5 @@
 import { apiClient } from './client';
+import { enrichContactsViaBdAccounts } from './bd-accounts';
 
 export type CampaignStatus = 'draft' | 'active' | 'paused' | 'completed';
 
@@ -12,6 +13,8 @@ export interface CampaignTargetAudience {
   /** Multiple BD accounts for the campaign; system distributes participants round-robin. */
   bdAccountIds?: string[];
   sendDelaySeconds?: number;
+  sendDelayMinSeconds?: number;
+  sendDelayMaxSeconds?: number;
   /** Rephrase message text via AI (OpenRouter) for randomization. */
   randomizeWithAI?: boolean;
   /** Перед запуском обогащать контакты из Telegram (getEntity → first_name, last_name, username). */
@@ -129,7 +132,15 @@ export interface CampaignParticipant {
 }
 
 /** PHASE 2.5 — участник с полями для воронки (статус по этапу, даты, conversation_id). */
-export type CampaignParticipantPhase = 'sent' | 'read' | 'replied' | 'shared' | 'failed';
+export type CampaignParticipantPhase =
+  | 'sent'
+  | 'read'
+  | 'replied'
+  | 'shared'
+  | 'failed'
+  | 'pending'
+  | 'scheduled'
+  | 'skipped';
 
 export interface CampaignParticipantRow {
   participant_id: string;
@@ -465,11 +476,7 @@ export async function enrichContactsFromTelegram(
   contactIds: string[],
   bdAccountId?: string
 ): Promise<{ enriched: number }> {
-  const { data } = await apiClient.post<{ enriched: number }>('/api/bd-accounts/enrich-contacts', {
-    contactIds,
-    ...(bdAccountId ? { bdAccountId } : {}),
-  });
-  return data;
+  return enrichContactsViaBdAccounts(contactIds, bdAccountId);
 }
 
 export interface GroupSource {
@@ -504,5 +511,25 @@ export async function uploadAudienceFromCsv(
     `/api/campaigns/${campaignId}/audience/from-csv`,
     body
   );
+  return data;
+}
+
+export async function uploadAudienceFromUsernameList(
+  campaignId: string,
+  body: { text: string }
+): Promise<{
+  contactIds: string[];
+  created: number;
+  matched: number;
+  skipped: number;
+  invalidSamples?: string[];
+}> {
+  const { data } = await apiClient.post<{
+    contactIds: string[];
+    created: number;
+    matched: number;
+    skipped: number;
+    invalidSamples?: string[];
+  }>(`/api/campaigns/${campaignId}/audience/from-usernames`, body);
   return data;
 }

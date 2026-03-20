@@ -73,5 +73,56 @@ export function internalBdAccountsRouter({ pool, log }: { pool: Pool; log: Logge
     res.json({ chats });
   }));
 
+  // GET /search-sync-chats?q=&limit= — search synced chats for org (messaging global search; no direct sync table read from messaging)
+  router.get('/search-sync-chats', asyncHandler(async (req, res) => {
+    const organizationId = req.headers['x-organization-id'] as string | undefined;
+    if (!organizationId?.trim()) {
+      throw new AppError(400, 'X-Organization-Id required', ErrorCodes.VALIDATION);
+    }
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '5'), 10) || 5, 1), 20);
+    if (!q || q.length < 2) {
+      return res.json({ items: [] });
+    }
+    const searchPattern = `%${q.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`;
+    const result = await pool.query(
+      `SELECT
+        'telegram' AS channel,
+        s.telegram_chat_id::text AS channel_id,
+        s.bd_account_id,
+        COALESCE(
+          c.display_name,
+          CASE WHEN NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), '') IS NOT NULL
+               AND TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) NOT LIKE 'Telegram %%'
+               THEN TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))) ELSE NULL END,
+          c.username,
+          NULLIF(TRIM(COALESCE(s.title, '')), ''),
+          c.telegram_id::text,
+          s.telegram_chat_id::text
+        ) AS name
+       FROM bd_account_sync_chats s
+       JOIN bd_accounts a ON a.id = s.bd_account_id AND a.organization_id = $1
+       LEFT JOIN LATERAL (
+         SELECT m0.contact_id FROM messages m0
+         WHERE m0.organization_id = a.organization_id AND m0.channel = 'telegram'
+           AND m0.channel_id = s.telegram_chat_id::text AND m0.bd_account_id = s.bd_account_id
+         LIMIT 1
+       ) mid ON true
+       LEFT JOIN contacts c ON c.id = mid.contact_id
+       WHERE s.peer_type IN ('user', 'chat')
+         AND (
+           s.title ILIKE $2
+           OR c.display_name ILIKE $2
+           OR CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,'')) ILIKE $2
+           OR c.username ILIKE $2
+           OR c.telegram_id::text ILIKE $2
+         )
+       ORDER BY s.title, c.display_name NULLS LAST
+       LIMIT $3`,
+      [organizationId.trim(), searchPattern, limit]
+    );
+    res.json({ items: result.rows });
+  }));
+
   return router;
 }

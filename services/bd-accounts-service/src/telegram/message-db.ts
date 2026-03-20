@@ -1,5 +1,6 @@
 // @ts-nocheck — GramJS types are incomplete
 import type { Pool } from 'pg';
+import type { Counter } from 'prom-client';
 import type { ServiceHttpClient } from '@getsale/service-core';
 import type { SerializedTelegramMessage } from '../telegram-serialize';
 import { reactionsFromTelegramExtra, ourReactionsFromTelegramExtra } from './helpers';
@@ -8,13 +9,39 @@ import type { StructuredLog } from './types';
 /**
  * DB operations for conversations and messages.
  * When messagingClient is set, conversation and message persistence go through messaging-service internal API (A1: single owner for messages/conversations).
+ * Without client — temporary SQL bypass (A3); increments messageDbSqlBypassTotal + one warn per operation type.
+ * If env `BD_ACCOUNTS_MESSAGE_DB_STRICT` is `1` or `true`, bypass is disabled and operations throw (`MESSAGE_DB_STRICT_NO_CLIENT`).
  */
 export class MessageDb {
+  private readonly sqlBypassWarned = new Set<string>();
+
   constructor(
     private readonly pool: Pool,
     private readonly log: StructuredLog,
-    private readonly messagingClient?: ServiceHttpClient | null
+    private readonly messagingClient?: ServiceHttpClient | null,
+    private readonly sqlBypassCounter?: Counter | null
   ) {}
+
+  private recordMessageDbSqlBypass(operation: string): void {
+    const strict =
+      process.env.BD_ACCOUNTS_MESSAGE_DB_STRICT?.trim() === '1' ||
+      process.env.BD_ACCOUNTS_MESSAGE_DB_STRICT?.trim()?.toLowerCase() === 'true';
+    if (strict) {
+      const err = new Error(
+        `MessageDb SQL bypass blocked (A3 strict, operation=${operation}). Configure MESSAGING_SERVICE_URL and a healthy messaging-service, or unset BD_ACCOUNTS_MESSAGE_DB_STRICT.`
+      );
+      (err as { code?: string }).code = 'MESSAGE_DB_STRICT_NO_CLIENT';
+      throw err;
+    }
+    this.sqlBypassCounter?.inc({ operation });
+    if (this.sqlBypassWarned.has(operation)) return;
+    this.sqlBypassWarned.add(operation);
+    this.log.warn({
+      message: 'message_db_sql_bypass',
+      operation,
+      hint: 'No messaging HTTP client — bd-accounts writes messages/conversations directly (A3). Production: set MESSAGING_SERVICE_URL. Metric: bd_accounts_message_db_sql_bypass_total.',
+    });
+  }
 
   async ensureConversation(params: {
     organizationId: string;
@@ -43,6 +70,7 @@ export class MessageDb {
       }
       return;
     }
+    this.recordMessageDbSqlBypass('ensure_conversation');
     await this.pool.query(
       `INSERT INTO conversations (id, organization_id, bd_account_id, channel, channel_id, contact_id, created_at, updated_at)
        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW(), NOW())
@@ -120,6 +148,7 @@ export class MessageDb {
     }
 
     await this.ensureConversation({ organizationId, bdAccountId, channel, channelId, contactId });
+    this.recordMessageDbSqlBypass('save_message');
 
     const {
       telegram_message_id,
@@ -214,6 +243,7 @@ export class MessageDb {
       );
       return res.deleted ?? [];
     }
+    this.recordMessageDbSqlBypass('delete_by_telegram');
     const result =
       channelId != null
         ? await this.pool.query(
@@ -255,6 +285,7 @@ export class MessageDb {
         throw err;
       }
     }
+    this.recordMessageDbSqlBypass('edit_by_telegram');
     const result = await this.pool.query(
       `UPDATE messages SET content = $1, updated_at = NOW(), telegram_entities = $2, telegram_media = $3
        WHERE bd_account_id = $4 AND channel_id = $5 AND telegram_message_id = $6

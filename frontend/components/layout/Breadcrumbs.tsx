@@ -47,6 +47,7 @@ export function Breadcrumbs() {
           ) : (
             <Link
               href={crumb.href}
+              prefetch={false}
               className="hover:text-foreground transition-colors truncate max-w-[100px] sm:max-w-none"
             >
               {crumb.label}

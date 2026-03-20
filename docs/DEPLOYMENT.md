@@ -40,11 +40,28 @@ docker-compose down -v
 # Если не задан, бэкенды отвечают 503 (см. аудит S1). В production запрещено использовать значение по умолчанию (api-gateway не запустится).
 INTERNAL_AUTH_SECRET=your_internal_auth_secret
 
+# Опционально: межсервисный HTTP (ServiceHttpClient) — таймауты, ретраи, circuit breaker.
+# Значения по умолчанию подставляются в коде; переопределяйте при деградации сети или длинных операциях.
+# SERVICE_HTTP_TIMEOUT_MS=10000
+# SERVICE_HTTP_RETRIES=2
+# SERVICE_HTTP_RETRY_DELAY_MS=500
+# SERVICE_HTTP_CB_THRESHOLD=5
+# SERVICE_HTTP_CB_RESET_MS=30000
+#
+# messaging-service → ai-service (summarize / analyze): таймаут по умолчанию 65s; при необходимости:
+# MESSAGING_AI_HTTP_TIMEOUT_MS=90000
+#
+# automation-service → crm / pipeline: по умолчанию 15s на клиент; при необходимости:
+# AUTOMATION_CRM_HTTP_TIMEOUT_MS=30000
+# AUTOMATION_PIPELINE_HTTP_TIMEOUT_MS=30000
+
 OPENAI_API_KEY=your_openai_key
 TELEGRAM_BOT_TOKEN=your_telegram_token
 # Для BD Accounts (подключение Telegram аккаунтов) — получить на https://my.telegram.org/apps
 TELEGRAM_API_ID=12345
 TELEGRAM_API_HASH=your_api_hash
+# FLOOD_WAIT: GramJS/MTProto возвращает время ожидания в ошибке (`seconds`). `telegramInvokeWithFloodRetry` сначала спит min(seconds, cap), затем один повтор — без паузы повтор бессмысленен. cap защищает воркер от многочасовой блокировки (если Telegram просит дольше — после retry ошибка уйдёт наверх, CRM может ротировать BD).
+# TELEGRAM_FLOOD_WAIT_CAP_SECONDS=600
 ```
 
 ### Безопасность: gateway и бэкенды
@@ -53,6 +70,29 @@ TELEGRAM_API_HASH=your_api_hash
 - **Прямой доступ к бэкендам запрещён:** К бэкенд-сервисам (auth, crm, pipeline, messaging, bd-accounts, campaign, automation, ai, user, team, analytics, activity) не должен быть доступ из интернета. Единственная точка входа для клиентских запросов — API Gateway. Бэкенды доверяют заголовкам `X-User-Id`, `X-Organization-Id`, `X-User-Role` только при наличии валидного заголовка `X-Internal-Auth` (INTERNAL_AUTH_SECRET). Если бэкенд окажется доступен напрямую, злоумышленник при компрометации или отсутствии секрета сможет подделать контекст пользователя. В продакшене бэкенды должны слушать только внутреннюю сеть (например, Kubernetes cluster IP или private subnet).
 
 Подробнее о контрактах между сервисами: [INTERNAL_API.md](INTERNAL_API.md).
+
+### RabbitMQ: события, DLQ и метрики
+
+Доменные события публикуются в exchange **`events`** (topic, durable). Потребители объявляют **именованные** очереди, например `messaging-service`, `campaign-service`, `websocket-service`, `pipeline-service`, `automation-service`, `analytics-service`, `activity-service`, `ai-service`. Для каждой такой очереди клиент в `@getsale/utils` создаёт парную **DLQ** `<имя_очереди>.dlq`: после **3** неудачных обработок (с заголовком `x-retry-count`) сообщение снимается с основной очереди и отправляется в DLQ.
+
+**Prometheus** (эндпоинт `/metrics` у бэкендов):
+
+- `event_publish_failed_total` — не удалось опубликовать событие (канал не готов, ошибка записи).
+- `rabbitmq_dlq_messages_total{queue="…"}` — сообщения, отправленные в DLQ после исчерпания ретраев у consumer.
+
+Правила алертов: `infrastructure/prometheus/alert_rules.yml` (`EventPublishFailures`, `RabbitMqConsumerDlq`, `BdAccountsMessagingOrphanFallback`, **`BdAccountsMessageDbSqlBypass`** (A3: локальный SQL в `message-db` без клиента messaging), **`InterServiceHttpErrorShareElevated`** / **`InterServiceHttpCircuitReject`** (B1: доля неуспешных исходящих `ServiceHttpClient` и отказы при открытом circuit), **`CampaignMinGapDeferElevated`** — информативный: рост `campaign_min_gap_defer_total` при включённом `CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT`). Локально: Management UI — см. список сервисов выше (логин в dev: см. раздел «Доступные сервисы»).
+
+**Эксплуатация DLQ:** сначала устранить причину (логи сервиса по `event_type` / stack trace). Повторная постановка сообщений из DLQ в рабочую очередь — вручную через RabbitMQ Management (или shovel) только после фикса, иначе цикл повторится.
+
+### Fallback: orphan сообщений при удалении BD-аккаунта (A2)
+
+Нормальный путь — `bd-accounts` → `POST messaging /internal/messages/orphan-by-bd-account`. Если вызов падает, bd-accounts выполняет локальный `UPDATE messages` (см. [RUNBOOK_ORPHAN_MESSAGES.md](RUNBOOK_ORPHAN_MESSAGES.md)). Метрика **`bd_accounts_messaging_orphan_fallback_total`** на `/metrics` у bd-accounts-service; алерт **`BdAccountsMessagingOrphanFallback`** в `infrastructure/prometheus/alert_rules.yml`.
+
+### A3: прямой SQL в `message-db.ts` (обход internal messaging)
+
+В штатном деплое `TelegramManager` всегда получает HTTP-клиент к messaging; запись сообщений идёт через internal API. Если клиент отсутствует (тесты, ошибка конфигурации), `MessageDb` пишет в `messages`/`conversations` напрямую — это **осознанный bypass** (см. [TABLE_OWNERSHIP_A1.md](../ai_docs/develop/TABLE_OWNERSHIP_A1.md) §A3). Метрика **`bd_accounts_message_db_sql_bypass_total{operation="…"}`** на `/metrics` bd-accounts; алерт **`BdAccountsMessageDbSqlBypass`**.
+
+**Строгий режим (опционально):** `BD_ACCOUNTS_MESSAGE_DB_STRICT=1` или `true` у **bd-accounts-service** — при отсутствии рабочего `messagingClient` любой SQL-bypass в `MessageDb` **не выполняется** (ошибка с кодом `MESSAGE_DB_STRICT_NO_CLIENT`). Имеет смысл в staging/production после проверки, что `MESSAGING_SERVICE_URL` и internal-auth настроены; в локальных тестах без mock messaging обычно не включать.
 
 ## Если сервисы не запускаются: INTERNAL_AUTH_SECRET
 
@@ -88,6 +128,19 @@ TELEGRAM_API_HASH=your_api_hash
 
 1. **ai-service:** задать `OPENROUTER_API_KEY`. По умолчанию в compose: `OPENROUTER_MODEL=google/gemma-3-27b-it:free`, `OPENROUTER_MAX_TOKENS=2048`, `OPENROUTER_TIMEOUT_MS=55000`. Пул `openrouter/free` можно включить явно, но он иногда отдаёт reasoning-модели с пустым `content` — см. [ARCHITECTURE_CAMPAIGN_AI.md](ARCHITECTURE_CAMPAIGN_AI.md).
 2. **campaign-service:** `AI_SERVICE_URL` должен указывать на ai-service (в `docker-compose.server.yml` уже `http://ai-service:3005`).
+
+### Воркер отправок кампаний (campaign-service)
+
+Переменные окружения (см. `services/campaign-service/src/campaign-loop.ts`):
+
+| Переменная | По умолчанию | Смысл |
+|------------|--------------|--------|
+| `CAMPAIGN_SEND_INTERVAL_MS` | `60000` | Период тика цикла (как часто воркер пытается взять участников). |
+| `CAMPAIGN_MAX_SENDS_PER_ACCOUNT_PER_DAY` | `20` | Потолок отправок в сутки на BD-аккаунт, если в `bd_accounts.max_dm_per_day` не задано иное. |
+| `CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT` | `0` | Минимум миллисекунд между **двумя успешными** кампейными отправками с одного `bd_account_id` в рамках одного батча воркера; при нарушении `next_send_at` сдвигается. `0` — выключено. Для продакшена при агрессивных кампаниях разумно **5000–30000** (анти-flood). На `/metrics` счётчик **`campaign_min_gap_defer_total`** — сколько раз сработала отсрочка. |
+| `CAMPAIGN_429_RETRY_AFTER_MINUTES` | `30` | Запасной retry после HTTP 429 от цепочки отправки, если в теле ответа нет `retryAfterSeconds`. |
+
+Межсервисные таймауты/ретраи/circuit breaker задаются общими `SERVICE_HTTP_*` (см. раздел выше про `interServiceHttpDefaults`).
 
 Локально: при запуске ai-service через `npm run dev` из `services/ai-service` переменные из корневого `.env` подгружаются автоматически (`load-env.ts`).
 
@@ -275,6 +328,8 @@ jobs:
 ### Prometheus
 
 Метрики доступны на `http://prometheus:9090`
+
+**Межсервисный HTTP (B1):** у сервисов с `ServiceHttpClient` и переданным `metricsRegistry` в конструкторе клиента — счётчики **`inter_service_http_requests_total{client,method,outcome}`** (`outcome`: `success`, `client_4xx`, `server_or_downstream`, `timeout_abort`, `network_error`, `circuit_open`) и **`inter_service_http_circuit_reject_total{client}`**. См. [`http-client.ts`](../shared/service-core/src/http-client.ts). Алерты по доле неуспешных исходов и по circuit-reject: **`InterServiceHttpErrorShareElevated`**, **`InterServiceHttpCircuitReject`** в `infrastructure/prometheus/alert_rules.yml` (лейблы `job`, `client`).
 
 ### Grafana
 

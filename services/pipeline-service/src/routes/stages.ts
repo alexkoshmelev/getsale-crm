@@ -4,29 +4,8 @@ import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate, withOrgContext } from '@getsale/service-core';
-import { z } from 'zod';
 import crypto from 'crypto';
-
-const StageCreateSchema = z.object({
-  pipelineId: z.string().uuid(),
-  name: z.string().min(1).max(255),
-  orderIndex: z.number().int().min(0).optional(),
-  color: z.string().max(32).optional().nullable(),
-  automationRules: z.unknown().optional(),
-  entryRules: z.unknown().optional(),
-  exitRules: z.unknown().optional(),
-  allowedActions: z.unknown().optional(),
-});
-
-const StageUpdateSchema = z.object({
-  name: z.string().min(1).max(255).optional(),
-  orderIndex: z.number().int().min(0).optional(),
-  color: z.string().max(32).optional().nullable(),
-  automationRules: z.unknown().optional(),
-  entryRules: z.unknown().optional(),
-  exitRules: z.unknown().optional(),
-  allowedActions: z.unknown().optional(),
-});
+import { PlStageCreateSchema, PlStageUpdateSchema } from '../validation';
 
 interface Deps {
   pool: Pool;
@@ -54,7 +33,7 @@ export function stagesRouter({ pool, rabbitmq, log }: Deps): Router {
     res.json(result.rows);
   }));
 
-  router.post('/', validate(StageCreateSchema), asyncHandler(async (req, res) => {
+  router.post('/', validate(PlStageCreateSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
     const { pipelineId, name, orderIndex, color, automationRules, entryRules, exitRules, allowedActions } = req.body;
 
@@ -77,7 +56,7 @@ export function stagesRouter({ pool, rabbitmq, log }: Deps): Router {
     res.json(row);
   }));
 
-  router.put('/:id', validate(StageUpdateSchema), asyncHandler(async (req, res) => {
+  router.put('/:id', validate(PlStageUpdateSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
     const { name, orderIndex, color, automationRules, entryRules, exitRules, allowedActions } = req.body;

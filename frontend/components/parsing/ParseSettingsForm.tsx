@@ -18,6 +18,9 @@ interface ParseSettingsFormProps {
   onListNameChange: (v: string) => void;
   createCampaign?: boolean;
   onCreateCampaignChange?: (v: boolean) => void;
+  /** Каналы без linked chat: стратегия сбора аудитории. */
+  channelEngagement?: 'default' | 'reactions';
+  onChannelEngagementChange?: (v: 'default' | 'reactions') => void;
   onStart: () => void;
   starting?: boolean;
   disabled?: boolean;
@@ -36,12 +39,15 @@ export default function ParseSettingsForm({
   onListNameChange,
   createCampaign,
   onCreateCampaignChange,
+  channelEngagement = 'default',
+  onChannelEngagementChange,
   onStart,
   starting,
   disabled,
 }: ParseSettingsFormProps) {
   const { t } = useTranslation();
   const validSources = sources.filter((s) => !s.error && s.chatId);
+  const hasBareChannel = validSources.some((s) => s.type === 'channel' && s.linkedChatId == null);
 
   const toggleAccount = (id: string) => {
     if (selectedAccountIds.includes(id)) {
@@ -107,6 +113,37 @@ export default function ParseSettingsForm({
           <span className="text-sm">{t('parsing.excludeAdminsLabel')}</span>
         </label>
       </div>
+
+      {hasBareChannel && onChannelEngagementChange && (
+        <div>
+          <label className="block text-sm font-medium mb-2">{t('parsing.channelEngagementLabel')}</label>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">{t('parsing.channelEngagementHint')}</p>
+          <div className="space-y-2">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="channelEngagement"
+                checked={channelEngagement === 'default'}
+                onChange={() => onChannelEngagementChange('default')}
+                disabled={disabled}
+                className="w-4 h-4 mt-0.5"
+              />
+              <span className="text-sm">{t('parsing.channelEngagementDefault')}</span>
+            </label>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="channelEngagement"
+                checked={channelEngagement === 'reactions'}
+                onChange={() => onChannelEngagementChange('reactions')}
+                disabled={disabled}
+                className="w-4 h-4 mt-0.5"
+              />
+              <span className="text-sm">{t('parsing.channelEngagementReactions')}</span>
+            </label>
+          </div>
+        </div>
+      )}
 
       <div>
         <label className="block text-sm font-medium mb-1">{t('parsing.listNameLabel')}</label>
