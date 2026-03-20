@@ -912,7 +912,22 @@
     "qrNeedPassword": "Требуется пароль 2FA",
     "qrNeedPasswordHint": "У этого аккаунта включена двухфакторная аутентификация. Введите пароль облачного пароля Telegram.",
     "qrAccountConnected": "Аккаунт подключён",
-    "qrRedirect": "Переход к выбору чатов…"
+    "qrRedirect": "Переход к выбору чатов…",
+    "connectionConnected": "Подключен",
+    "connectionReconnecting": "Переподключение",
+    "connectionDisconnected": "Отключен",
+    "connectionReauthRequired": "Требуется повторный вход",
+    "proxyOk": "Прокси OK",
+    "proxyConfigured": "Прокси настроен",
+    "proxyError": "Ошибка прокси",
+    "proxyNone": "Без прокси",
+    "healthTitle": "Health",
+    "healthConnection": "Connection",
+    "healthProxy": "Proxy",
+    "healthLastError": "Последняя ошибка",
+    "healthReason": "Причина",
+    "proxySocksOnlyHint": "Поддерживается только SOCKS5 прокси.",
+    "proxyFixCta": "Проверить/обновить прокси"
   },
   "messaging": {
     "bdAccounts": "BD Аккаунты",

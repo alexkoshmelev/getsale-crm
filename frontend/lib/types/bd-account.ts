@@ -3,7 +3,7 @@
  * Single source of truth for the shape used across messaging, bd-accounts UI, discovery, pipeline.
  */
 export interface BDAccountProxyConfig {
-  type: 'socks5' | 'http';
+  type: 'socks5';
   host: string;
   port: number;
   username?: string;

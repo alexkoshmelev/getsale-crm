@@ -17,9 +17,11 @@ import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, 
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { AccountAvatar } from './components/AccountAvatar';
+import { StatusBadges } from '@/components/bd-accounts/StatusBadges';
 import { ConnectModal } from './components/ConnectModal';
 import { useBdAccountsConnect } from './hooks/useBdAccountsConnect';
 import { getAccountDisplayName } from './utils';
+import { formatRelativeDateTime, resolveConnectionState } from '@/lib/bd-account-status-display';
 import { reportError } from '@/lib/error-reporter';
 import type { BDAccount, Dialog } from './types';
 
@@ -178,9 +180,9 @@ export default function BDAccountsPage() {
                 </div>
                 <ChevronRight className="w-5 h-5 text-gray-400 shrink-0" />
               </Link>
-              {(account.connection_state ?? (account.is_active ? 'connected' : 'disconnected')) === 'connected' ? (
+              {resolveConnectionState(account) === 'connected' ? (
                 <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0" />
-              ) : (account.connection_state === 'reauth_required') ? (
+              ) : (resolveConnectionState(account) === 'reauth_required') ? (
                 <XCircle className="w-5 h-5 text-red-500 shrink-0" />
               ) : (
                 <XCircle className="w-5 h-5 text-gray-400 shrink-0" />
@@ -188,42 +190,18 @@ export default function BDAccountsPage() {
             </div>
 
             <div className="space-y-2 mb-4">
-              <p className={`text-xs ${
-                account.connection_state === 'reauth_required'
-                  ? 'text-red-600 dark:text-red-400'
-                  : account.connection_state === 'reconnecting'
-                    ? 'text-amber-600 dark:text-amber-400'
-                    : 'text-gray-500 dark:text-gray-400'
-              }`}>
-                {account.connection_state === 'reauth_required'
-                  ? 'Требуется повторный вход'
-                  : account.connection_state === 'reconnecting'
-                    ? 'Переподключение'
-                    : account.connection_state === 'connected'
-                      ? 'Подключен'
-                      : 'Отключен'}
-              </p>
-              <div className="flex items-center gap-2">
-                <span
-                  className={`inline-flex w-2.5 h-2.5 rounded-full ${
-                    account.proxy_status === 'ok' ? 'bg-green-500' :
-                    account.proxy_status === 'error' ? 'bg-red-500' :
-                    account.proxy_status === 'configured' ? 'bg-amber-500' :
-                    'bg-gray-400'
-                  }`}
-                  title={
-                    account.proxy_status === 'ok' ? 'Прокси: подключено' :
-                    account.proxy_status === 'error' ? `Прокси: ошибка${account.last_proxy_error ? ` (${account.last_proxy_error})` : ''}` :
-                    account.proxy_status === 'configured' ? 'Прокси: настроен, проверка при подключении' :
-                    'Прокси: не используется'
-                  }
-                />
-                <span className="text-xs text-gray-500 dark:text-gray-400">
-                  {account.proxy_status === 'ok' ? 'Proxy OK' :
-                    account.proxy_status === 'error' ? 'Proxy Error' :
-                    account.proxy_status === 'configured' ? 'Proxy Configured' :
-                    'No Proxy'}
-                </span>
+              <StatusBadges account={account} compact />
+              <div className="flex items-center gap-2 flex-wrap">
+                {(account.unread_count ?? 0) > 0 && (
+                  <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">
+                    {t('messaging.unread')}: {account.unread_count ?? 0}
+                  </span>
+                )}
+                {account.last_error_code && (
+                  <span className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300">
+                    {account.last_error_code}
+                  </span>
+                )}
               </div>
               {account.connected_at && (
                 <p className="text-sm text-gray-600 dark:text-gray-400">
@@ -233,6 +211,7 @@ export default function BDAccountsPage() {
               {account.last_activity && (
                 <p className="text-sm text-gray-600 dark:text-gray-400">
                   Активность: {new Date(account.last_activity).toLocaleString('ru-RU')}
+                  {formatRelativeDateTime(account.last_activity) ? ` (${formatRelativeDateTime(account.last_activity)})` : ''}
                 </p>
               )}
             </div>
@@ -257,7 +236,7 @@ export default function BDAccountsPage() {
               </Button>
               {canManageAccount(account) && (
                 <>
-                  {account.connection_state === 'reauth_required' ? (
+                  {resolveConnectionState(account) === 'reauth_required' ? (
                     <Button
                       variant="outline"
                       size="sm"
@@ -283,6 +262,11 @@ export default function BDAccountsPage() {
                       title="Включить"
                     >
                       <Power className="w-4 h-4" />
+                    </Button>
+                  )}
+                  {resolveConnectionState(account) === 'reconnecting' && (
+                    <Button variant="outline" size="sm" disabled title="Ожидание завершения переподключения">
+                      <Loader2 className="w-4 h-4 animate-spin" />
                     </Button>
                   )}
                   <Button

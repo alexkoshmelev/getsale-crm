@@ -3,7 +3,9 @@
 import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
+import { useTranslation } from 'react-i18next';
 import { getAccountDisplayName, getAccountInitials } from '@/lib/bd-account-display';
+import { StatusBadges } from '@/components/bd-accounts/StatusBadges';
 import type { BDAccount, BDAccountProxyConfig } from '@/lib/types/bd-account';
 import {
   disconnectBdAccount,
@@ -35,12 +37,20 @@ import {
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
+import {
+  connectionLabelKey,
+  proxyLabelKey,
+  resolveConnectionState,
+  resolveProxyState,
+  shouldAutoRefreshAccount,
+} from '@/lib/bd-account-status-display';
 
 export default function BDAccountCardPage() {
   const params = useParams();
   const router = useRouter();
   const { user: currentUser } = useAuthStore();
   const id = typeof params.id === 'string' ? params.id : '';
+  const { t } = useTranslation();
   const [account, setAccount] = useState<BDAccount | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -51,7 +61,7 @@ export default function BDAccountCardPage() {
   const [savingDisplayName, setSavingDisplayName] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const [proxyType, setProxyType] = useState<'none' | 'socks5' | 'http'>('none');
+  const [proxyType, setProxyType] = useState<'none' | 'socks5'>('none');
   const [proxyHost, setProxyHost] = useState('');
   const [proxyPort, setProxyPort] = useState('');
   const [proxyUser, setProxyUser] = useState('');
@@ -68,7 +78,7 @@ export default function BDAccountCardPage() {
         setDisplayNameValue(data.display_name ?? '');
         const pc = data.proxy_config;
         if (pc && pc.host) {
-          setProxyType(pc.type || 'socks5');
+          setProxyType('socks5');
           setProxyHost(pc.host);
           setProxyPort(String(pc.port));
           setProxyUser(pc.username || '');
@@ -100,6 +110,26 @@ export default function BDAccountCardPage() {
     };
   }, [id, account?.id]);
 
+  useEffect(() => {
+    if (!id || !account) return;
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+    if (shouldAutoRefreshAccount(account)) {
+      intervalId = setInterval(() => {
+        getBdAccount(id).then(setAccount).catch(() => {});
+      }, 25000);
+    }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        getBdAccount(id).then(setAccount).catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [id, account]);
+
   const handleSaveDisplayName = async () => {
     if (!id) return;
     setSavingDisplayName(true);
@@ -120,7 +150,7 @@ export default function BDAccountCardPage() {
     setActionError(null);
     try {
       await disconnectBdAccount(id);
-      setAccount((prev) => (prev ? { ...prev, is_active: false } : null));
+      setAccount((prev) => (prev ? { ...prev, is_active: false, connection_state: 'disconnected' } : null));
     } catch (err: any) {
       setActionError(err.response?.data?.error || err.response?.data?.message || 'Ошибка отключения');
     }
@@ -130,7 +160,7 @@ export default function BDAccountCardPage() {
     setActionError(null);
     try {
       await enableBdAccount(id);
-      setAccount((prev) => (prev ? { ...prev, is_active: true } : null));
+      setAccount((prev) => (prev ? { ...prev, is_active: true, connection_state: 'reconnecting' } : null));
     } catch (err: any) {
       setActionError(err.response?.data?.error || err.response?.data?.message || 'Ошибка включения');
     }
@@ -154,7 +184,7 @@ export default function BDAccountCardPage() {
     try {
       const payload = proxyType === 'none'
         ? { proxy_config: null }
-        : { proxy_config: { type: proxyType, host: proxyHost.trim(), port: Number(proxyPort), username: proxyUser.trim() || undefined, password: proxyPass.trim() || undefined } };
+        : { proxy_config: { type: 'socks5' as const, host: proxyHost.trim(), port: Number(proxyPort), username: proxyUser.trim() || undefined, password: proxyPass.trim() || undefined } };
       await patchBdAccount(id, payload);
       setAccount((prev) => prev ? { ...prev, proxy_config: proxyType === 'none' ? null : (payload.proxy_config as BDAccountProxyConfig) } : null);
     } catch (err: any) {
@@ -247,16 +277,42 @@ export default function BDAccountCardPage() {
                 </>
               )}
             </div>
-            <p className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-1">
-              {account.connection_state === 'reauth_required' ? (
-                <><XCircle className="w-4 h-4 text-red-500" /> Требуется повторный вход</>
-              ) : account.is_active ? (
-                <><CheckCircle2 className="w-4 h-4 text-green-500" /> Подключён</>
-              ) : (
-                <><XCircle className="w-4 h-4 text-gray-400" /> Отключён</>
-              )}
-            </p>
+            <div className="mt-1">
+              <StatusBadges account={account} />
+            </div>
           </div>
+        </div>
+
+        <div className="mt-5 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">{t('bdAccounts.healthTitle')}</h3>
+          <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+            <div>
+              <dt className="text-gray-500 dark:text-gray-400">{t('bdAccounts.healthConnection')}</dt>
+              <dd className="font-medium text-gray-900 dark:text-white">{t(connectionLabelKey(resolveConnectionState(account)))}</dd>
+            </div>
+            <div>
+              <dt className="text-gray-500 dark:text-gray-400">{t('bdAccounts.healthProxy')}</dt>
+              <dd className="font-medium text-gray-900 dark:text-white">
+                {t(proxyLabelKey(resolveProxyState(account)))}
+                {account.last_proxy_check_at ? ` (${new Date(account.last_proxy_check_at).toLocaleString('ru-RU')})` : ''}
+              </dd>
+            </div>
+            {account.last_error_code && (
+              <div>
+                <dt className="text-gray-500 dark:text-gray-400">{t('bdAccounts.healthLastError')}</dt>
+                <dd className="font-medium text-red-700 dark:text-red-300">
+                  {account.last_error_code}
+                  {account.last_error_at ? ` (${new Date(account.last_error_at).toLocaleString('ru-RU')})` : ''}
+                </dd>
+              </div>
+            )}
+            {(account.disconnect_reason || account.last_proxy_error) && (
+              <div>
+                <dt className="text-gray-500 dark:text-gray-400">{t('bdAccounts.healthReason')}</dt>
+                <dd className="font-medium text-gray-900 dark:text-white">{account.disconnect_reason || account.last_proxy_error}</dd>
+              </div>
+            )}
+          </dl>
         </div>
 
         <dl className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
@@ -316,7 +372,7 @@ export default function BDAccountCardPage() {
         )}
 
         {account.is_owner && (
-          <div className="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
+          <div id="proxy-settings-block" className="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
             <h3 className="text-sm font-semibold text-gray-900 dark:text-white flex items-center gap-2 mb-3">
               <Settings className="w-4 h-4" /> Proxy
             </h3>
@@ -325,13 +381,15 @@ export default function BDAccountCardPage() {
                 <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Type</label>
                 <select
                   value={proxyType}
-                  onChange={(e) => setProxyType(e.target.value as 'none' | 'socks5' | 'http')}
+                  onChange={(e) => setProxyType(e.target.value as 'none' | 'socks5')}
                   className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm"
                 >
                   <option value="none">No proxy</option>
                   <option value="socks5">SOCKS5</option>
-                  <option value="http">HTTP</option>
                 </select>
+                <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                  {t('bdAccounts.proxySocksOnlyHint')}
+                </p>
               </div>
               {proxyType !== 'none' && (
                 <>
@@ -382,10 +440,15 @@ export default function BDAccountCardPage() {
           </Link>
           {account.is_owner && (
             <>
-              {account.connection_state === 'reauth_required' ? (
+              {resolveConnectionState(account) === 'reauth_required' ? (
                 <Button variant="outline" size="sm" onClick={() => router.push('/dashboard/bd-accounts')}>
                   <Power className="w-4 h-4 mr-2" />
                   Переподключить через QR/телефон
+                </Button>
+              ) : resolveConnectionState(account) === 'reconnecting' ? (
+                <Button variant="outline" size="sm" disabled>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  {t('bdAccounts.connectionReconnecting')}
                 </Button>
               ) : account.is_active ? (
                 <Button variant="outline" size="sm" onClick={handleDisconnect} title="Отключить (временно)">
@@ -396,6 +459,16 @@ export default function BDAccountCardPage() {
                 <Button variant="outline" size="sm" onClick={handleEnable} title="Включить">
                   <Power className="w-4 h-4 mr-2" />
                   Включить
+                </Button>
+              )}
+              {resolveProxyState(account) === 'error' && resolveConnectionState(account) !== 'connected' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => document.getElementById('proxy-settings-block')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                >
+                  <Settings className="w-4 h-4 mr-2" />
+                  {t('bdAccounts.proxyFixCta')}
                 </Button>
               )}
               <Button

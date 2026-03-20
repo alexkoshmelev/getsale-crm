@@ -912,7 +912,22 @@
     "qrNeedPassword": "2FA password required",
     "qrNeedPasswordHint": "This account has two-factor authentication. Enter your Telegram Cloud Password.",
     "qrAccountConnected": "Account connected",
-    "qrRedirect": "Redirecting to chat selection…"
+    "qrRedirect": "Redirecting to chat selection…",
+    "connectionConnected": "Connected",
+    "connectionReconnecting": "Reconnecting",
+    "connectionDisconnected": "Disconnected",
+    "connectionReauthRequired": "Re-login required",
+    "proxyOk": "Proxy OK",
+    "proxyConfigured": "Proxy configured",
+    "proxyError": "Proxy error",
+    "proxyNone": "No proxy",
+    "healthTitle": "Health",
+    "healthConnection": "Connection",
+    "healthProxy": "Proxy",
+    "healthLastError": "Last error",
+    "healthReason": "Reason",
+    "proxySocksOnlyHint": "Only SOCKS5 proxy is supported.",
+    "proxyFixCta": "Check/update proxy"
   },
   "messaging": {
     "bdAccounts": "BD Accounts",
