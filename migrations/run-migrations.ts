@@ -3,7 +3,7 @@ import knex from 'knex';
 import knexConfig from './knexfile';
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
+  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5433/postgres`,
 });
 
 async function waitForDatabase(maxRetries = 60, delay = 2000) {

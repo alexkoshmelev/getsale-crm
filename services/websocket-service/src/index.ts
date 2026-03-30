@@ -48,21 +48,21 @@ import { startRedisBridge } from './redis-bridge';
       const url = new URL(redisUrl);
       redisConfig = {
         host: url.hostname,
-        port: parseInt(url.port || '6379'),
+        port: parseInt(url.port || '6380'),
         password: url.password || undefined,
       };
     } catch {
       log.warn({ message: 'Invalid REDIS_URL format, using defaults' });
       redisConfig = {
         host: process.env.REDIS_HOST || 'localhost',
-        port: parseInt(process.env.REDIS_PORT || '6379'),
+        port: parseInt(process.env.REDIS_PORT || '6380'),
         password: process.env.REDIS_PASSWORD,
       };
     }
   } else {
     redisConfig = {
       host: process.env.REDIS_HOST || 'localhost',
-      port: parseInt(process.env.REDIS_PORT || '6379'),
+      port: parseInt(process.env.REDIS_PORT || '6380'),
       password: process.env.REDIS_PASSWORD,
     };
   }

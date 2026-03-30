@@ -569,7 +569,7 @@ async function runStage4Scenarios(h, pipelineId) {
     }
   } else {
     log.skip(
-      'БД недоступна с хоста (скрипт подменяет host postgres→localhost). Проверьте: порт 5432 проброшен, pg установлен (npm install), при необходимости DEBUG_E2E=1 для вывода ошибки. Проверьте automation_executions.correlation_id и логи вручную по §3.1.'
+      'БД недоступна с хоста (скрипт подменяет host postgres→localhost). Проверьте: порт 5433 проброшен (docker-compose dev), pg установлен (npm install), при необходимости DEBUG_E2E=1 для вывода ошибки. Проверьте automation_executions.correlation_id и логи вручную по §3.1.'
     );
   }
 
@@ -750,10 +750,13 @@ function checkCorrelationChainInLogs(correlationId) {
 function getDbConnectionString() {
   let raw =
     process.env.DATABASE_URL ||
-    `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`;
+    `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5433/postgres`;
   raw = raw.replace(/\$\{POSTGRES_PASSWORD\}/g, process.env.POSTGRES_PASSWORD || 'postgres_dev');
   raw = raw.replace(/\$\{REDIS_PASSWORD\}/g, process.env.REDIS_PASSWORD || '');
-  return raw.replace(/@postgres(\/|:)/g, '@localhost$1');
+  raw = raw.replace(/@postgres(\/|:)/g, '@localhost$1');
+  // Docker service listens on 5432 inside the network; host map is 5433 (docker-compose.yml).
+  raw = raw.replace(/@localhost:5432(?=\/|$)/, '@localhost:5433');
+  return raw;
 }
 
 /** Возвращает количество записей automation_executions для entity_type=lead и entity_id=leadId, или null если БД недоступна */

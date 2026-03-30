@@ -7,7 +7,7 @@ async function main() {
   const ctx = await createServiceApp({ name: 'analytics-service', port: 3010 });
   const { pool, rabbitmq, log } = ctx;
 
-  const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6379');
+  const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6380');
 
   async function recordMetric(event: { type: string; organizationId: string; data?: Record<string, unknown> }) {
     try {

@@ -46,7 +46,7 @@ async function main() {
     log.warn({ message: 'OPENROUTER_API_KEY not set; campaign rephrase will return 503' });
   }
 
-  const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6379');
+  const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6380');
   const maxPerHour = parseInt(process.env.AI_RATE_LIMIT_PER_HOUR || '200', 10);
   const rateLimiter = new AIRateLimiter(redis, maxPerHour);
 

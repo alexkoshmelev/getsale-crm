@@ -23,7 +23,7 @@ if (process.env.NODE_ENV === 'production') {
 
 export const PORT = parseInt(String(process.env.PORT || 8000), 10);
 
-export const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+export const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6380';
 
 export const RATE_LIMIT_AUTH = parseInt(String(process.env.RATE_LIMIT_AUTH || 500), 10);
 export const RATE_LIMIT_ANON = parseInt(String(process.env.RATE_LIMIT_ANON || 100), 10);

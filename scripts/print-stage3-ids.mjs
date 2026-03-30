@@ -3,12 +3,12 @@
  * Выводит тестовые user_id и organization_id для stage3-e2e-test.mjs.
  * Запуск после migrate + seed:  npm run stage3-ids
  *
- * Требуется: Postgres доступен (DATABASE_URL или localhost:5432).
+ * Требуется: Postgres доступен (DATABASE_URL или localhost:5433 с docker-compose dev).
  * Опционально: pg в корне (npm install) или запуск из папки migrations: npx tsx scripts/print-stage3-ids.ts
  */
 const connectionString =
   process.env.DATABASE_URL ||
-  `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`;
+  `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5433/postgres`;
 
 async function main() {
   let pg;

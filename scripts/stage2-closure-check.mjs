@@ -6,7 +6,7 @@
  * Запуск:
  *   npm run stage2-closure
  * Требуется: миграции применены, stage3-e2e уже прогнан (созданы записи в stage_history).
- * Для 6.2 и 6.3: DATABASE_URL или POSTGRES_PASSWORD (localhost:5432).
+ * Для 6.2 и 6.3: DATABASE_URL или POSTGRES_PASSWORD (localhost:5433 с docker-compose dev).
  */
 
 import fs from 'fs';
@@ -14,7 +14,7 @@ import path from 'path';
 
 const connectionString =
   process.env.DATABASE_URL ||
-  `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`;
+  `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5433/postgres`;
 
 function loadEnv() {
   const envPath = path.join(process.cwd(), '.env');

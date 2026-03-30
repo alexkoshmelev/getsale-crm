@@ -8,7 +8,7 @@ import { workspacesRouter } from './routes/workspaces';
 import { invitesRouter } from './routes/invites';
 
 async function main() {
-  const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6379');
+  const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6380');
   const ctx = await createServiceApp({
     name: 'auth-service',
     port: 3001,

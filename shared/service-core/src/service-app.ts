@@ -158,7 +158,7 @@ export async function createServiceApp(config: ServiceConfig): Promise<ServiceCo
     pool = new Pool({
       connectionString:
         process.env.DATABASE_URL ||
-        `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`,
+        `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5433/postgres`,
       max: 8, // Keep low to avoid exhausting PostgreSQL max_connections; use PgBouncer in production
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 5_000,
