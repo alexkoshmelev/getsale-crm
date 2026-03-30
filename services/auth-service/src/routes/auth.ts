@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { Pool } from 'pg';
 import { RabbitMQClient } from '@getsale/utils';
@@ -301,7 +302,15 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
     const token = req.cookies?.[AUTH_COOKIE_ACCESS] || req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
     if (!token) throw new AppError(401, 'Not authenticated', ErrorCodes.UNAUTHORIZED);
 
-    const decoded = verifyAccessToken(token);
+    let decoded: ReturnType<typeof verifyAccessToken>;
+    try {
+      decoded = verifyAccessToken(token);
+    } catch (e: unknown) {
+      if (e instanceof jwt.JsonWebTokenError) {
+        throw new AppError(401, 'Invalid or expired session', ErrorCodes.UNAUTHORIZED);
+      }
+      throw e;
+    }
     const result = await pool.query('SELECT id, email FROM users WHERE id = $1', [decoded.userId]);
     if (result.rows.length === 0) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
 

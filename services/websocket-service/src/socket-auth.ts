@@ -20,7 +20,7 @@ interface JwtPayload {
   exp?: number;
 }
 
-const ACCESS_TOKEN_COOKIE = 'access_token';
+const ACCESS_TOKEN_COOKIE = (process.env.AUTH_COOKIE_ACCESS || 'access_token').trim() || 'access_token';
 
 function getCookieValue(cookieHeader: string | undefined, name: string): string | undefined {
   if (!cookieHeader) return undefined;

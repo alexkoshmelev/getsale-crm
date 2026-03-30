@@ -1,5 +1,6 @@
-export const AUTH_COOKIE_ACCESS = 'access_token';
-export const AUTH_COOKIE_REFRESH = 'refresh_token';
+/** Must match api-gateway ACCESS_TOKEN_COOKIE and websocket-service handshake cookie. Use distinct names per env on the same registrable domain (e.g. dev-app vs app under .getsale.ai). */
+export const AUTH_COOKIE_ACCESS = (process.env.AUTH_COOKIE_ACCESS || 'access_token').trim() || 'access_token';
+export const AUTH_COOKIE_REFRESH = (process.env.AUTH_COOKIE_REFRESH || 'refresh_token').trim() || 'refresh_token';
 
 const cookieDomain = process.env.COOKIE_DOMAIN?.trim();
 const isProduction = process.env.NODE_ENV === 'production';

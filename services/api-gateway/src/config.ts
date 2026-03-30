@@ -7,7 +7,8 @@ function requireEnv(name: string): string {
 }
 
 export const JWT_SECRET = requireEnv('JWT_SECRET');
-export const ACCESS_TOKEN_COOKIE = 'access_token';
+/** Same env as auth-service (AUTH_COOKIE_ACCESS). */
+export const ACCESS_TOKEN_COOKIE = (process.env.AUTH_COOKIE_ACCESS || 'access_token').trim() || 'access_token';
 export const INTERNAL_AUTH_HEADER = 'x-internal-auth';
 export const INTERNAL_AUTH_SECRET = process.env.INTERNAL_AUTH_SECRET?.trim() || '';
 
