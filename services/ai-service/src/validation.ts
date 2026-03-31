@@ -14,3 +14,15 @@ export const AiCampaignRephraseSchema = z.object({
 });
 
 export type AiCampaignRephraseInput = z.infer<typeof AiCampaignRephraseSchema>;
+
+const historyEntrySchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  content: z.string().min(1).max(8000),
+  date: z.string().max(64).optional(),
+});
+
+export const AiAutoRespondSchema = z.object({
+  systemPrompt: z.string().min(1).max(8000),
+  conversationHistory: z.array(historyEntrySchema).max(100),
+  incomingMessage: z.string().min(1).max(4000),
+});

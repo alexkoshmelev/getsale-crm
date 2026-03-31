@@ -49,6 +49,16 @@ export interface BDAccount {
   disconnect_reason?: string | null;
   last_error_code?: string | null;
   last_error_at?: string | null;
+  /** Active Telegram FLOOD_WAIT window (ISO). */
+  flood_wait_until?: string | null;
+  flood_wait_seconds?: number | null;
+  timezone?: string | null;
+  working_hours_start?: string | null;
+  working_hours_end?: string | null;
+  working_days?: number[] | null;
+  auto_responder_enabled?: boolean;
+  auto_responder_system_prompt?: string | null;
+  auto_responder_history_count?: number;
   /** Unread across synced chats (messaging aggregate). */
   unread_count?: number;
   /** Demo: DB-only, send disabled. */

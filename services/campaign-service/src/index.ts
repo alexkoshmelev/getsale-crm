@@ -57,7 +57,15 @@ async function main() {
   });
 
   try {
-    await subscribeToEvents({ pool, rabbitmq, log, pipelineClient });
+    await subscribeToEvents({
+      pool,
+      rabbitmq,
+      log,
+      pipelineClient,
+      messagingClient,
+      bdAccountsClient,
+      aiClient,
+    });
   } catch (error) {
     log.warn({
       message: 'RabbitMQ event subscription failed, service will continue without events',

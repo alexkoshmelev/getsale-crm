@@ -6,6 +6,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { useTranslation } from 'react-i18next';
 import { getAccountDisplayName, getAccountInitials } from '@/lib/bd-account-display';
 import { StatusBadges } from '@/components/bd-accounts/StatusBadges';
+import { BdAccountScheduleSettings } from '@/components/bd-accounts/BdAccountScheduleSettings';
 import type { BDAccount, BDAccountProxyConfig } from '@/lib/types/bd-account';
 import {
   disconnectBdAccount,
@@ -33,7 +34,10 @@ import {
   Edit2,
   Save,
   X,
+  AlertTriangle,
 } from 'lucide-react';
+import { formatDistanceToNow } from 'date-fns';
+import { ru } from 'date-fns/locale';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
@@ -44,6 +48,31 @@ import {
   resolveProxyState,
   shouldAutoRefreshAccount,
 } from '@/lib/bd-account-status-display';
+
+function FloodWaitCountdown({ untilIso }: { untilIso: string }) {
+  const [secLeft, setSecLeft] = useState(0);
+  useEffect(() => {
+    const tick = () =>
+      setSecLeft(Math.max(0, Math.ceil((new Date(untilIso).getTime() - Date.now()) / 1000)));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [untilIso]);
+  if (secLeft <= 0) return null;
+  const mm = Math.floor(secLeft / 60);
+  const ss = secLeft % 60;
+  return (
+    <div className="sm:col-span-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 p-3 flex items-start gap-2">
+      <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+      <div>
+        <p className="font-medium text-amber-900 dark:text-amber-100 text-sm">FLOOD_WAIT</p>
+        <p className="text-sm text-amber-800 dark:text-amber-200">
+          {mm}:{ss.toString().padStart(2, '0')}
+        </p>
+      </div>
+    </div>
+  );
+}
 
 export default function BDAccountCardPage() {
   const params = useParams();
@@ -135,8 +164,8 @@ export default function BDAccountCardPage() {
     setSavingDisplayName(true);
     setActionError(null);
     try {
-      await patchBdAccount(id, { display_name: displayNameValue.trim() || null });
-      setAccount((prev) => (prev ? { ...prev, display_name: displayNameValue.trim() || null } : null));
+      const next = await patchBdAccount(id, { display_name: displayNameValue.trim() || null });
+      setAccount(next);
       setEditingDisplayName(false);
     } catch (err: any) {
       setActionError(err.response?.data?.error || err.response?.data?.message || 'Ошибка сохранения');
@@ -185,8 +214,8 @@ export default function BDAccountCardPage() {
       const payload = proxyType === 'none'
         ? { proxy_config: null }
         : { proxy_config: { type: 'socks5' as const, host: proxyHost.trim(), port: Number(proxyPort), username: proxyUser.trim() || undefined, password: proxyPass.trim() || undefined } };
-      await patchBdAccount(id, payload);
-      setAccount((prev) => prev ? { ...prev, proxy_config: proxyType === 'none' ? null : (payload.proxy_config as BDAccountProxyConfig) } : null);
+      const next = await patchBdAccount(id, payload);
+      setAccount(next);
     } catch (err: any) {
       setActionError(err.response?.data?.error || err.response?.data?.message || 'Error saving proxy');
     } finally {
@@ -297,6 +326,22 @@ export default function BDAccountCardPage() {
                 {account.last_proxy_check_at ? ` (${new Date(account.last_proxy_check_at).toLocaleString('ru-RU')})` : ''}
               </dd>
             </div>
+            {account.last_activity && (
+              <div>
+                <dt className="text-gray-500 dark:text-gray-400">{t('bdAccounts.healthLastActivity', { defaultValue: 'Последняя активность' })}</dt>
+                <dd className="font-medium text-gray-900 dark:text-white">
+                  {formatDistanceToNow(new Date(account.last_activity), { addSuffix: true, locale: ru })}
+                </dd>
+              </div>
+            )}
+            {account.flood_wait_until && new Date(account.flood_wait_until).getTime() > Date.now() && (
+              <div className="sm:col-span-2">
+                <dt className="text-gray-500 dark:text-gray-400 mb-1">Telegram</dt>
+                <dd>
+                  <FloodWaitCountdown untilIso={account.flood_wait_until} />
+                </dd>
+              </div>
+            )}
             {account.last_error_code && (
               <div>
                 <dt className="text-gray-500 dark:text-gray-400">{t('bdAccounts.healthLastError')}</dt>
@@ -350,7 +395,7 @@ export default function BDAccountCardPage() {
             <div>
               <dt className="text-gray-500 dark:text-gray-400">Активность</dt>
               <dd className="font-medium text-gray-900 dark:text-white mt-0.5">
-                {new Date(account.last_activity).toLocaleString('ru-RU')}
+                {formatDistanceToNow(new Date(account.last_activity), { addSuffix: true, locale: ru })}
               </dd>
             </div>
           )}
@@ -419,6 +464,14 @@ export default function BDAccountCardPage() {
               </Button>
             </div>
           </div>
+        )}
+
+        {account.is_owner && (
+          <BdAccountScheduleSettings
+            account={account}
+            accountId={id}
+            onPatched={(next) => setAccount(next)}
+          />
         )}
 
         <div className="mt-6 flex flex-wrap gap-2">

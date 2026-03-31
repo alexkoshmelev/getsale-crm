@@ -13,6 +13,8 @@ const targetAudienceSchema = z
     bdAccountId: z.string().uuid().optional(),
     bdAccountIds: z.array(z.string().uuid()).optional(),
     randomizeWithAI: z.boolean().optional(),
+    /** Spread up to this many campaign sends per BD account per day within the working window (default: account max_dm_per_day or env). */
+    dailySendTarget: z.number().int().min(1).max(500).optional(),
   })
   .passthrough()
   .superRefine((val, ctx) => {

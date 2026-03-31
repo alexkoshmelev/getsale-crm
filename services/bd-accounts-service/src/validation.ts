@@ -100,6 +100,18 @@ export const BdAccountPatchSchema = z
       })
       .nullable()
       .optional(),
+    /** IANA timezone e.g. Europe/Moscow */
+    timezone: z.string().max(64).trim().nullable().optional(),
+    working_hours_start: z.string().regex(/^\d{2}:\d{2}$/).nullable().optional(),
+    working_hours_end: z.string().regex(/^\d{2}:\d{2}$/).nullable().optional(),
+    working_days: z.array(z.number().int().min(0).max(6)).max(7).nullable().optional(),
+    auto_responder_enabled: z.boolean().optional(),
+    auto_responder_system_prompt: z.string().max(16000).nullable().optional(),
+    auto_responder_history_count: z
+      .number()
+      .int()
+      .refine((n) => [10, 25, 50, 100].includes(n), { message: 'Must be 10, 25, 50, or 100' })
+      .optional(),
   })
   .optional();
 

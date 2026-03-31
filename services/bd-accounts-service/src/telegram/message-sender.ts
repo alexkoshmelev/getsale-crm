@@ -85,7 +85,7 @@ export class MessageSender {
 
     const trySend = async (peer: Api.TypeInputPeer | number | string): Promise<Api.Message> => {
       const message = await telegramInvokeWithFloodRetry(this.log, accountId, 'SendMessage', () =>
-        client.sendMessage(peer, params)
+        client.sendMessage(peer, params), this.pool
       );
       clientInfo.lastActivity = new Date();
       await this.pool.query(
@@ -195,7 +195,7 @@ export class MessageSender {
       await telegramInvokeWithFloodRetry(this.log, accountId, 'SetTyping', () =>
         clientInfo.client.invoke(
           new Api.messages.SetTyping({ peer, action: new Api.SendMessageTypingAction() })
-        )
+        ), this.pool
       );
     } catch (error: unknown) {
       this.log.warn({ message: 'setTyping failed', accountId, chatId, error: getErrorMessage(error) });
@@ -226,13 +226,13 @@ export class MessageSender {
         await telegramInvokeWithFloodRetry(this.log, accountId, 'channels.ReadHistory', () =>
           clientInfo.client.invoke(
             new Api.channels.ReadHistory({ channel: entity as any, maxId: 0 })
-          )
+          ), this.pool
         );
       } else {
         await telegramInvokeWithFloodRetry(this.log, accountId, 'messages.ReadHistory', () =>
           clientInfo.client.invoke(
             new Api.messages.ReadHistory({ peer: entity, maxId: 0 })
-          )
+          ), this.pool
         );
       }
     } catch (error: unknown) {
@@ -265,7 +265,7 @@ export class MessageSender {
             message: text || '',
             ...(replyTo ? { replyTo } : {}),
           })
-        )
+        ), this.pool
       );
       clientInfo.lastActivity = new Date();
     } catch (error: unknown) {
@@ -298,7 +298,7 @@ export class MessageSender {
           id: [telegramMessageId],
           randomId: [randomId],
         })
-      )
+      ), this.pool
     );
     clientInfo.lastActivity = new Date();
     await this.pool.query(

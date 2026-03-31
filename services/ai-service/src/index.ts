@@ -9,6 +9,7 @@ import { analyzeRouter } from './routes/analyze';
 import { usageRouter } from './routes/usage';
 import { searchQueriesRouter } from './routes/search-queries';
 import { campaignRephraseRouter } from './routes/campaign-rephrase';
+import { autoRespondRouter } from './routes/auto-respond';
 import { AIRateLimiter } from './rate-limiter';
 import { DRAFT_SYSTEM, PROMPT_VERSION } from './prompts';
 import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL } from './openrouter-campaign-config';
@@ -122,6 +123,7 @@ async function main() {
   ctx.mount('/api/ai', usageRouter(deps));
   ctx.mount('/api/ai', searchQueriesRouter(deps));
   ctx.mount('/api/ai', campaignRephraseRouter({ log, rateLimiter }));
+  ctx.mount('/api/ai', autoRespondRouter({ log, rateLimiter }));
 
   ctx.start();
 }

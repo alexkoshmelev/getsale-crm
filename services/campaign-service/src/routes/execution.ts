@@ -6,7 +6,8 @@ import { EventType, CampaignStartedEvent, CampaignPausedEvent } from '@getsale/e
 import { CampaignStatus } from '@getsale/types';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, withOrgContext } from '@getsale/service-core';
-import { resolveCampaignChannelId, resolveDelayRange, sampleDelaySeconds, staggeredFirstSendAtByOffset, type Schedule } from '../helpers';
+import { type Schedule } from '../helpers';
+import { bulkInsertCampaignParticipants } from '../campaign-participant-bulk';
 
 interface Deps {
   pool: Pool;
@@ -32,10 +33,6 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
       throw new AppError(400, 'Campaign can be started only from draft, paused or completed', ErrorCodes.BAD_REQUEST);
     }
 
-    if (campaign.status === CampaignStatus.COMPLETED) {
-      await pool.query('DELETE FROM campaign_participants WHERE campaign_id = $1', [id]);
-    }
-
     const seqRes = await pool.query('SELECT 1 FROM campaign_sequences WHERE campaign_id = $1 LIMIT 1', [id]);
     if (seqRes.rows.length === 0) {
       throw new AppError(400, 'Add at least one sequence step before starting the campaign', ErrorCodes.VALIDATION);
@@ -51,10 +48,10 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
       sendDelaySeconds?: number;
       sendDelayMinSeconds?: number;
       sendDelayMaxSeconds?: number;
+      dailySendTarget?: number;
     };
     const limit = Math.min(audience.limit ?? 5000, 10000);
-    const schedule = (campaign.schedule ?? {}) as Schedule;
-    const delayRange = resolveDelayRange(audience, 60);
+    const campaignSchedule = (campaign.schedule ?? {}) as Schedule;
 
     let contactsQuery: string;
     const queryParams: any[] = [organizationId];
@@ -119,61 +116,19 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
       );
     }
 
-    const bdAccountIdsRaw = audience.bdAccountIds ?? (audience.bdAccountId ? [audience.bdAccountId] : []);
-    const bdAccountIdsFiltered = bdAccountIdsRaw.filter((id): id is string => typeof id === 'string');
-    let accountIds: string[] = [];
-    if (bdAccountIdsFiltered.length > 0) {
-      const check = await pool.query(
-        'SELECT id FROM bd_accounts WHERE id = ANY($1::uuid[]) AND organization_id = $2 AND is_active = true',
-        [bdAccountIdsFiltered, organizationId]
-      );
-      const order = new Map(bdAccountIdsFiltered.map((id, i) => [id, i]));
-      accountIds = (check.rows as { id: string }[])
-        .map((r) => r.id)
-        .sort((a, b) => (order.get(a) ?? 999) - (order.get(b) ?? 999));
-    }
-    if (accountIds.length === 0) {
-      const fallback = await pool.query(
-        'SELECT id FROM bd_accounts WHERE organization_id = $1 AND is_active = true LIMIT 1',
-        [organizationId]
-      );
-      accountIds = fallback.rows.length > 0 ? [fallback.rows[0].id] : [];
-    }
-
-    const now = new Date();
-    let insertedCount = 0;
-    let cumulativeOffsetSeconds = 0;
-    let contactIndex = 0;
-    for (const row of contacts) {
-      let bdAccountId = accountIds.length > 0 ? accountIds[contactIndex % accountIds.length]! : null;
-      contactIndex++;
-      // Prefer username for campaign send-path because GramJS can resolve it server-side
-      // even when numeric Telegram ID is missing access_hash in session cache.
-      let channelId: string | null = resolveCampaignChannelId(row.telegram_id, row.username);
-      if (channelId && bdAccountId) {
-        const chatRes = await pool.query(
-          `SELECT bd_account_id, telegram_chat_id FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1`,
-          [bdAccountId, channelId]
-        );
-        if (chatRes.rows.length > 0) {
-          bdAccountId = chatRes.rows[0].bd_account_id;
-          channelId = String(chatRes.rows[0].telegram_chat_id);
-        }
-      }
-      if (!channelId || !bdAccountId) continue;
-      const nextSendAt = staggeredFirstSendAtByOffset(now, cumulativeOffsetSeconds, schedule);
-      const ins = await pool.query(
-        `INSERT INTO campaign_participants (campaign_id, contact_id, bd_account_id, channel_id, status, current_step, next_send_at, enqueue_order)
-         VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6)
-         ON CONFLICT (campaign_id, contact_id) DO NOTHING
-         RETURNING id`,
-        [id, row.contact_id, bdAccountId, channelId, nextSendAt, insertedCount]
-      );
-      if (ins.rowCount && ins.rows.length > 0) {
-        insertedCount++;
-        cumulativeOffsetSeconds += sampleDelaySeconds(delayRange);
-      }
-    }
+    const ordRow = await pool.query(
+      `SELECT COALESCE(MAX(enqueue_order), -1) + 1 AS n FROM campaign_participants WHERE campaign_id = $1`,
+      [id]
+    );
+    const enqueueOrderBase = Number((ordRow.rows[0] as { n?: number })?.n ?? 0);
+    const { inserted: insertedCount } = await bulkInsertCampaignParticipants(pool, {
+      campaignId: id,
+      organizationId,
+      contacts,
+      audience,
+      campaignSchedule,
+      enqueueOrderBase,
+    });
 
     // Fresh start: need at least one INSERT. Resume from pause: participants often already exist;
     // INSERT ... ON CONFLICT DO NOTHING yields insertedCount === 0 but rows are valid.
@@ -212,6 +167,92 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
     }
     const updated = await pool.query('SELECT * FROM campaigns WHERE id = $1', [id]);
     res.json(updated.rows[0]);
+  }));
+
+  router.post('/:id/participants/add', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    const rawIds = req.body?.contactIds;
+    if (!Array.isArray(rawIds) || rawIds.length === 0) {
+      throw new AppError(400, 'contactIds array required', ErrorCodes.VALIDATION);
+    }
+    const contactIds = [...new Set(rawIds.map((x) => String(x).trim()).filter((x) => x.length > 0))].slice(0, 2000);
+    if (contactIds.length === 0) {
+      throw new AppError(400, 'No valid contact IDs', ErrorCodes.VALIDATION);
+    }
+
+    const campaignRes = await pool.query(
+      'SELECT * FROM campaigns WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
+    if (campaignRes.rows.length === 0) {
+      throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+    }
+    const campaign = campaignRes.rows[0];
+    const status = campaign.status as string;
+    if (status === CampaignStatus.DRAFT || status === CampaignStatus.PAUSED || status === CampaignStatus.ACTIVE || status === CampaignStatus.COMPLETED) {
+      // ok
+    } else {
+      throw new AppError(400, 'Cannot add participants to this campaign status', ErrorCodes.BAD_REQUEST);
+    }
+
+    const seqRes = await pool.query('SELECT 1 FROM campaign_sequences WHERE campaign_id = $1 LIMIT 1', [id]);
+    if (seqRes.rows.length === 0) {
+      throw new AppError(400, 'Add at least one sequence step first', ErrorCodes.VALIDATION);
+    }
+
+    const audience = (campaign.target_audience || {}) as {
+      bdAccountId?: string;
+      bdAccountIds?: string[];
+      dailySendTarget?: number;
+      contactIds?: string[];
+    };
+    const campaignSchedule = (campaign.schedule ?? {}) as Schedule;
+
+    const contactsResult = await pool.query(
+      `SELECT c.id as contact_id, c.telegram_id, c.username
+       FROM contacts c
+       WHERE c.organization_id = $1
+       AND c.id = ANY($2::uuid[])
+       AND (
+         (c.telegram_id IS NOT NULL AND TRIM(c.telegram_id) != '')
+         OR (c.username IS NOT NULL AND TRIM(c.username) != '')
+       )`,
+      [organizationId, contactIds]
+    );
+    const contacts = contactsResult.rows as { contact_id: string; telegram_id: string | null; username: string | null }[];
+
+    const ordRow = await pool.query(
+      `SELECT COALESCE(MAX(enqueue_order), -1) + 1 AS n FROM campaign_participants WHERE campaign_id = $1`,
+      [id]
+    );
+    const enqueueOrderBase = Number((ordRow.rows[0] as { n?: number })?.n ?? 0);
+    const { inserted } = await bulkInsertCampaignParticipants(pool, {
+      campaignId: id,
+      organizationId,
+      contacts,
+      audience,
+      campaignSchedule,
+      enqueueOrderBase,
+    });
+
+    const mergedContactIds = [...new Set([...(Array.isArray(audience.contactIds) ? audience.contactIds : []), ...contactIds])];
+    const nextAudience = { ...audience, contactIds: mergedContactIds };
+    let nextStatus = status;
+    if (inserted > 0 && status === CampaignStatus.COMPLETED) {
+      nextStatus = CampaignStatus.ACTIVE;
+    }
+    await pool.query(
+      `UPDATE campaigns SET target_audience = $1::jsonb, status = $2, updated_at = NOW() WHERE id = $3 AND organization_id = $4`,
+      [JSON.stringify(nextAudience), nextStatus, id, organizationId]
+    );
+
+    res.json({
+      inserted,
+      requested: contactIds.length,
+      eligibleWithTelegram: contacts.length,
+      campaignStatus: nextStatus,
+    });
   }));
 
   router.post('/:id/pause', asyncHandler(async (req, res) => {

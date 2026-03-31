@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import { RabbitMQClient } from '@getsale/utils';
-import { EventType } from '@getsale/events';
+import { EventType, type MessageReceivedEvent } from '@getsale/events';
 import { CampaignStatus } from '@getsale/types';
 import { Logger } from '@getsale/logger';
 import { ServiceHttpClient } from '@getsale/service-core';
@@ -10,17 +10,22 @@ import {
   ensureLeadInPipeline,
   delayHoursFromStep,
   resolveCampaignChannelId,
-  resolveDelayRange,
-  sampleDelaySeconds,
+  spreadOffsetSecondsForSlot,
+  scheduleFromBdAccountRow,
+  getEffectiveSchedule,
   staggeredFirstSendAtByOffset,
   type Schedule,
 } from './helpers';
+import { runAutoResponderIfEligible } from './auto-responder';
 
 export interface EventHandlerDeps {
   pool: Pool;
   rabbitmq: RabbitMQClient;
   log: Logger;
   pipelineClient: ServiceHttpClient;
+  messagingClient: ServiceHttpClient;
+  bdAccountsClient: ServiceHttpClient;
+  aiClient: ServiceHttpClient;
 }
 
 export async function subscribeToEvents(deps: EventHandlerDeps): Promise<void> {
@@ -56,6 +61,24 @@ async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
   if (!contactId) {
     log.info({ message: 'MESSAGE_RECEIVED skipped: no contactId', eventId: event.id });
     return;
+  }
+
+  if (event.data?.direction === 'inbound') {
+    void runAutoResponderIfEligible(
+      {
+        pool,
+        log,
+        messagingClient: deps.messagingClient,
+        bdAccountsClient: deps.bdAccountsClient,
+        aiClient: deps.aiClient,
+      },
+      event as MessageReceivedEvent
+    ).catch((err) =>
+      log.warn({
+        message: 'auto-responder failed',
+        error: err instanceof Error ? err.message : String(err),
+      })
+    );
   }
 
   const bdAccountId = event.data?.bdAccountId ?? null;
@@ -226,6 +249,7 @@ async function addContactToDynamicCampaigns(
       sendDelaySeconds?: number;
       sendDelayMinSeconds?: number;
       sendDelayMaxSeconds?: number;
+      dailySendTarget?: number;
     };
     if (!aud.dynamicPipelineId || aud.dynamicPipelineId !== pipelineIdStr || !Array.isArray(aud.dynamicStageIds) || !aud.dynamicStageIds.includes(stageIdStr)) continue;
 
@@ -249,15 +273,33 @@ async function addContactToDynamicCampaigns(
     }
     if (!channelId) continue;
 
-    const schedule = (c.schedule as Schedule) ?? null;
-    const delayRange = resolveDelayRange(aud, 60);
+    const campaignSchedule = (c.schedule as Schedule) ?? null;
+    const accSch = await pool.query(
+      `SELECT timezone, working_hours_start, working_hours_end, working_days, COALESCE(max_dm_per_day, -1) AS m
+       FROM bd_accounts WHERE id = $1`,
+      [bdAccountId]
+    );
+    const accRow = accSch.rows[0] as {
+      timezone?: string | null;
+      working_hours_start?: string | null;
+      working_hours_end?: string | null;
+      working_days?: number[] | null;
+      m?: number;
+    };
+    const effectiveSchedule = getEffectiveSchedule(campaignSchedule, scheduleFromBdAccountRow(accRow));
+    const dm = Number(accRow?.m);
+    const audienceDaily =
+      typeof aud.dailySendTarget === 'number'
+        ? Math.min(500, Math.max(1, Math.floor(aud.dailySendTarget)))
+        : null;
+    const dailyCap = audienceDaily ?? (Number.isFinite(dm) && dm >= 0 ? dm : 20);
     const ord = await pool.query(
       'SELECT COALESCE(MAX(enqueue_order), -1) + 1 AS n FROM campaign_participants WHERE campaign_id = $1',
       [c.id]
     );
     const enqueueOrder = Number(ord.rows[0]?.n ?? 0);
-    const sampledDelay = sampleDelaySeconds(delayRange);
-    const nextSendAt = staggeredFirstSendAtByOffset(new Date(), enqueueOrder * sampledDelay, schedule);
+    const spreadSec = spreadOffsetSecondsForSlot(enqueueOrder, dailyCap, effectiveSchedule);
+    const nextSendAt = staggeredFirstSendAtByOffset(new Date(), spreadSec, effectiveSchedule);
     await pool.query(
       `INSERT INTO campaign_participants (campaign_id, contact_id, bd_account_id, channel_id, status, current_step, next_send_at, enqueue_order)
        VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6)

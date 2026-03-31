@@ -370,5 +370,72 @@ export function participantsRouter({ pool, log }: Deps): Router {
     res.json(rows);
   }));
 
+  router.get('/:id/sends', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    const { page: pageQ, limit: limitQ } = req.query;
+    const campaign = await pool.query(
+      'SELECT id FROM campaigns WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
+    if (campaign.rows.length === 0) {
+      throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+    }
+    const { page: pageNum, limit: limitNum, offset } = parsePageLimit(
+      { page: pageQ, limit: limitQ } as Record<string, unknown>,
+      50,
+      100
+    );
+    const countRes = await pool.query(
+      `SELECT COUNT(*)::int AS c
+       FROM campaign_sends cs
+       JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+       WHERE cp.campaign_id = $1`,
+      [id]
+    );
+    const total = Number((countRes.rows[0] as { c?: number })?.c ?? 0);
+    const listRes = await pool.query(
+      `SELECT cs.id AS send_id,
+              cs.sent_at,
+              cs.sequence_step,
+              cs.status AS delivery_status,
+              cs.message_id,
+              cp.id AS participant_id,
+              cp.contact_id,
+              COALESCE(NULLIF(TRIM(c.display_name), ''), NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), ''), c.username, c.telegram_id::text, cp.contact_id::text) AS contact_name,
+              m.content AS message_content,
+              m.status AS message_status
+       FROM campaign_sends cs
+       JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+       JOIN contacts c ON c.id = cp.contact_id
+       LEFT JOIN messages m ON m.id = cs.message_id
+       WHERE cp.campaign_id = $1
+       ORDER BY cs.sent_at DESC
+       LIMIT $2 OFFSET $3`,
+      [id, limitNum, offset]
+    );
+    const items = (listRes.rows as Record<string, unknown>[]).map((r) => ({
+      sendId: r.send_id,
+      sentAt: r.sent_at instanceof Date ? r.sent_at.toISOString() : r.sent_at,
+      sequenceStep: r.sequence_step,
+      status: r.delivery_status,
+      messageId: r.message_id,
+      participantId: r.participant_id,
+      contactId: r.contact_id,
+      contactName: r.contact_name ?? '',
+      messageContent: r.message_content != null ? String(r.message_content) : null,
+      messageStatus: r.message_status ?? null,
+    }));
+    res.json({
+      data: items,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limitNum)),
+      },
+    });
+  }));
+
   return router;
 }

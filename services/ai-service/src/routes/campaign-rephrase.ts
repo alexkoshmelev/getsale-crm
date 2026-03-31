@@ -4,6 +4,17 @@ import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-c
 import { AIRateLimiter } from '../rate-limiter';
 import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL } from '../openrouter-campaign-config';
 import { AiCampaignRephraseSchema, type AiCampaignRephraseInput } from '../validation';
+import { sanitizeCampaignRephraseOutput } from './campaign-rephrase-sanitize';
+
+const REPHRASE_SYSTEM_PROMPT = `You rewrite Telegram DM messages for outreach. Follow STRICTLY:
+
+1. Keep EXACTLY the same paragraph structure: same number of blocks separated by blank lines (use \\n\\n between paragraphs only, no single \\n for a new paragraph unless the original had it inside a block).
+2. Use ONLY short ASCII hyphens (-). NEVER use em-dasses (—), en-dashes (–), or double hyphens (--) where a single hyphen would read naturally; prefer comma or period instead of long dashes.
+3. Preserve emoji: same emojis in the same order and approximate positions (do not add or remove emojis).
+4. Change wording, sentence order where natural, and phrasing so the text is unique, but keep the same meaning, intent, and tone.
+5. Output ONLY the final message body — no quotes, no preamble, no labels like "Here is", no meta commentary.
+6. Keep the same language as the input (do not translate).`;
+
 
 interface Deps {
   log: Logger;
@@ -61,8 +72,9 @@ export function campaignRephraseRouter({ log, rateLimiter }: Deps): Router {
     }
 
     const userText =
-      'Rephrase the following message for a personal Telegram DM. Use different wording and sentence structure so it feels unique. Keep the same meaning and a natural tone. Reply with ONLY the rephrased message text (same language as the input). No preamble, no quotes, no explanation.\n\n'
-      + text;
+      'Rephrase the message below for a personal Telegram DM. Preserve paragraph breaks exactly as in the input (count of \\n\\n-separated blocks must match).\n\n---\n'
+      + text
+      + '\n---';
 
     const maxTokens = parseOpenRouterMaxTokens();
     const openRouterTimeoutMs = parseOpenRouterTimeoutMs();
@@ -79,11 +91,7 @@ export function campaignRephraseRouter({ log, rateLimiter }: Deps): Router {
         body: JSON.stringify({
           model,
           messages: [
-            {
-              role: 'system',
-              content:
-                'You write short Telegram DM text. Output only the final message body — never chain-of-thought, never "Okay let me", never meta commentary.',
-            },
+            { role: 'system', content: REPHRASE_SYSTEM_PROMPT },
             { role: 'user', content: userText },
           ],
           max_tokens: maxTokens,
@@ -120,9 +128,12 @@ export function campaignRephraseRouter({ log, rateLimiter }: Deps): Router {
         throw new AppError(502, 'AI rephrase returned empty response', ErrorCodes.SERVICE_UNAVAILABLE);
       }
 
+      const sanitizedRaw = sanitizeCampaignRephraseOutput(text, content);
+      const sanitized = sanitizedRaw.length > 0 ? sanitizedRaw : content;
+
       await rateLimiter.increment(organizationId);
       log.info({ message: 'Campaign rephrase success', organizationId, model });
-      res.json({ content, model, provider: 'openrouter' });
+      res.json({ content: sanitized, model, provider: 'openrouter' });
     } catch (err) {
       clearTimeout(timeout);
       if (err instanceof AppError) throw err;

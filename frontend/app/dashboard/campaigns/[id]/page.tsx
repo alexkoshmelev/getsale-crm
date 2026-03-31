@@ -19,6 +19,8 @@ import {
   Clock,
   Calendar,
   Percent,
+  UserPlus,
+  History,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { reportError, reportWarning } from '@/lib/error-reporter';
@@ -30,9 +32,12 @@ import {
   pauseCampaign,
   updateCampaign,
   enrichContactsFromTelegram,
+  addCampaignParticipants,
+  fetchCampaignSends,
   type CampaignWithDetails,
   type CampaignStats,
   type CampaignAnalytics,
+  type CampaignSendsPage,
 } from '@/lib/api/campaigns';
 import { SequenceBuilderCanvas } from '@/components/campaigns/SequenceBuilderCanvas';
 import { CampaignAudienceSchedule } from '@/components/campaigns/CampaignAudienceSchedule';
@@ -55,7 +60,7 @@ import { safeGetItem, safeSetItem } from '@/lib/safe-storage';
 
 const PRELAUNCH_SEEN_KEY = 'getsale-campaign-prelaunch-seen';
 
-type Tab = 'overview' | 'participants' | 'sequence' | 'audience';
+type Tab = 'overview' | 'participants' | 'sequence' | 'audience' | 'sends';
 
 /** Форматирует длительность динамически: минуты, часы, дни, недели. */
 function formatDuration(start: string, end: string, t: (key: string, opts?: Record<string, unknown>) => string): string {
@@ -147,7 +152,7 @@ export default function CampaignDetailPage() {
   const id = (Array.isArray(rawId) ? rawId[0] : rawId) ?? '';
   const tabFromUrl = (searchParams?.get('tab') || 'overview') as Tab;
   const [tab, setTab] = useState<Tab>(
-    ['overview', 'sequence', 'audience', 'participants'].includes(tabFromUrl) ? tabFromUrl : 'overview'
+    ['overview', 'sequence', 'audience', 'participants', 'sends'].includes(tabFromUrl) ? tabFromUrl : 'overview'
   );
   const [campaign, setCampaign] = useState<CampaignWithDetails | null>(null);
   const [stats, setStats] = useState<CampaignStats | null>(null);
@@ -157,6 +162,12 @@ export default function CampaignDetailPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [showPreLaunchModal, setShowPreLaunchModal] = useState(false);
   const [pendingStartAfterModal, setPendingStartAfterModal] = useState(false);
+  const [showAddParticipantsModal, setShowAddParticipantsModal] = useState(false);
+  const [addParticipantIdsText, setAddParticipantIdsText] = useState('');
+  const [addParticipantsLoading, setAddParticipantsLoading] = useState(false);
+  const [sendsPage, setSendsPage] = useState(1);
+  const [sendsData, setSendsData] = useState<CampaignSendsPage | null>(null);
+  const [sendsLoading, setSendsLoading] = useState(false);
   const campaignRef = useRef<CampaignWithDetails | null>(null);
   campaignRef.current = campaign ?? null;
 
@@ -196,8 +207,33 @@ export default function CampaignDetailPage() {
 
   useEffect(() => {
     const tabParam = searchParams?.get('tab');
-    if (tabParam === 'sequence' || tabParam === 'overview' || tabParam === 'audience' || tabParam === 'participants') setTab(tabParam);
+    if (
+      tabParam === 'sequence' ||
+      tabParam === 'overview' ||
+      tabParam === 'audience' ||
+      tabParam === 'participants' ||
+      tabParam === 'sends'
+    )
+      setTab(tabParam);
   }, [searchParams]);
+
+  const loadSends = async () => {
+    if (!id) return;
+    setSendsLoading(true);
+    try {
+      const d = await fetchCampaignSends(id, { page: sendsPage, limit: 40 });
+      setSendsData(d);
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'loadSends' });
+      setSendsData(null);
+    } finally {
+      setSendsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (id && tab === 'sends') loadSends();
+  }, [id, tab, sendsPage]);
 
   useEffect(() => {
     load();
@@ -300,7 +336,32 @@ export default function CampaignDetailPage() {
   const canStart = campaign.status === 'draft' || campaign.status === 'paused' || campaign.status === 'completed';
   const canPause = campaign.status === 'active';
   const canStop = campaign.status === 'active' || campaign.status === 'paused';
-  const isCompleted = campaign.status === 'completed';
+  const canAddParticipants =
+    campaign.status === 'draft' ||
+    campaign.status === 'paused' ||
+    campaign.status === 'active' ||
+    campaign.status === 'completed';
+
+  const submitAddParticipants = async () => {
+    if (!id) return;
+    const raw = addParticipantIdsText
+      .split(/[\s,;]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const ids = [...new Set(raw)];
+    if (ids.length === 0) return;
+    setAddParticipantsLoading(true);
+    try {
+      await addCampaignParticipants(id, ids);
+      setShowAddParticipantsModal(false);
+      setAddParticipantIdsText('');
+      await load();
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'addParticipants' });
+    } finally {
+      setAddParticipantsLoading(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -335,14 +396,16 @@ export default function CampaignDetailPage() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {canAddParticipants && (
+              <Button variant="outline" onClick={() => setShowAddParticipantsModal(true)} disabled={actionLoading}>
+                <UserPlus className="w-4 h-4 mr-2" />
+                {t('campaigns.addParticipants', { defaultValue: 'Add participants' })}
+              </Button>
+            )}
             {canStart && (
               <Button onClick={handleStart} disabled={actionLoading}>
                 {actionLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 mr-2" />}
-                {isCompleted
-                  ? t('campaigns.startAgain')
-                  : campaign.status === 'paused'
-                    ? t('campaigns.resumeCampaign')
-                    : t('campaigns.startCampaign')}
+                {campaign.status === 'draft' ? t('campaigns.startCampaign') : t('campaigns.resumeCampaign')}
               </Button>
             )}
             {canPause && (
@@ -409,6 +472,21 @@ export default function CampaignDetailPage() {
           )}
         >
           {t('campaigns.sequence')}
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab('sends')}
+          className={clsx(
+            'px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors',
+            tab === 'sends'
+              ? 'bg-card text-foreground border border-border border-b-0 -mb-px'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+          )}
+        >
+          <span className="inline-flex items-center gap-1.5">
+            <History className="w-3.5 h-3.5" />
+            {t('campaigns.sendHistory', { defaultValue: 'Send history' })}
+          </span>
         </button>
       </nav>
 
@@ -743,6 +821,114 @@ export default function CampaignDetailPage() {
           onUpdate={load}
         />
       )}
+
+      {tab === 'sends' && (
+        <div className="rounded-xl border border-border bg-card overflow-hidden">
+          <div className="p-4 border-b border-border flex flex-wrap items-center justify-between gap-2">
+            <h3 className="font-medium text-foreground">{t('campaigns.sendHistory', { defaultValue: 'Send history' })}</h3>
+            {sendsData && (
+              <span className="text-xs text-muted-foreground">
+                {t('campaigns.sendHistoryTotal', { defaultValue: '{{count}} sends', count: sendsData.pagination.total })}
+              </span>
+            )}
+          </div>
+          {sendsLoading ? (
+            <div className="flex justify-center py-16">
+              <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+            </div>
+          ) : sendsData && sendsData.data.length === 0 ? (
+            <p className="p-6 text-sm text-muted-foreground">{t('common.noData')}</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border bg-muted/30 text-left text-muted-foreground">
+                    <th className="p-3 font-medium">{t('campaigns.sentAt', { defaultValue: 'Sent' })}</th>
+                    <th className="p-3 font-medium">{t('campaigns.contact', { defaultValue: 'Contact' })}</th>
+                    <th className="p-3 font-medium">{t('campaigns.step', { defaultValue: 'Step' })}</th>
+                    <th className="p-3 font-medium">{t('campaigns.status', { defaultValue: 'Status' })}</th>
+                    <th className="p-3 font-medium">{t('campaigns.message', { defaultValue: 'Message' })}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(sendsData?.data ?? []).map((row) => (
+                    <tr key={row.sendId} className="border-b border-border/80">
+                      <td className="p-3 whitespace-nowrap text-muted-foreground">{formatDateTime(row.sentAt)}</td>
+                      <td className="p-3 max-w-[140px] truncate" title={row.contactName}>
+                        {row.contactName}
+                      </td>
+                      <td className="p-3 tabular-nums">{row.sequenceStep + 1}</td>
+                      <td className="p-3">
+                        <span className="text-xs">{row.status}</span>
+                        {row.messageStatus && (
+                          <span className="text-xs text-muted-foreground block">{row.messageStatus}</span>
+                        )}
+                      </td>
+                      <td className="p-3 max-w-md truncate text-muted-foreground" title={row.messageContent ?? ''}>
+                        {row.messageContent ?? '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {sendsData && sendsData.pagination.totalPages > 1 && (
+            <div className="p-3 flex justify-center gap-2 border-t border-border">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={sendsPage <= 1}
+                onClick={() => setSendsPage((p) => Math.max(1, p - 1))}
+              >
+                {t('common.prev', { defaultValue: 'Previous' })}
+              </Button>
+              <span className="text-sm text-muted-foreground self-center px-2">
+                {sendsPage} / {sendsData.pagination.totalPages}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={sendsPage >= sendsData.pagination.totalPages}
+                onClick={() => setSendsPage((p) => p + 1)}
+              >
+                {t('common.next', { defaultValue: 'Next' })}
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <Modal
+        isOpen={showAddParticipantsModal}
+        onClose={() => !addParticipantsLoading && setShowAddParticipantsModal(false)}
+        title={t('campaigns.addParticipantsTitle', { defaultValue: 'Add participants' })}
+      >
+        <div className="px-6 py-4 space-y-3">
+          <p className="text-sm text-muted-foreground">
+            {t('campaigns.addParticipantsHint', {
+              defaultValue: 'Contact IDs (UUID), one per line or comma-separated. Duplicates are skipped. Completed campaigns become active when new participants are added.',
+            })}
+          </p>
+          <textarea
+            value={addParticipantIdsText}
+            onChange={(e) => setAddParticipantIdsText(e.target.value)}
+            rows={6}
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono"
+            placeholder="550e8400-e29b-41d4-a716-446655440000"
+            disabled={addParticipantsLoading}
+          />
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setShowAddParticipantsModal(false)} disabled={addParticipantsLoading}>
+              {t('common.cancel')}
+            </Button>
+            <Button onClick={submitAddParticipants} disabled={addParticipantsLoading || !addParticipantIdsText.trim()}>
+              {addParticipantsLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              {t('campaigns.addParticipants', { defaultValue: 'Add participants' })}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         isOpen={showPreLaunchModal}

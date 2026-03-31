@@ -4,7 +4,7 @@ import { Logger } from '@getsale/logger';
 import { CampaignStatus } from '@getsale/types';
 import { ServiceHttpClient, ServiceCallError } from '@getsale/service-core';
 import {
-  Schedule,
+  type Schedule,
   SendDelayRange,
   StepConditions,
   evaluateStepConditions,
@@ -18,6 +18,8 @@ import {
   getSentTodayByAccount,
   resolveDelayRange,
   sampleDelaySeconds,
+  scheduleFromBdAccountRow,
+  getEffectiveSchedule,
 } from './helpers';
 import { campaignMinGapDeferTotal } from './metrics';
 import type { CampaignStep, DueParticipantRow } from './types';
@@ -60,8 +62,9 @@ async function simulateHumanBehavior(
   organizationId: string,
   log: Logger
 ): Promise<void> {
+  const ctx = { organizationId };
   try {
-    await bdAccountsClient.post('/api/bd-accounts/' + bdAccountId + '/read', { chatId: channelId }, undefined, { organizationId });
+    await bdAccountsClient.post('/api/bd-accounts/' + bdAccountId + '/read', { chatId: channelId }, undefined, ctx);
   } catch (e) {
     log.warn({ message: 'Human sim: markAsRead failed', bdAccountId, error: e instanceof Error ? e.message : String(e) });
   }
@@ -69,14 +72,51 @@ async function simulateHumanBehavior(
   const readDelay = 1000 + Math.floor(Math.random() * 2000);
   await new Promise((r) => setTimeout(r, readDelay));
 
-  try {
-    await bdAccountsClient.post('/api/bd-accounts/' + bdAccountId + '/typing', { chatId: channelId }, undefined, { organizationId });
-  } catch (e) {
-    log.warn({ message: 'Human sim: setTyping failed', bdAccountId, error: e instanceof Error ? e.message : String(e) });
-  }
-
   const typingDelay = Math.min(12000, Math.max(3000, messageLength * 40 + Math.floor(Math.random() * 2000)));
-  await new Promise((r) => setTimeout(r, typingDelay));
+
+  const renewTyping = async (): Promise<void> => {
+    try {
+      await bdAccountsClient.post('/api/bd-accounts/' + bdAccountId + '/typing', { chatId: channelId }, undefined, ctx);
+    } catch (e) {
+      log.warn({ message: 'Human sim: setTyping failed', bdAccountId, error: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
+  await renewTyping();
+
+  const TYPING_STATUS_TTL_MS = 5500;
+  const midPause =
+    messageLength > 120 && Math.random() < 0.45
+      ? 800 + Math.floor(Math.random() * 2200)
+      : 0;
+  let remaining = typingDelay;
+  if (midPause > 0 && remaining > midPause + 1500) {
+    const first = Math.floor(remaining / 2);
+    remaining -= first;
+    let elapsed = 0;
+    while (elapsed < first) {
+      const chunk = Math.min(TYPING_STATUS_TTL_MS, first - elapsed);
+      await new Promise((r) => setTimeout(r, chunk));
+      elapsed += chunk;
+      if (messageLength > 200 && elapsed < first - 500) await renewTyping();
+    }
+    await new Promise((r) => setTimeout(r, midPause));
+    if (messageLength > 200) await renewTyping();
+    while (remaining > 0) {
+      const chunk = Math.min(TYPING_STATUS_TTL_MS, remaining);
+      await new Promise((r) => setTimeout(r, chunk));
+      remaining -= chunk;
+      if (messageLength > 200 && remaining > 500) await renewTyping();
+    }
+  } else {
+    let elapsed = 0;
+    while (elapsed < typingDelay) {
+      const chunk = Math.min(TYPING_STATUS_TTL_MS, typingDelay - elapsed);
+      await new Promise((r) => setTimeout(r, chunk));
+      elapsed += chunk;
+      if (messageLength > 200 && elapsed < typingDelay - 500) await renewTyping();
+    }
+  }
 }
 
 async function fetchDueParticipant(client: PoolClient): Promise<DueParticipantRow | null> {
@@ -145,7 +185,7 @@ async function loadCampaignSteps(
   if (cache.has(campaignId)) return cache.get(campaignId)!;
 
   const seq = await pool.query(
-    `SELECT cs.id, cs.order_index, cs.template_id, cs.delay_hours, cs.delay_minutes, cs.trigger_type, cs.conditions, ct.content
+    `SELECT cs.id, cs.order_index, cs.template_id, cs.delay_hours, cs.delay_minutes, cs.trigger_type, cs.conditions, COALESCE(cs.is_hidden, false) AS is_hidden, ct.content
      FROM campaign_sequences cs
      JOIN campaign_templates ct ON ct.id = cs.template_id
      WHERE cs.campaign_id = $1 ORDER BY cs.order_index`,
@@ -349,10 +389,20 @@ async function processParticipant(
   meta: CampaignMeta | undefined,
   sentMap: Map<string, number>,
   deps: CampaignLoopDeps,
-  lastCampaignSendAtMsByBdAccount?: Map<string, number>
+  lastCampaignSendAtMsByBdAccount: Map<string, number> | undefined,
+  bdScheduleCache: Map<string, Schedule | null>
 ): Promise<void> {
   const { log, messagingClient, pipelineClient, bdAccountsClient, aiClient } = deps;
-  const schedule = meta?.schedule ?? null;
+  let accSched = bdScheduleCache.get(row.bd_account_id);
+  if (accSched === undefined) {
+    const r = await pool.query(
+      `SELECT timezone, working_hours_start, working_hours_end, working_days FROM bd_accounts WHERE id = $1`,
+      [row.bd_account_id]
+    );
+    accSched = scheduleFromBdAccountRow(r.rows[0]);
+    bdScheduleCache.set(row.bd_account_id, accSched);
+  }
+  const schedule = getEffectiveSchedule(meta?.schedule ?? null, accSched);
 
   const contactRes = await pool.query(
     `SELECT c.first_name, c.last_name, c.email, c.phone, c.telegram_id, c.username, co.name as company_name
@@ -367,6 +417,15 @@ async function processParticipant(
     pool, row.organization_id, row.contact_id, conditions, contact, row.status
   );
   if (!shouldSend) {
+    await advanceToNextStep(client, row.participant_id, row.current_step, steps, schedule, {
+      enqueueOrder: row.enqueue_order,
+      sendDelayRange: meta?.sendDelayRange ?? { minSeconds: 0, maxSeconds: 0 },
+    });
+    await client.query('COMMIT');
+    return;
+  }
+
+  if (step.is_hidden) {
     await advanceToNextStep(client, row.participant_id, row.current_step, steps, schedule, {
       enqueueOrder: row.enqueue_order,
       sendDelayRange: meta?.sendDelayRange ?? { minSeconds: 0, maxSeconds: 0 },
@@ -480,8 +539,12 @@ async function processParticipant(
         ]
       );
       await client.query(
-        `UPDATE bd_accounts SET send_blocked_until = $1 WHERE id = $2`,
-        [retryAt.toISOString(), row.bd_account_id]
+        `UPDATE bd_accounts SET send_blocked_until = $1,
+           flood_wait_until = $1,
+           flood_wait_seconds = $2,
+           updated_at = NOW()
+         WHERE id = $3`,
+        [retryAt.toISOString(), retryAfterSeconds, row.bd_account_id]
       );
       await client.query('COMMIT');
       log.warn({
@@ -552,6 +615,7 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
     const sentMap = await getSentTodayByAccount(pool);
     const campaignMetaCache = new Map<string, CampaignMeta>();
     const stepsCache = new Map<string, CampaignStep[]>();
+    const bdScheduleCache = new Map<string, Schedule | null>();
     const processedCampaignIds = new Set<string>();
     const lastCampaignSendAtMsByBdAccount = new Map<string, number>();
 
@@ -593,12 +657,21 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
 
         const meta = await loadCampaignMeta(pool, row.campaign_id, campaignMetaCache);
         const steps = await loadCampaignSteps(pool, row.campaign_id, stepsCache);
-        const schedule = meta?.schedule ?? null;
+        let accSchedLoop = bdScheduleCache.get(row.bd_account_id);
+        if (accSchedLoop === undefined) {
+          const rSch = await pool.query(
+            `SELECT timezone, working_hours_start, working_hours_end, working_days FROM bd_accounts WHERE id = $1`,
+            [row.bd_account_id]
+          );
+          accSchedLoop = scheduleFromBdAccountRow(rSch.rows[0]);
+          bdScheduleCache.set(row.bd_account_id, accSchedLoop);
+        }
+        const effectiveScheduleLoop = getEffectiveSchedule(meta?.schedule ?? null, accSchedLoop);
 
-        if (!isWithinSchedule(schedule)) {
+        if (!isWithinSchedule(effectiveScheduleLoop)) {
           await client.query(
             `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
-            [nextSlotRetry(schedule), row.participant_id]
+            [nextSlotRetry(effectiveScheduleLoop), row.participant_id]
           );
           await client.query('COMMIT');
           continue;
@@ -612,7 +685,7 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
           tomorrowStart.setUTCDate(tomorrowStart.getUTCDate() + 1);
           await client.query(
             `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
-            [nextSendAtWithSchedule(tomorrowStart, 0, schedule), row.participant_id]
+            [nextSendAtWithSchedule(tomorrowStart, 0, effectiveScheduleLoop), row.participant_id]
           );
           await client.query('COMMIT');
           continue;
@@ -630,7 +703,18 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
           continue;
         }
 
-        await processParticipant(client, pool, row, step, steps, meta, sentMap, deps, lastCampaignSendAtMsByBdAccount);
+        await processParticipant(
+          client,
+          pool,
+          row,
+          step,
+          steps,
+          meta,
+          sentMap,
+          deps,
+          lastCampaignSendAtMsByBdAccount,
+          bdScheduleCache
+        );
       } catch (e) {
         await client?.query('ROLLBACK').catch(() => {});
         log.warn({

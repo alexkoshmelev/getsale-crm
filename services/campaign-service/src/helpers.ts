@@ -130,6 +130,55 @@ export function isWithinSchedule(schedule: Schedule): boolean {
   return isWithinScheduleAt(new Date(), schedule);
 }
 
+export type BdAccountScheduleRow = {
+  timezone?: string | null;
+  working_hours_start?: string | null;
+  working_hours_end?: string | null;
+  working_days?: number[] | null;
+};
+
+/** Build campaign `Schedule` from `bd_accounts` working window columns. */
+export function scheduleFromBdAccountRow(row: BdAccountScheduleRow | null | undefined): Schedule {
+  if (!row?.working_hours_start || !row.working_hours_end || !row.working_days?.length) return null;
+  return {
+    timezone: (row.timezone && String(row.timezone).trim()) || 'UTC',
+    workingHours: { start: String(row.working_hours_start), end: String(row.working_hours_end) },
+    daysOfWeek: row.working_days,
+  };
+}
+
+/** Use campaign schedule when it defines a full window; otherwise fall back to BD account schedule. */
+export function getEffectiveSchedule(campaignSchedule: Schedule, accountSchedule: Schedule): Schedule {
+  if (
+    campaignSchedule?.workingHours?.start &&
+    campaignSchedule?.workingHours?.end &&
+    campaignSchedule.daysOfWeek?.length
+  ) {
+    return campaignSchedule;
+  }
+  return accountSchedule;
+}
+
+/**
+ * Seconds offset for participant queue index so up to `dailyCap` first-wave sends spread across the working-day window.
+ */
+export function spreadOffsetSecondsForSlot(slotIndex: number, dailyCap: number, schedule: Schedule): number {
+  if (!schedule?.workingHours?.start || !schedule.workingHours?.end || dailyCap <= 0) {
+    return Math.max(0, slotIndex) * 60;
+  }
+  const startParts = schedule.workingHours.start.split(':').map((x) => Number(x));
+  const endParts = schedule.workingHours.end.split(':').map((x) => Number(x));
+  const sh = startParts[0] ?? 0;
+  const sm = startParts[1] ?? 0;
+  const eh = endParts[0] ?? 0;
+  const em = endParts[1] ?? 0;
+  const windowSec = Math.max(300, eh * 3600 + em * 60 - sh * 3600 - sm * 60);
+  const baseInterval = Math.max(60, Math.floor(windowSec / Math.max(1, dailyCap)));
+  const jitterMag = Math.max(10, Math.floor(baseInterval * 0.1));
+  const jitter = slotIndex === 0 ? 0 : Math.floor(Math.random() * (2 * jitterMag + 1)) - jitterMag;
+  return Math.max(0, slotIndex * baseInterval + jitter);
+}
+
 export function nextSendAtWithSchedule(from: Date, delayHours: number, schedule: Schedule): Date {
   const base = new Date(from.getTime() + delayHours * 60 * 60 * 1000);
   if (!schedule?.workingHours?.start || !schedule?.workingHours?.end || !schedule.daysOfWeek?.length) return base;

@@ -12,6 +12,7 @@ const SequenceCreateSchema = z.object({
   delayMinutes: z.number().int().min(0).max(59).optional(),
   conditions: z.record(z.unknown()).optional(),
   triggerType: z.enum(['delay', 'after_reply']).optional(),
+  isHidden: z.boolean().optional(),
 });
 
 const SequenceUpdateSchema = z.object({
@@ -21,6 +22,7 @@ const SequenceUpdateSchema = z.object({
   delayMinutes: z.number().int().min(0).max(59).optional(),
   conditions: z.record(z.unknown()).optional(),
   triggerType: z.enum(['delay', 'after_reply']).optional(),
+  isHidden: z.boolean().optional(),
 });
 
 interface Deps {
@@ -51,7 +53,7 @@ export function sequencesRouter({ pool }: Deps): Router {
   router.post('/:id/sequences', validate(SequenceCreateSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
-    const { orderIndex, templateId, delayHours, delayMinutes, conditions, triggerType } = req.body;
+    const { orderIndex, templateId, delayHours, delayMinutes, conditions, triggerType, isHidden } = req.body;
     const campaign = await pool.query(
       'SELECT id FROM campaigns WHERE id = $1 AND organization_id = $2',
       [id, organizationId]
@@ -68,11 +70,12 @@ export function sequencesRouter({ pool }: Deps): Router {
     }
     const seqId = randomUUID();
     const trigger = triggerType === 'after_reply' ? 'after_reply' : 'delay';
+    const hidden = Boolean(isHidden);
     const row = await withOrgContext(pool, organizationId, async (client) => {
       await client.query(
-        `INSERT INTO campaign_sequences (id, campaign_id, order_index, template_id, delay_hours, delay_minutes, conditions, trigger_type)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [seqId, id, orderIndex ?? 0, templateId, delayHours ?? 24, delayMinutes ?? 0, JSON.stringify(conditions || {}), trigger]
+        `INSERT INTO campaign_sequences (id, campaign_id, order_index, template_id, delay_hours, delay_minutes, conditions, trigger_type, is_hidden)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [seqId, id, orderIndex ?? 0, templateId, delayHours ?? 24, delayMinutes ?? 0, JSON.stringify(conditions || {}), trigger, hidden]
       );
       const r = await client.query(
         'SELECT cs.*, ct.name as template_name FROM campaign_sequences cs JOIN campaign_templates ct ON ct.id = cs.template_id WHERE cs.id = $1',
@@ -86,7 +89,7 @@ export function sequencesRouter({ pool }: Deps): Router {
   router.patch('/:campaignId/sequences/:stepId', validate(SequenceUpdateSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { campaignId, stepId } = req.params;
-    const { orderIndex, templateId, delayHours, delayMinutes, conditions, triggerType } = req.body;
+    const { orderIndex, templateId, delayHours, delayMinutes, conditions, triggerType, isHidden } = req.body;
     const campaign = await pool.query(
       'SELECT id FROM campaigns WHERE id = $1 AND organization_id = $2',
       [campaignId, organizationId]
@@ -120,6 +123,10 @@ export function sequencesRouter({ pool }: Deps): Router {
     if (triggerType !== undefined) {
       params.push(triggerType === 'after_reply' ? 'after_reply' : 'delay');
       updates.push(`trigger_type = $${idx++}`);
+    }
+    if (isHidden !== undefined) {
+      params.push(isHidden === true);
+      updates.push(`is_hidden = $${idx++}`);
     }
     if (params.length === 0) {
       const r = await withOrgContext(pool, organizationId, (client) =>

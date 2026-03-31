@@ -14,6 +14,10 @@ import {
   BdAccountConfigSchema,
 } from '../validation';
 
+/** Columns returned by GET /:id and PATCH /:id (keep in sync with list when adding fields). */
+const BD_ACCOUNT_DETAIL_SELECT =
+  'id, organization_id, telegram_id, phone_number, is_active, is_demo, connected_at, last_activity, created_at, sync_status, sync_progress_done, sync_progress_total, sync_error, created_by_user_id AS owner_id, first_name, last_name, username, bio, photo_file_id, display_name, proxy_config, connection_state, disconnect_reason, last_error_code, last_error_at, flood_wait_until, flood_wait_seconds, timezone, working_hours_start, working_hours_end, working_days, auto_responder_enabled, auto_responder_system_prompt, auto_responder_history_count';
+
 interface Deps {
   pool: Pool;
   rabbitmq: RabbitMQClient;
@@ -91,6 +95,8 @@ export function accountsRouter({
               a.created_by_user_id AS owner_id,
               a.first_name, a.last_name, a.username, a.bio, a.photo_file_id, a.display_name, a.proxy_config,
               a.connection_state, a.disconnect_reason, a.last_error_code, a.last_error_at,
+              a.flood_wait_until, a.flood_wait_seconds, a.timezone, a.working_hours_start, a.working_hours_end, a.working_days,
+              a.auto_responder_enabled, a.auto_responder_system_prompt, a.auto_responder_history_count,
               s.status AS last_status, s.message AS last_status_message, s.recorded_at AS last_status_at
        FROM bd_accounts a
        LEFT JOIN LATERAL (
@@ -145,7 +151,7 @@ export function accountsRouter({
       pool,
       id,
       organizationId,
-      'id, organization_id, telegram_id, phone_number, is_active, is_demo, connected_at, last_activity, created_at, sync_status, sync_progress_done, sync_progress_total, sync_error, created_by_user_id AS owner_id, first_name, last_name, username, bio, photo_file_id, display_name, proxy_config, connection_state, disconnect_reason, last_error_code, last_error_at'
+      BD_ACCOUNT_DETAIL_SELECT
     );
     const isConnected = telegramManager.isConnected(id);
     res.json({
@@ -157,8 +163,9 @@ export function accountsRouter({
   // PATCH /:id — update display_name and/or proxy_config
   router.patch('/:id', validate(BdAccountPatchSchema), asyncHandler(async (req, res) => {
     const user = req.user;
+    const { id: userId } = req.user;
     const { id } = req.params;
-    const body = req.body ?? {};
+    const body = (req.body ?? {}) as Record<string, unknown>;
     const displayName = body.display_name;
     const proxyConfig = body.proxy_config;
 
@@ -176,7 +183,7 @@ export function accountsRouter({
     }
 
     const sets: string[] = [];
-    const params: (string | null)[] = [];
+    const params: unknown[] = [];
     let idx = 1;
 
     if (displayName !== undefined) {
@@ -189,38 +196,86 @@ export function accountsRouter({
       if (proxyConfig === null) {
         sets.push(`proxy_config = $${idx++}`);
         params.push(null);
-      } else if (typeof proxyConfig === 'object' && proxyConfig.host && proxyConfig.port) {
-        if ((proxyConfig as { type?: string }).type === 'http') {
-          throw new AppError(
-            400,
-            'HTTP/HTTPS proxy is not supported by current Telegram client. Please use SOCKS5 proxy.',
-            ErrorCodes.VALIDATION
-          );
+      } else if (typeof proxyConfig === 'object' && proxyConfig !== null) {
+        const pc = proxyConfig as { type?: string; host?: string; port?: number; username?: string; password?: string };
+        if (pc.host && pc.port) {
+          if (pc.type === 'http') {
+            throw new AppError(
+              400,
+              'HTTP/HTTPS proxy is not supported by current Telegram client. Please use SOCKS5 proxy.',
+              ErrorCodes.VALIDATION
+            );
+          }
+          sets.push(`proxy_config = $${idx++}`);
+          params.push(JSON.stringify({
+            type: 'socks5',
+            host: String(pc.host).trim(),
+            port: Number(pc.port),
+            ...(pc.username ? { username: String(pc.username) } : {}),
+            ...(pc.password ? { password: String(pc.password) } : {}),
+          }));
         }
-        sets.push(`proxy_config = $${idx++}`);
-        params.push(JSON.stringify({
-          type: 'socks5',
-          host: String(proxyConfig.host).trim(),
-          port: Number(proxyConfig.port),
-          ...(proxyConfig.username ? { username: String(proxyConfig.username) } : {}),
-          ...(proxyConfig.password ? { password: String(proxyConfig.password) } : {}),
-        }));
       }
     }
 
+    if (body.timezone !== undefined) {
+      const v = body.timezone;
+      sets.push(`timezone = $${idx++}`);
+      params.push(v === null || v === '' ? null : String(v).trim());
+    }
+    if (body.working_hours_start !== undefined) {
+      sets.push(`working_hours_start = $${idx++}`);
+      params.push(body.working_hours_start === null || body.working_hours_start === '' ? null : String(body.working_hours_start));
+    }
+    if (body.working_hours_end !== undefined) {
+      sets.push(`working_hours_end = $${idx++}`);
+      params.push(body.working_hours_end === null || body.working_hours_end === '' ? null : String(body.working_hours_end));
+    }
+    if (body.working_days !== undefined) {
+      sets.push(`working_days = $${idx++}`);
+      params.push(body.working_days === null ? null : body.working_days);
+    }
+    if (body.auto_responder_enabled !== undefined) {
+      sets.push(`auto_responder_enabled = $${idx++}`);
+      params.push(Boolean(body.auto_responder_enabled));
+    }
+    if (body.auto_responder_system_prompt !== undefined) {
+      sets.push(`auto_responder_system_prompt = $${idx++}`);
+      const p = body.auto_responder_system_prompt;
+      params.push(p === null || p === '' ? null : String(p));
+    }
+    if (body.auto_responder_history_count !== undefined) {
+      sets.push(`auto_responder_history_count = $${idx++}`);
+      params.push(Number(body.auto_responder_history_count));
+    }
+
     if (sets.length === 0) {
-      return res.json({ success: true });
+      const row = await getAccountOr404<Record<string, unknown> & { owner_id?: string }>(
+        pool, id, user.organizationId, BD_ACCOUNT_DETAIL_SELECT
+      );
+      const isConnected = telegramManager.isConnected(id);
+      return res.json({
+        ...withProxyStatus(row as Record<string, unknown>, isConnected),
+        is_owner: row.owner_id != null && row.owner_id === userId,
+      });
     }
 
     sets.push('updated_at = NOW()');
-    params.push(id);
+    params.push(id, user.organizationId);
     await withOrgContext(pool, user.organizationId, (client) =>
       client.query(
         `UPDATE bd_accounts SET ${sets.join(', ')} WHERE id = $${idx} AND organization_id = $${idx + 1}`,
-        [...params, user.organizationId]
+        params
       )
     );
-    res.json({ success: true });
+    const row = await getAccountOr404<Record<string, unknown> & { owner_id?: string }>(
+      pool, id, user.organizationId, BD_ACCOUNT_DETAIL_SELECT
+    );
+    const isConnected = telegramManager.isConnected(id);
+    res.json({
+      ...withProxyStatus(row as Record<string, unknown>, isConnected),
+      is_owner: row.owner_id != null && row.owner_id === userId,
+    });
   }));
 
   // GET /:id/status

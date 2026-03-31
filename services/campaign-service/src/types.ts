@@ -39,6 +39,8 @@ export interface CampaignStep {
   trigger_type: string | null;
   conditions: Record<string, unknown> | null;
   content: string;
+  /** When true, step is skipped at send time but kept in editor. */
+  is_hidden?: boolean | null;
 }
 
 export interface DueParticipantRow {

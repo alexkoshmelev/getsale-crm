@@ -22,6 +22,8 @@ export interface CampaignTargetAudience {
   /** Dynamic campaign: auto-add leads when they enter one of these stages in the given pipeline */
   dynamicPipelineId?: string;
   dynamicStageIds?: string[];
+  /** Overrides BD account daily cap for staggering (1–500). */
+  dailySendTarget?: number;
 }
 
 export interface LeadCreationSettings {
@@ -90,6 +92,8 @@ export interface CampaignSequenceStep {
   delay_minutes?: number;
   trigger_type?: CampaignStepTriggerType;
   conditions?: Record<string, unknown>;
+  /** Skipped at send time; kept in sequence editor. */
+  is_hidden?: boolean;
   created_at: string;
   updated_at: string;
   template_name?: string;
@@ -317,7 +321,15 @@ export async function createCampaignSequenceStep(
 export async function updateCampaignSequenceStep(
   campaignId: string,
   stepId: string,
-  body: Partial<{ orderIndex: number; templateId: string; delayHours: number; delayMinutes: number; conditions: Record<string, unknown>; triggerType: CampaignStepTriggerType }>
+  body: Partial<{
+    orderIndex: number;
+    templateId: string;
+    delayHours: number;
+    delayMinutes: number;
+    conditions: Record<string, unknown>;
+    triggerType: CampaignStepTriggerType;
+    isHidden: boolean;
+  }>
 ): Promise<CampaignSequenceStep> {
   const { data } = await apiClient.patch<CampaignSequenceStep>(
     `/api/campaigns/${campaignId}/sequences/${stepId}`,
@@ -531,5 +543,47 @@ export async function uploadAudienceFromUsernameList(
     skipped: number;
     invalidSamples?: string[];
   }>(`/api/campaigns/${campaignId}/audience/from-usernames`, body);
+  return data;
+}
+
+export interface AddCampaignParticipantsResult {
+  inserted: number;
+  requested: number;
+  eligibleWithTelegram: number;
+  campaignStatus: CampaignStatus;
+}
+
+export async function addCampaignParticipants(campaignId: string, contactIds: string[]): Promise<AddCampaignParticipantsResult> {
+  const { data } = await apiClient.post<AddCampaignParticipantsResult>(`/api/campaigns/${campaignId}/participants/add`, {
+    contactIds,
+  });
+  return data;
+}
+
+export interface CampaignSendHistoryRow {
+  sendId: string;
+  sentAt: string;
+  sequenceStep: number;
+  status: string;
+  messageId: string | null;
+  participantId: string;
+  contactId: string;
+  contactName: string;
+  messageContent: string | null;
+  messageStatus: string | null;
+}
+
+export interface CampaignSendsPage {
+  data: CampaignSendHistoryRow[];
+  pagination: { page: number; limit: number; total: number; totalPages: number };
+}
+
+export async function fetchCampaignSends(
+  campaignId: string,
+  params?: { page?: number; limit?: number }
+): Promise<CampaignSendsPage> {
+  const { data } = await apiClient.get<CampaignSendsPage>(`/api/campaigns/${campaignId}/sends`, {
+    params: params ?? {},
+  });
   return data;
 }
