@@ -245,7 +245,9 @@ export class TelegramManager {
     return this.messageSender.sendMessage(accountId, chatId, text, opts);
   }
   async setTyping(accountId: string, chatId: string): Promise<void> { return this.messageSender.setTyping(accountId, chatId); }
-  async markAsRead(accountId: string, chatId: string): Promise<void> { return this.messageSender.markAsRead(accountId, chatId); }
+  async markAsRead(accountId: string, chatId: string, opts?: { maxId?: number }): Promise<void> {
+    return this.messageSender.markAsRead(accountId, chatId, opts);
+  }
   async saveDraft(accountId: string, chatId: string, text: string, opts?: { replyToMsgId?: number }): Promise<void> {
     return this.messageSender.saveDraft(accountId, chatId, text, opts);
   }

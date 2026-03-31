@@ -36,6 +36,7 @@ import { useMessagingData } from './hooks/useMessagingData';
 import { useMessagingWebSocket } from './hooks/useMessagingWebSocket';
 import { useMessagingActions } from './hooks/useMessagingActions';
 import { safeGetItem } from '@/lib/safe-storage';
+import { isBdAgentRole, isBdViewerRole } from '@/lib/permissions';
 
 const AIAssistantTabContent = dynamic(
   () => import('@/components/messaging/AIAssistantTabContent').then((m) => m.AIAssistantTabContent),
@@ -65,7 +66,9 @@ export default function MessagingPage() {
   }, [s.setSelectedChat, s.selectedAccountId, pathname, router, searchParams]);
 
   const { convId, isLead, isLeadPanelOpen } = data;
-  const canWriteFromSelectedAccount = currentUser?.role?.toLowerCase() !== 'bidi' || actions.isSelectedAccountMine === true;
+  const canWriteFromSelectedAccount =
+    !isBdViewerRole(currentUser?.role) &&
+    (!isBdAgentRole(currentUser?.role) || actions.isSelectedAccountMine === true);
   const selectedAccountDisplayName = s.selectedAccountId && s.accounts.length > 0
     ? (() => { const a = s.accounts.find((ac) => ac.id === s.selectedAccountId); return a ? getAccountDisplayName(a) : null; })()
     : null;

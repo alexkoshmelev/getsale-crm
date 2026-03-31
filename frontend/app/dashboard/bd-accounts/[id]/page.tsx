@@ -18,6 +18,7 @@ import {
   fetchBdAccountAvatarBlob,
 } from '@/lib/api/bd-accounts';
 import { useAuthStore } from '@/lib/stores/auth-store';
+import { canActOnBdAccountRow } from '@/lib/permissions';
 import {
   ArrowLeft,
   Loader2,
@@ -286,7 +287,7 @@ export default function BDAccountCardPage() {
               </div>
 
               <div className="mt-4 flex flex-wrap gap-2">
-                {((currentUser?.role?.toLowerCase() !== 'bidi') || account.is_owner) && (
+                {canActOnBdAccountRow(currentUser?.role, account) && (
                   <Link
                     href={`/dashboard/bd-accounts?accountId=${account.id}&openSelectChats=1`}
                     className="inline-flex items-center justify-center font-medium rounded-lg border border-border hover:bg-accent px-3 py-1.5 text-sm transition-colors"

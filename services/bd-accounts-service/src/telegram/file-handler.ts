@@ -1,5 +1,6 @@
 // @ts-nocheck — GramJS types are incomplete
 import { Api } from 'telegram';
+import type { TelegramClient } from 'telegram';
 import { isUsernameLike, resolveUsernameToInputPeer } from './resolve-username';
 import { telegramInvokeWithFloodRetry } from './telegram-invoke-flood';
 import type { TelegramManagerDeps, TelegramClientInfo, StructuredLog } from './types';
@@ -149,22 +150,81 @@ export class FileHandler {
     }
   }
 
+  private logChatProfilePhotoFailure(accountId: string, chatId: string, e: unknown): void {
+    const msg = (e as { message?: string })?.message ?? '';
+    const isEntityMissing =
+      typeof msg === 'string' &&
+      (msg.includes('Could not find the input entity') || msg.includes('PeerUser'));
+    if (isEntityMissing) {
+      this.log.info({ message: `downloadChatProfilePhoto ${accountId}/${chatId}`, error: msg });
+    } else {
+      this.log.warn({ message: `downloadChatProfilePhoto ${accountId}/${chatId}`, error: msg });
+    }
+  }
+
+  /**
+   * Numeric peer → InputPeer for downloadProfilePhoto: getEntity then getInputEntity so GramJS
+   * can resolve access_hash (same pattern as message-sender for plain user ids).
+   */
+  private async peerToInputForProfilePhoto(
+    client: TelegramClient,
+    input: number | string
+  ): Promise<any> {
+    if (typeof input === 'number') {
+      const entity = await client.getEntity(input);
+      return await client.getInputEntity(entity as any);
+    }
+    return await client.getInputEntity(input);
+  }
+
   async downloadChatProfilePhoto(accountId: string, chatId: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo || !clientInfo.isConnected) {
       return null;
     }
+    const client = clientInfo.client;
     const peerIdNum = Number(chatId);
     const peerInput = Number.isNaN(peerIdNum) ? chatId : peerIdNum;
     const tryFullForm =
       typeof peerInput === 'number' &&
       peerInput < 0 &&
       peerInput > -1000000000;
+
+    const resolved = await this.resolvePeer(accountId, chatId);
+    if (resolved instanceof Api.InputPeerChannel) {
+      try {
+        const peer = await client.getInputEntity(resolved);
+        const buffer = await client.downloadProfilePhoto(peer as any, { isBig: false });
+        if (!buffer || !(buffer instanceof Buffer)) return null;
+        return { buffer, mimeType: 'image/jpeg' };
+      } catch (e: unknown) {
+        this.logChatProfilePhotoFailure(accountId, chatId, e);
+        return null;
+      }
+    }
+    if (typeof resolved === 'string' && resolved.length > 0 && isUsernameLike(resolved)) {
+      try {
+        const inputPeerResolved = await resolveUsernameToInputPeer(client, resolved, {
+          log: this.log,
+          accountId,
+        });
+        const peer = inputPeerResolved
+          ? await client.getInputEntity(inputPeerResolved as any)
+          : await client.getInputEntity(resolved);
+        const buffer = await client.downloadProfilePhoto(peer as any, { isBig: false });
+        if (!buffer || !(buffer instanceof Buffer)) return null;
+        return { buffer, mimeType: 'image/jpeg' };
+      } catch (e: unknown) {
+        this.logChatProfilePhotoFailure(accountId, chatId, e);
+        return null;
+      }
+    }
+
     for (let attempt = 0; attempt < (tryFullForm ? 2 : 1); attempt++) {
       try {
         const input = attempt === 1 ? -1000000000 + (peerInput as number) : peerInput;
-        const peer = await clientInfo.client.getInputEntity(input);
-        const buffer = await clientInfo.client.downloadProfilePhoto(peer as any, { isBig: false });
+        const peer = await this.peerToInputForProfilePhoto(client, input);
+        const buffer = await client.downloadProfilePhoto(peer as any, { isBig: false });
         if (!buffer || !(buffer instanceof Buffer)) return null;
         return { buffer, mimeType: 'image/jpeg' };
       } catch (e: any) {
@@ -173,14 +233,7 @@ export class FileHandler {
         if (attempt === 0 && tryFullForm && isChatIdInvalid) {
           continue;
         }
-        const isEntityMissing =
-          typeof msg === 'string' &&
-          (msg.includes('Could not find the input entity') || msg.includes('PeerUser'));
-        if (isEntityMissing) {
-          this.log.info({ message: `downloadChatProfilePhoto ${accountId}/${chatId}`, error: msg });
-        } else {
-          this.log.warn({ message: `downloadChatProfilePhoto ${accountId}/${chatId}`, error: msg });
-        }
+        this.logChatProfilePhotoFailure(accountId, chatId, e);
         return null;
       }
     }

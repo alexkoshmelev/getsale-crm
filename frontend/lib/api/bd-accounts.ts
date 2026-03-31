@@ -1,4 +1,6 @@
+import { isAxiosError } from 'axios';
 import { apiClient } from '@/lib/api/client';
+import { avatarChatKey, avatarChatMissCache } from '@/lib/cache/blob-url-cache';
 import { getApiBaseUrl } from '@/lib/api/public-api-base';
 import type { BDAccount, BdSyncFolder } from '@/lib/types/bd-account';
 import type { BdDialogsByFoldersResponse, SyncChatRow } from '@/lib/types/bd-connect';
@@ -140,13 +142,25 @@ export async function fetchBdAccountAvatarBlob(accountId: string): Promise<Blob 
 
 /** GET …/chats/:channelId/avatar — used by messaging / CRM / pipeline chat avatars (with blob URL cache in components). */
 export async function fetchBdAccountChatAvatarBlob(accountId: string, channelId: string): Promise<Blob | null> {
+  const missKey = avatarChatKey(accountId.trim(), channelId.trim());
+  if (avatarChatMissCache.isMissing(missKey)) {
+    return null;
+  }
   try {
     const { data } = await apiClient.get<Blob>(
       `/api/bd-accounts/${accountId}/chats/${channelId}/avatar`,
       { responseType: 'blob' }
     );
-    return data instanceof Blob && data.size > 0 ? data : null;
-  } catch {
+    if (data instanceof Blob && data.size > 0) {
+      avatarChatMissCache.clear(missKey);
+      return data;
+    }
+    avatarChatMissCache.markMissing(missKey);
+    return null;
+  } catch (e: unknown) {
+    if (isAxiosError(e) && e.response?.status === 404) {
+      avatarChatMissCache.markMissing(missKey);
+    }
     return null;
   }
 }

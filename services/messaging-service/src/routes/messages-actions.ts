@@ -5,6 +5,51 @@ import { asyncHandler, AppError, ErrorCodes, canPermission } from '@getsale/serv
 import { ALLOWED_EMOJI, UNFURL_TIMEOUT_MS, UNFURL_MAX_BODY, URL_REGEX, isUrlAllowedForUnfurl } from '../helpers';
 import type { MessagesRouterDeps } from './messages-deps';
 
+/** Notify Telegram ReadHistory after CRM marks messages read (best-effort; failures only logged). */
+async function syncReadHistoryToTelegram(
+  deps: Pick<MessagesRouterDeps, 'pool' | 'log' | 'bdAccountsClient'>,
+  ctx: { userId: string; organizationId: string; channel: string; chatId: string }
+): Promise<void> {
+  const { pool, bdAccountsClient, log } = deps;
+  const { userId, organizationId, channel, chatId } = ctx;
+
+  const accRow = await pool.query<{ bd_account_id: string }>(
+    `SELECT DISTINCT bd_account_id::text AS bd_account_id FROM messages
+     WHERE organization_id = $1 AND channel = $2 AND channel_id = $3 AND bd_account_id IS NOT NULL
+     LIMIT 1`,
+    [organizationId, channel, chatId]
+  );
+  const bdAccountId = accRow.rows[0]?.bd_account_id;
+  if (!bdAccountId) return;
+
+  const maxRow = await pool.query<{ max_id: string | null }>(
+    `SELECT MAX(telegram_message_id::bigint)::text AS max_id FROM messages
+     WHERE organization_id = $1 AND channel = $2 AND channel_id = $3 AND direction = 'inbound'
+       AND telegram_message_id IS NOT NULL AND telegram_message_id ~ '^[0-9]+$'`,
+    [organizationId, channel, chatId]
+  );
+  const maxIdRaw = maxRow.rows[0]?.max_id;
+  const parsedMax = maxIdRaw != null ? parseInt(maxIdRaw, 10) : NaN;
+  const body: { chatId: string; maxId?: number } = { chatId };
+  if (Number.isFinite(parsedMax) && parsedMax > 0) {
+    body.maxId = parsedMax;
+  }
+
+  try {
+    await bdAccountsClient.post(`/api/bd-accounts/${bdAccountId}/read`, body, undefined, {
+      userId,
+      organizationId,
+    });
+  } catch (err: unknown) {
+    log.warn({
+      message: 'Failed to sync read history to Telegram',
+      error: String(err),
+      bdAccountId,
+      chatId,
+    });
+  }
+}
+
 export function registerActionRoutes(router: Router, deps: MessagesRouterDeps): void {
   const { pool, rabbitmq, log, bdAccountsClient } = deps;
   const checkPermission = canPermission(pool);
@@ -78,13 +123,26 @@ export function registerActionRoutes(router: Router, deps: MessagesRouterDeps): 
   }));
 
   router.patch('/messages/:id/read', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const { id: userId, organizationId } = req.user;
     const { id } = req.params;
 
+    const before = await pool.query<{ channel: string; channel_id: string }>(
+      'SELECT channel, channel_id FROM messages WHERE id = $1 AND organization_id = $2',
+      [id, organizationId]
+    );
     await pool.query(
       'UPDATE messages SET unread = false, updated_at = NOW() WHERE id = $1 AND organization_id = $2',
       [id, organizationId]
     );
+    const row = before.rows[0];
+    if (row) {
+      void syncReadHistoryToTelegram(deps, {
+        userId,
+        organizationId,
+        channel: row.channel,
+        chatId: row.channel_id,
+      });
+    }
     res.json({ success: true });
   }));
 
@@ -149,7 +207,7 @@ export function registerActionRoutes(router: Router, deps: MessagesRouterDeps): 
   }));
 
   router.post('/mark-read', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const { id: userId, organizationId } = req.user;
     const { channel, channelId } = req.body;
 
     if (!channel || !channelId) {
@@ -162,13 +220,16 @@ export function registerActionRoutes(router: Router, deps: MessagesRouterDeps): 
        WHERE organization_id = $1 AND channel = $2 AND channel_id = $3`,
       [organizationId, channel, channelId]
     );
+    void syncReadHistoryToTelegram(deps, { userId, organizationId, channel, chatId: channelId });
     res.json({ success: true });
   }));
 
   router.post('/chats/:chatId/mark-all-read', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const { id: userId, organizationId } = req.user;
     const { chatId } = req.params;
-    const { channel } = req.query;
+    const channelRaw = req.query.channel;
+    const channel =
+      typeof channelRaw === 'string' ? channelRaw : Array.isArray(channelRaw) ? String(channelRaw[0] ?? '') : '';
 
     if (!channel) {
       throw new AppError(400, 'channel query parameter is required', ErrorCodes.VALIDATION);
@@ -180,6 +241,7 @@ export function registerActionRoutes(router: Router, deps: MessagesRouterDeps): 
        WHERE organization_id = $1 AND channel = $2 AND channel_id = $3`,
       [organizationId, channel, chatId]
     );
+    void syncReadHistoryToTelegram(deps, { userId, organizationId, channel, chatId });
     res.json({ success: true });
   }));
 

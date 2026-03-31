@@ -4,6 +4,7 @@ import { RabbitMQClient } from '@getsale/utils';
 import { Logger } from '@getsale/logger';
 import { canPermission } from '@getsale/service-core';
 import { TelegramManager } from '../telegram';
+import { assertBdAccountsNotViewer } from '../helpers';
 import type { SyncRouteDeps } from './sync-route-deps';
 import { registerSyncDialogsReadRoutes } from './sync-routes-dialogs-read';
 import { registerSyncFoldersWriteRoutes } from './sync-routes-folders-write';
@@ -23,6 +24,14 @@ interface Deps {
  */
 export function syncRouter({ pool, log, telegramManager }: Deps): Router {
   const router = Router();
+  router.use((req, res, next) => {
+    try {
+      assertBdAccountsNotViewer(req.user);
+      next();
+    } catch (e) {
+      next(e);
+    }
+  });
   const checkPermission = canPermission(pool);
   const deps: SyncRouteDeps = { pool, log, telegramManager, checkPermission };
 

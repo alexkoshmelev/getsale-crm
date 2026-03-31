@@ -15,6 +15,7 @@ import { EmptyMessagingState } from '@/components/messaging/EmptyMessagingState'
 import type { MessagingState } from '@/app/dashboard/messaging/hooks/useMessagingState';
 import type { Message } from '@/app/dashboard/messaging/types';
 import { VIRTUAL_LIST_THRESHOLD, INITIAL_FIRST_ITEM_INDEX } from '@/app/dashboard/messaging/types';
+import { isBdAgentRole } from '@/lib/permissions';
 
 interface ChatViewProps {
   s: MessagingState;
@@ -233,7 +234,7 @@ export function ChatView({
           <div className="flex-1 relative flex items-end min-h-[40px]">
             <textarea
               ref={s.messageInputRef}
-              placeholder={canWriteFromSelectedAccount ? t('messaging.writeMessage') : (currentUserRole === 'bidi' ? t('messaging.agentViewOnly', 'View only — you can send only from accounts you connected') : t('messaging.colleagueViewOnly'))}
+              placeholder={canWriteFromSelectedAccount ? t('messaging.writeMessage') : (isBdAgentRole(currentUserRole) ? t('messaging.agentViewOnly', 'View only — you can send only from accounts you connected') : t('messaging.colleagueViewOnly'))}
               value={s.newMessage}
               onChange={(e) => s.setNewMessage(e.target.value)}
               onPaste={(e) => {
@@ -250,7 +251,7 @@ export function ChatView({
             />
             <button onClick={() => s.setShowCommandsMenu(!s.showCommandsMenu)} className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg transition-colors ${s.showCommandsMenu ? 'bg-blue-100 text-blue-600' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}`} title={t('messaging.crmCommands')}><Bot className="w-4 h-4" /></button>
           </div>
-          <Button onClick={actions.handleSendMessage} disabled={!canWriteFromSelectedAccount || (!s.newMessage.trim() && !s.pendingFile) || s.sendingMessage} className="px-4" title={!canWriteFromSelectedAccount ? (currentUserRole === 'bidi' ? t('messaging.agentViewOnly', 'View only — you can send only from accounts you connected') : t('messaging.onlyOwnerCanSend')) : undefined}>
+          <Button onClick={actions.handleSendMessage} disabled={!canWriteFromSelectedAccount || (!s.newMessage.trim() && !s.pendingFile) || s.sendingMessage} className="px-4" title={!canWriteFromSelectedAccount ? (isBdAgentRole(currentUserRole) ? t('messaging.agentViewOnly', 'View only — you can send only from accounts you connected') : t('messaging.onlyOwnerCanSend')) : undefined}>
             {s.sendingMessage ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
           </Button>
         </div>

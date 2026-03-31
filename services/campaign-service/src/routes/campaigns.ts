@@ -124,7 +124,15 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       `SELECT c.*,
               u.email AS owner_email,
               COALESCE(NULLIF(TRIM(CONCAT_WS(' ', up.first_name, up.last_name)), ''), u.email) AS owner_name,
-              (SELECT COUNT(*)::int FROM campaign_participants cp2 WHERE cp2.campaign_id = c.id) AS total_participants
+              COALESCE(
+                NULLIF((SELECT COUNT(*)::int FROM campaign_participants cp2 WHERE cp2.campaign_id = c.id), 0),
+                CASE
+                  WHEN c.status IN ('draft', 'paused')
+                    AND jsonb_typeof(COALESCE(c.target_audience, '{}'::jsonb) -> 'contactIds') = 'array'
+                  THEN jsonb_array_length(COALESCE((c.target_audience -> 'contactIds'), '[]'::jsonb))
+                  ELSE 0
+                END
+              )::int AS total_participants
        FROM campaigns c
        LEFT JOIN users u ON u.id = c.created_by_user_id
        LEFT JOIN user_profiles up ON up.user_id = u.id

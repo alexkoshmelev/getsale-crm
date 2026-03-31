@@ -5,7 +5,13 @@ import { RabbitMQClient } from '@getsale/utils';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, canPermission, validate, withOrgContext, ServiceHttpClient } from '@getsale/service-core';
 import { TelegramManager } from '../telegram';
-import { requireAccountOwner, requireBidiOwnAccount, getAccountOr404 } from '../helpers';
+import {
+  requireAccountOwner,
+  requireBidiOwnAccount,
+  getAccountOr404,
+  bdAccountsListScope,
+  assertBdAccountsNotViewer,
+} from '../helpers';
 import { decryptIfNeeded } from '../crypto';
 import {
   BdAccountPurchaseSchema,
@@ -56,6 +62,7 @@ export function accountsRouter({
 
   // POST routes with literal paths must be registered before /:id patterns
   router.post('/purchase', validate(BdAccountPurchaseSchema), asyncHandler(async (req, res) => {
+    assertBdAccountsNotViewer(req.user);
     const { id: userId, organizationId } = req.user;
     const { platform, durationDays } = req.body;
 
@@ -74,6 +81,7 @@ export function accountsRouter({
   }));
 
   router.post('/enrich-contacts', validate(BdAccountEnrichContactsSchema), asyncHandler(async (req, res) => {
+    assertBdAccountsNotViewer(req.user);
     const { organizationId } = req.user;
     const { contactIds = [], bdAccountId } = req.body;
     const ids = contactIds;
@@ -89,9 +97,14 @@ export function accountsRouter({
       throw new AppError(401, 'Unauthorized', ErrorCodes.UNAUTHORIZED);
     }
 
+    const scope = bdAccountsListScope(role);
+    if (scope === 'none') {
+      return res.json([]);
+    }
+
     const listParams: unknown[] = [organizationId];
     let ownerFilter = '';
-    if (role === 'bidi') {
+    if (scope === 'own_only') {
       listParams.push(userId);
       ownerFilter = ` AND a.created_by_user_id = $${listParams.length}`;
     }
@@ -151,9 +164,21 @@ export function accountsRouter({
 
   /** Aggregated BD health for dashboard (campaign counts from same DB). */
   router.get('/health-summary', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const { organizationId, role } = req.user;
     if (!organizationId) {
       throw new AppError(401, 'Unauthorized', ErrorCodes.UNAUTHORIZED);
+    }
+
+    if (bdAccountsListScope(role) === 'none') {
+      res.json({
+        generatedAt: new Date().toISOString(),
+        floodActiveCount: 0,
+        limitsConfiguredCount: 0,
+        warmingRunningGroups: 0,
+        campaigns: { active: 0, paused: 0, draft: 0, completed: 0 },
+        riskAccounts: [],
+      });
+      return;
     }
 
     const [floodR, limitsR, campR, riskR] = await Promise.all([
@@ -230,7 +255,9 @@ export function accountsRouter({
 
   // GET /:id — single account
   router.get('/:id', asyncHandler(async (req, res) => {
-    const { id: userId, organizationId } = req.user;
+    const user = req.user;
+    assertBdAccountsNotViewer(user);
+    const { id: userId, organizationId } = user;
     const { id } = req.params;
 
     const row = await getAccountOr404<Record<string, unknown> & { owner_id?: string }>(
@@ -239,6 +266,7 @@ export function accountsRouter({
       organizationId,
       BD_ACCOUNT_DETAIL_SELECT
     );
+    await requireBidiOwnAccount(pool, id, user);
     const isConnected = telegramManager.isConnected(id);
     res.json({
       ...withProxyStatus(row as Record<string, unknown>, isConnected),
@@ -249,6 +277,7 @@ export function accountsRouter({
   // PATCH /:id — update display_name and/or proxy_config
   router.patch('/:id', validate(BdAccountPatchSchema), asyncHandler(async (req, res) => {
     const user = req.user;
+    assertBdAccountsNotViewer(user);
     const { id: userId } = req.user;
     const { id } = req.params;
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -366,6 +395,7 @@ export function accountsRouter({
 
   // GET /:id/status
   router.get('/:id/status', asyncHandler(async (req, res) => {
+    assertBdAccountsNotViewer(req.user);
     const { organizationId } = req.user;
     const { id } = req.params;
 
@@ -401,6 +431,7 @@ export function accountsRouter({
 
   // PUT /:id/config
   router.put('/:id/config', validate(BdAccountConfigSchema), asyncHandler(async (req, res) => {
+    assertBdAccountsNotViewer(req.user);
     const { organizationId } = req.user;
     const { id } = req.params;
     const { limits, metadata } = req.body;
@@ -425,6 +456,7 @@ export function accountsRouter({
   // POST /:id/enable — reconnect after disconnect
   router.post('/:id/enable', asyncHandler(async (req, res) => {
     const user = req.user;
+    assertBdAccountsNotViewer(user);
     const { id } = req.params;
 
     const accountResult = await pool.query(
@@ -479,6 +511,7 @@ export function accountsRouter({
   // DELETE /:id — permanent delete
   router.delete('/:id', asyncHandler(async (req, res) => {
     const user = req.user;
+    assertBdAccountsNotViewer(user);
     const { id } = req.params;
 
     const accountResult = await pool.query(

@@ -6,7 +6,13 @@ import { EventType, Event } from '@getsale/events';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, canPermission, validate } from '@getsale/service-core';
 import { TelegramManager } from '../telegram';
-import { getTelegramApiCredentials, getAccountOr404, requireAccountOwner, requireBidiOwnAccount } from '../helpers';
+import {
+  getTelegramApiCredentials,
+  getAccountOr404,
+  requireAccountOwner,
+  requireBidiOwnAccount,
+  assertBdAccountsNotViewer,
+} from '../helpers';
 import { encryptSession, decryptIfNeeded } from '../crypto';
 import {
   BdAuthSendCodeSchema,
@@ -25,6 +31,14 @@ interface Deps {
 
 export function authRouter({ pool, rabbitmq, log, telegramManager }: Deps): Router {
   const router = Router();
+  router.use((req, res, next) => {
+    try {
+      assertBdAccountsNotViewer(req.user);
+      next();
+    } catch (e) {
+      next(e);
+    }
+  });
   const checkPermission = canPermission(pool);
   const normalizeProxyConfig = (raw: unknown): Record<string, unknown> | null => {
     if (!raw || typeof raw !== 'object') return null;

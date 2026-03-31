@@ -213,4 +213,6 @@ export const BdReactionBodySchema = z.object({
 
 export const BdChatIdBodySchema = z.object({
   chatId: z.string().min(1).max(256),
+  /** Last read inbound message id (Telegram). Omit to use 0 (client default). */
+  maxId: z.number().int().nonnegative().optional(),
 });

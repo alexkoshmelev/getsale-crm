@@ -221,11 +221,13 @@ export class MessageSender {
     }
   }
 
-  async markAsRead(accountId: string, chatId: string): Promise<void> {
+  async markAsRead(accountId: string, chatId: string, opts?: { maxId?: number }): Promise<void> {
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo || !clientInfo.isConnected) {
       throw new Error(`Account ${accountId} is not connected`);
     }
+    const maxId =
+      opts?.maxId != null && Number.isFinite(opts.maxId) && opts.maxId > 0 ? Math.floor(opts.maxId) : 0;
     try {
       const peerResolved = await this.resolvePeer(accountId, chatId);
       const entity = typeof peerResolved === 'object' && (peerResolved as any)?.className
@@ -248,7 +250,7 @@ export class MessageSender {
           'channels.ReadHistory',
           () =>
             clientInfo.client.invoke(
-              new Api.channels.ReadHistory({ channel: entity as any, maxId: 0 })
+              new Api.channels.ReadHistory({ channel: entity as any, maxId })
             ),
           { pool: this.pool }
         );
@@ -257,7 +259,7 @@ export class MessageSender {
           this.log,
           accountId,
           'messages.ReadHistory',
-          () => clientInfo.client.invoke(new Api.messages.ReadHistory({ peer: entity, maxId: 0 })),
+          () => clientInfo.client.invoke(new Api.messages.ReadHistory({ peer: entity, maxId })),
           { pool: this.pool }
         );
       }

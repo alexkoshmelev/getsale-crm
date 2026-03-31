@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes } from '@getsale/service-core';
 import { TelegramManager } from '../telegram';
-import { getAccountOr404 } from '../helpers';
+import { getAccountOr404, assertBdAccountsNotViewer } from '../helpers';
 
 interface Deps {
   pool: Pool;
@@ -13,6 +13,14 @@ interface Deps {
 
 export function mediaRouter({ pool, log, telegramManager }: Deps): Router {
   const router = Router();
+  router.use((req, res, next) => {
+    try {
+      assertBdAccountsNotViewer(req.user);
+      next();
+    } catch (e) {
+      next(e);
+    }
+  });
 
   // GET /:id/avatar — BD account profile photo
   router.get('/:id/avatar', asyncHandler(async (req, res) => {

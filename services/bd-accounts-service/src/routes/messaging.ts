@@ -5,7 +5,16 @@ import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { TelegramManager } from '../telegram';
 import { serializeMessage } from '../telegram-serialize';
-import { MAX_FILE_SIZE_BYTES, BULK_SEND_DELAY_MS, getAccountOr404, getErrorMessage, getErrorCode, getRetryAfterSeconds, requireBidiCanWriteAccount } from '../helpers';
+import {
+  MAX_FILE_SIZE_BYTES,
+  BULK_SEND_DELAY_MS,
+  getAccountOr404,
+  getErrorMessage,
+  getErrorCode,
+  getRetryAfterSeconds,
+  requireBidiCanWriteAccount,
+  assertBdAccountsNotViewer,
+} from '../helpers';
 import { telegramSendErrorToAppError } from '../telegram-send-error-map';
 import { canonicalTelegramChatIdFromMessage } from '../telegram-peer-chat-id';
 import {
@@ -92,6 +101,14 @@ async function mergeOutboundSendSyncRow(
 
 export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   const router = Router();
+  router.use((req, res, next) => {
+    try {
+      assertBdAccountsNotViewer(req.user);
+      next();
+    } catch (e) {
+      next(e);
+    }
+  });
   const assertAccountNotReauthRequired = async (accountId: string, organizationId: string): Promise<void> => {
     const r = await pool.query(
       'SELECT connection_state FROM bd_accounts WHERE id = $1 AND organization_id = $2 LIMIT 1',
@@ -477,14 +494,14 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   router.post('/:id/read', validate(BdChatIdBodySchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
-    const { chatId } = req.body;
+    const { chatId, maxId } = req.body as { chatId: string; maxId?: number };
 
     await getAccountOr404(pool, id, organizationId, 'id');
     await assertAccountNotReauthRequired(id, organizationId);
     if (!telegramManager.isConnected(id)) {
       return res.json({ success: true });
     }
-    await telegramManager.markAsRead(id, String(chatId));
+    await telegramManager.markAsRead(id, String(chatId), typeof maxId === 'number' && maxId > 0 ? { maxId } : undefined);
     res.json({ success: true });
   }));
 

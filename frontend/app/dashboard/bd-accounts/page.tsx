@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { useTranslation } from 'react-i18next';
+import { canActOnBdAccountRow } from '@/lib/permissions';
 import {
   listBdAccounts,
   getBdAccountStatus,
@@ -30,8 +31,7 @@ export default function BDAccountsPage() {
   const { user: currentUser } = useAuthStore();
   const { subscribe, unsubscribe, on, off, isConnected } = useWebSocketContext();
   const [accounts, setAccounts] = useState<BDAccount[]>([]);
-  const canManageAccount = (account: BDAccount) =>
-    (currentUser?.role?.toLowerCase() !== 'bidi') || account.is_owner === true;
+  const canManageAccount = (account: BDAccount) => canActOnBdAccountRow(currentUser?.role, account);
   const [loading, setLoading] = useState(true);
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
   const [dialogs, setDialogs] = useState<Dialog[]>([]);

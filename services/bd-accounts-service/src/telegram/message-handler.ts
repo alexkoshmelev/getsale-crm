@@ -157,7 +157,7 @@ export class MessageHandler {
         else if (message.peerId instanceof Api.PeerChannel) chatId = String(message.peerId.channelId);
         else chatId = String(message.peerId);
       }
-      this.log.info({ message: `New message ${isOut ? 'outgoing' : 'incoming'}`, error: { accountId, chatId } });
+      this.log.info({ message: `New message ${isOut ? 'outgoing' : 'incoming'}`, context: { accountId, chatId } });
       const text = getMessageText(message);
       if (!text.trim() && !message.media) {
         return;
