@@ -2,6 +2,7 @@
 import { Api } from 'telegram';
 import { getErrorMessage } from '../helpers';
 import { isUsernameLike, resolveUsernameToInputPeer } from './resolve-username';
+import { isInviteLinkInput, peerChatIdFromResolveBasic, resolveChatFromInputGlobal } from './chat-sync-resolve';
 import { telegramInvokeWithFloodRetry } from './telegram-invoke-flood';
 import type { TelegramManagerDeps, TelegramClientInfo, StructuredLog } from './types';
 import type { Pool } from 'pg';
@@ -78,14 +79,27 @@ export class MessageSender {
     }
 
     const client = clientInfo.client;
+    let effectiveChatId = chatId.trim();
+    if (isInviteLinkInput(effectiveChatId)) {
+      const basic = await resolveChatFromInputGlobal(this.log, accountId, client, effectiveChatId);
+      effectiveChatId = peerChatIdFromResolveBasic(basic);
+      if (SEND_DELAY_AFTER_RESOLVE_MS > 0) {
+        await new Promise((r) => setTimeout(r, SEND_DELAY_AFTER_RESOLVE_MS));
+      }
+    }
+
     const params = {
       message: text,
       ...(opts.replyTo != null ? { replyTo: opts.replyTo } : {}),
     };
 
     const trySend = async (peer: Api.TypeInputPeer | number | string): Promise<Api.Message> => {
-      const message = await telegramInvokeWithFloodRetry(this.log, accountId, 'SendMessage', () =>
-        client.sendMessage(peer, params), this.pool
+      const message = await telegramInvokeWithFloodRetry(
+        this.log,
+        accountId,
+        'SendMessage',
+        () => client.sendMessage(peer, params),
+        { pool: this.pool }
       );
       clientInfo.lastActivity = new Date();
       await this.pool.query(
@@ -96,7 +110,7 @@ export class MessageSender {
     };
 
     try {
-      let peer: Api.TypeInputPeer | number | string = await this.resolvePeer(accountId, chatId);
+      let peer: Api.TypeInputPeer | number | string = await this.resolvePeer(accountId, effectiveChatId);
 
       // Important: for numeric user ids we often don't have access_hash in GramJS session cache.
       // Telegram client resolves access_hash server-side; we mimic that by resolving the entity first.
@@ -141,7 +155,7 @@ export class MessageSender {
           if (SEND_DELAY_AFTER_RESOLVE_MS > 0) {
             await new Promise((r) => setTimeout(r, SEND_DELAY_AFTER_RESOLVE_MS));
           }
-          let peerRetry: Api.TypeInputPeer | number | string = await this.resolvePeer(accountId, chatId);
+          let peerRetry: Api.TypeInputPeer | number | string = await this.resolvePeer(accountId, effectiveChatId);
 
           if (typeof peerRetry === 'number') {
             try {
@@ -159,14 +173,14 @@ export class MessageSender {
           } else if (typeof peerRetry === 'string' && peerRetry.length > 0 && Number.isNaN(Number(peerRetry))) {
             peerRetry = await client.getInputEntity(peerRetry);
           }
-          this.log.info({ message: 'sendMessage succeeded after getDialogs cache prime', accountId, chatId });
+          this.log.info({ message: 'sendMessage succeeded after getDialogs cache prime', accountId, chatId: effectiveChatId });
           return trySend(peerRetry);
         } catch (retryError: unknown) {
           this.log.error({ message: `Error sending message (after cache prime)`, error: getErrorMessage(retryError) });
           throw retryError;
         }
       }
-      this.log.error({ message: `Error sending message`, error: errMsg });
+      this.log.error({ message: `Error sending message`, error: errMsg, chatId: effectiveChatId });
       throw firstError;
     }
   }
@@ -192,10 +206,15 @@ export class MessageSender {
             throw e;
           }
         })();
-      await telegramInvokeWithFloodRetry(this.log, accountId, 'SetTyping', () =>
-        clientInfo.client.invoke(
-          new Api.messages.SetTyping({ peer, action: new Api.SendMessageTypingAction() })
-        ), this.pool
+      await telegramInvokeWithFloodRetry(
+        this.log,
+        accountId,
+        'SetTyping',
+        () =>
+          clientInfo.client.invoke(
+            new Api.messages.SetTyping({ peer, action: new Api.SendMessageTypingAction() })
+          ),
+        { pool: this.pool }
       );
     } catch (error: unknown) {
       this.log.warn({ message: 'setTyping failed', accountId, chatId, error: getErrorMessage(error) });
@@ -223,16 +242,23 @@ export class MessageSender {
           }
         })();
       if ((entity as any).className === 'InputPeerChannel') {
-        await telegramInvokeWithFloodRetry(this.log, accountId, 'channels.ReadHistory', () =>
-          clientInfo.client.invoke(
-            new Api.channels.ReadHistory({ channel: entity as any, maxId: 0 })
-          ), this.pool
+        await telegramInvokeWithFloodRetry(
+          this.log,
+          accountId,
+          'channels.ReadHistory',
+          () =>
+            clientInfo.client.invoke(
+              new Api.channels.ReadHistory({ channel: entity as any, maxId: 0 })
+            ),
+          { pool: this.pool }
         );
       } else {
-        await telegramInvokeWithFloodRetry(this.log, accountId, 'messages.ReadHistory', () =>
-          clientInfo.client.invoke(
-            new Api.messages.ReadHistory({ peer: entity, maxId: 0 })
-          ), this.pool
+        await telegramInvokeWithFloodRetry(
+          this.log,
+          accountId,
+          'messages.ReadHistory',
+          () => clientInfo.client.invoke(new Api.messages.ReadHistory({ peer: entity, maxId: 0 })),
+          { pool: this.pool }
         );
       }
     } catch (error: unknown) {
@@ -258,14 +284,19 @@ export class MessageSender {
         ? peerResolved
         : await client.getInputEntity(peerResolved);
       const replyTo = opts.replyToMsgId != null ? { replyToMsgId: opts.replyToMsgId } : undefined;
-      await telegramInvokeWithFloodRetry(this.log, accountId, 'SaveDraft', () =>
-        client.invoke(
-          new ApiAny.messages.SaveDraft({
-            peer,
-            message: text || '',
-            ...(replyTo ? { replyTo } : {}),
-          })
-        ), this.pool
+      await telegramInvokeWithFloodRetry(
+        this.log,
+        accountId,
+        'SaveDraft',
+        () =>
+          client.invoke(
+            new ApiAny.messages.SaveDraft({
+              peer,
+              message: text || '',
+              ...(replyTo ? { replyTo } : {}),
+            })
+          ),
+        { pool: this.pool }
       );
       clientInfo.lastActivity = new Date();
     } catch (error: unknown) {
@@ -290,15 +321,20 @@ export class MessageSender {
     const fromPeer = typeof fromResolved === 'object' && (fromResolved as any)?.className ? fromResolved : await client.getInputEntity(fromResolved);
     const toPeer = typeof toResolved === 'object' && (toResolved as any)?.className ? toResolved : await client.getInputEntity(toResolved);
     const randomId = BigInt(Math.floor(Math.random() * 1e15)) * BigInt(1e5) + BigInt(Math.floor(Math.random() * 1e5));
-    const result = await telegramInvokeWithFloodRetry(this.log, accountId, 'ForwardMessages', () =>
-      client.invoke(
-        new Api.messages.ForwardMessages({
-          fromPeer,
-          toPeer,
-          id: [telegramMessageId],
-          randomId: [randomId],
-        })
-      ), this.pool
+    const result = await telegramInvokeWithFloodRetry(
+      this.log,
+      accountId,
+      'ForwardMessages',
+      () =>
+        client.invoke(
+          new Api.messages.ForwardMessages({
+            fromPeer,
+            toPeer,
+            id: [telegramMessageId],
+            randomId: [randomId],
+          })
+        ),
+      { pool: this.pool }
     );
     clientInfo.lastActivity = new Date();
     await this.pool.query(

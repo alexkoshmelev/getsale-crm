@@ -30,8 +30,12 @@ describe('Campaigns Router', () => {
 
   describe('GET /api/campaigns', () => {
     it('returns empty array when no campaigns', async () => {
+      const zeroSummary = { rows: [{ total: 0 }], rowCount: 1 };
       pool.query
         .mockResolvedValueOnce({ rows: [{ total: 0 }], rowCount: 1 })
+        .mockResolvedValueOnce(zeroSummary)
+        .mockResolvedValueOnce(zeroSummary)
+        .mockResolvedValueOnce(zeroSummary)
         .mockResolvedValueOnce({ rows: [], rowCount: 0 });
 
       const res = await request(app)

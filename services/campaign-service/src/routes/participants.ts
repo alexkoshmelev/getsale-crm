@@ -209,10 +209,23 @@ export function participantsRouter({ pool, log }: Deps): Router {
         [id, daysNum]
       ),
       pool.query(
-        `SELECT cp.updated_at::date AS day, COUNT(*)::int AS replied
-         FROM campaign_participants cp
-         WHERE cp.campaign_id = $1 AND cp.status = 'replied' AND cp.updated_at >= NOW() - ($2::int || ' days')::interval
-         GROUP BY cp.updated_at::date
+        `SELECT day, COUNT(*)::int AS replied
+         FROM (
+           SELECT COALESCE(l.first_reply::date, cp.updated_at::date) AS day
+           FROM campaign_participants cp
+           JOIN campaigns c ON c.id = cp.campaign_id
+           LEFT JOIN LATERAL (
+             SELECT MIN(m.sent_at) AS first_reply
+             FROM messages m
+             WHERE m.contact_id = cp.contact_id
+               AND (m.bd_account_id IS NOT DISTINCT FROM cp.bd_account_id)
+               AND m.direction = 'inbound'
+               AND m.organization_id = c.organization_id
+           ) l ON true
+           WHERE cp.campaign_id = $1 AND cp.status = 'replied'
+             AND COALESCE(l.first_reply, cp.updated_at) >= NOW() - ($2::int || ' days')::interval
+         ) sub
+         GROUP BY day
          ORDER BY day`,
         [id, daysNum]
       ),
@@ -363,7 +376,12 @@ export function participantsRouter({ pool, log }: Deps): Router {
         replied_at: r.replied_at instanceof Date ? r.replied_at.toISOString() : r.replied_at,
         shared_chat_created_at: r.shared_chat_created_at instanceof Date ? r.shared_chat_created_at.toISOString() : r.shared_chat_created_at,
         current_step: r.current_step ?? 0,
-        next_send_at: r.next_send_at instanceof Date ? r.next_send_at.toISOString() : r.next_send_at,
+        next_send_at:
+          st === 'failed'
+            ? null
+            : r.next_send_at instanceof Date
+              ? r.next_send_at.toISOString()
+              : r.next_send_at,
         sequence_total_steps: r.sequence_total_steps ?? 0,
       };
     });

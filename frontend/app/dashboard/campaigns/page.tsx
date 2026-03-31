@@ -15,6 +15,7 @@ import {
   type CampaignListResponse,
 } from '@/lib/api/campaigns';
 import { clsx } from 'clsx';
+import { AccountStatusAvatar } from '@/components/bd-accounts/AccountStatusAvatar';
 
 const statusLabels: Record<CampaignStatus, string> = {
   draft: 'campaigns.statusDraft',
@@ -187,8 +188,13 @@ export default function CampaignsPage() {
                         <td className="px-4 py-3 text-muted-foreground hidden md:table-cell truncate max-w-[150px]">
                           {c.owner_name || '—'}
                         </td>
-                        <td className="px-4 py-3 text-muted-foreground hidden lg:table-cell truncate max-w-[150px]">
-                          {c.bd_account_name || '—'}
+                        <td className="px-4 py-3 hidden lg:table-cell">
+                          <div className="flex -space-x-1 items-center min-h-[28px]">
+                            {(c.bd_accounts ?? []).map((acc) => (
+                              <AccountStatusAvatar key={acc.id} accountId={acc.id} account={acc} size="sm" showTooltip />
+                            ))}
+                            {!(c.bd_accounts?.length) && <span className="text-muted-foreground">—</span>}
+                          </div>
                         </td>
                         <td className="px-4 py-3 text-right tabular-nums text-muted-foreground hidden sm:table-cell">
                           {c.total_participants ?? 0}

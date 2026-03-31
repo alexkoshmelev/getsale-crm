@@ -13,6 +13,8 @@ import {
   resolveCampaignChannelId,
   normalizeTelegramUsername,
   sampleDelaySeconds,
+  representativeStepSecondsFromDelayRange,
+  spreadOffsetSecondsForSlot,
   staggeredFirstSendAtByOffset,
   staggeredFirstSendAt,
   type Schedule,
@@ -209,6 +211,29 @@ describe('campaign channel id resolution', () => {
 
   it('normalizes username by trimming and removing @', () => {
     expect(normalizeTelegramUsername('  @Sales_User  ')).toBe('Sales_User');
+  });
+});
+
+describe('representativeStepSecondsFromDelayRange', () => {
+  it('uses midpoint of min and max, minimum 1', () => {
+    expect(representativeStepSecondsFromDelayRange({ minSeconds: 151, maxSeconds: 254 })).toBe(202);
+    expect(representativeStepSecondsFromDelayRange({ minSeconds: 60, maxSeconds: 60 })).toBe(60);
+  });
+});
+
+describe('spreadOffsetSecondsForSlot', () => {
+  const noSchedule = {} as Schedule;
+
+  it('uses 60s per slot when no delay range and no schedule', () => {
+    expect(spreadOffsetSecondsForSlot(0, 20, noSchedule)).toBe(0);
+    expect(spreadOffsetSecondsForSlot(3, 20, noSchedule)).toBe(180);
+  });
+
+  it('uses audience delay range midpoint per slot when no schedule', () => {
+    const range = { minSeconds: 151, maxSeconds: 254 };
+    expect(spreadOffsetSecondsForSlot(0, 20, noSchedule, range)).toBe(0);
+    expect(spreadOffsetSecondsForSlot(1, 20, noSchedule, range)).toBe(202);
+    expect(spreadOffsetSecondsForSlot(3, 20, noSchedule, range)).toBe(606);
   });
 });
 

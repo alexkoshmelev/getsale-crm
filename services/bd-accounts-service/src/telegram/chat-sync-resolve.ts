@@ -7,6 +7,24 @@ import { telegramInvokeWithFloodRetry } from './telegram-invoke-flood';
 
 export type ResolveChatBasic = { chatId: string; title: string; peerType: string };
 
+/** True if `chatId` looks like a private invite (t.me/+joinchat, joinchat hash, leading +). */
+export function isInviteLinkInput(chatId: string): boolean {
+  const raw = (chatId || '').trim().toLowerCase();
+  return raw.includes('/joinchat/') || raw.startsWith('+') || raw.includes('t.me/+');
+}
+
+/**
+ * Map basic resolve result to peer id string for send/resolvePeer (supergroups/channels use -100 prefix).
+ */
+export function peerChatIdFromResolveBasic(basic: ResolveChatBasic): string {
+  const id = String(basic.chatId || '').trim();
+  if (!id) return id;
+  if (basic.peerType === 'channel') {
+    return `-100${id}`;
+  }
+  return id;
+}
+
 /** Fallback when client disconnects after basic resolve (matches legacy ChatSync behavior). */
 export function resolvedSourceFromBasicInput(basic: ResolveChatBasic, input: string): ResolvedSource {
   const type: TelegramSourceType =

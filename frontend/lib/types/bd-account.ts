@@ -52,6 +52,12 @@ export interface BDAccount {
   /** Active Telegram FLOOD_WAIT window (ISO). */
   flood_wait_until?: string | null;
   flood_wait_seconds?: number | null;
+  /** Last flood reason (op + error), for support / UI. */
+  flood_reason?: string | null;
+  /** When flood was last recorded. */
+  flood_last_at?: string | null;
+  /** When false, optional runtime activation (future gateway feature). */
+  gramjs_runtime_enabled?: boolean;
   timezone?: string | null;
   working_hours_start?: string | null;
   working_hours_end?: string | null;

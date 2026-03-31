@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import { getErrorMessage } from '../helpers';
 import type { TelegramManagerDeps, TelegramClientInfo, StructuredLog } from './types';
 import { telegramInvokeWithFloodRetry } from './telegram-invoke-flood';
+import { resolveUsernameToInputPeer } from './resolve-username';
 
 /**
  * Contact enrichment/upsert from Telegram user data.
@@ -186,17 +187,76 @@ export class ContactManager {
       accountId = first.rows[0]?.id ?? null;
     }
     if (!accountId || !this.clients.has(accountId)) return { enriched: 0 };
+    const clientInfo = this.clients.get(accountId);
+    const client = clientInfo?.client;
+    if (!client) return { enriched: 0 };
+
     const rows = await this.pool.query(
-      'SELECT id, telegram_id FROM contacts WHERE id = ANY($1) AND organization_id = $2',
+      'SELECT id, telegram_id, username FROM contacts WHERE id = ANY($1) AND organization_id = $2',
       [contactIds, organizationId]
     );
     let enriched = 0;
-    for (const row of rows.rows as { id: string; telegram_id: string | null }[]) {
-      if (row.telegram_id && parseInt(row.telegram_id, 10) > 0) {
-        await this.ensureContactEnrichedFromTelegram(organizationId, accountId, row.telegram_id);
+    const delayBetweenUsernameMs = 80;
+
+    for (const row of rows.rows as { id: string; telegram_id: string | null; username: string | null }[]) {
+      const tid = row.telegram_id?.trim();
+      if (tid && parseInt(tid, 10) > 0) {
+        await this.ensureContactEnrichedFromTelegram(organizationId, accountId, tid);
         enriched++;
+        continue;
       }
+
+      const u = (row.username ?? '').trim().replace(/^@/, '');
+      if (!u) continue;
+
+      try {
+        let resolvedId: string | null = null;
+        const peer = await resolveUsernameToInputPeer(client, u, { log: this.log, accountId });
+        if (peer?.className === 'InputPeerUser') {
+          const uid = (peer as Api.InputPeerUser).userId;
+          if (uid != null) resolvedId = String(uid);
+        }
+        if (!resolvedId) {
+          try {
+            const ent = await client.getInputEntity(u);
+            if (ent && (ent as any).className === 'User') {
+              const id = (ent as Api.User).id;
+              if (id != null) resolvedId = String(id);
+            }
+          } catch (e: unknown) {
+            this.log.warn({
+              message: 'enrichContactsFromTelegram: getInputEntity(username) failed',
+              username: u,
+              error: getErrorMessage(e),
+            });
+          }
+        }
+        if (!resolvedId) {
+          this.log.warn({
+            message: 'enrichContactsFromTelegram: could not resolve username to user id',
+            username: u,
+            contactId: row.id,
+          });
+          if (delayBetweenUsernameMs > 0) await new Promise((r) => setTimeout(r, delayBetweenUsernameMs));
+          continue;
+        }
+
+        await this.pool.query(
+          `UPDATE contacts SET telegram_id = $1, updated_at = NOW() WHERE id = $2 AND organization_id = $3`,
+          [resolvedId, row.id, organizationId]
+        );
+        await this.ensureContactEnrichedFromTelegram(organizationId, accountId, resolvedId);
+        enriched++;
+      } catch (e: unknown) {
+        this.log.warn({
+          message: 'enrichContactsFromTelegram: username branch failed',
+          contactId: row.id,
+          error: getErrorMessage(e),
+        });
+      }
+      if (delayBetweenUsernameMs > 0) await new Promise((r) => setTimeout(r, delayBetweenUsernameMs));
     }
+
     return { enriched };
   }
 

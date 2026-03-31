@@ -18,7 +18,10 @@ export class AppError extends Error {
     };
     if (
       this.details != null &&
-      (this.code === 'VALIDATION' || this.code === 'RATE_LIMITED' || process.env.NODE_ENV !== 'production')
+      (this.code === 'VALIDATION' ||
+        this.code === 'RATE_LIMITED' ||
+        this.code === 'CONFLICT' ||
+        process.env.NODE_ENV !== 'production')
     ) {
       payload.details = this.details;
     }

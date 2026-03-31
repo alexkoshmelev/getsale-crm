@@ -110,12 +110,17 @@ export class FileHandler {
       } else if (typeof peer === 'string' && peer.length > 0 && Number.isNaN(Number(peer))) {
         peer = await client.getInputEntity(peer);
       }
-      const message = await telegramInvokeWithFloodRetry(this.log, accountId, 'SendFile', () =>
-        client.sendFile(peer, {
-          file,
-          caption: opts.caption || '',
-          ...(opts.replyTo != null ? { replyTo: opts.replyTo } : {}),
-        })
+      const message = await telegramInvokeWithFloodRetry(
+        this.log,
+        accountId,
+        'SendFile',
+        () =>
+          client.sendFile(peer, {
+            file,
+            caption: opts.caption || '',
+            ...(opts.replyTo != null ? { replyTo: opts.replyTo } : {}),
+          }),
+        { pool: this.pool }
       );
       clientInfo.lastActivity = new Date();
       await this.pool.query(

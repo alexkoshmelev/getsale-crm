@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { clsx } from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { Loader2, Save, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
@@ -40,9 +41,11 @@ interface Props {
   account: BDAccount;
   accountId: string;
   onPatched: (account: BDAccount) => void;
+  /** Merged onto root wrapper (e.g. accordion: mt-0 pt-0 border-t-0). */
+  className?: string;
 }
 
-export function BdAccountScheduleSettings({ account, accountId, onPatched }: Props) {
+export function BdAccountScheduleSettings({ account, accountId, onPatched, className }: Props) {
   const { t } = useTranslation();
   const [timezone, setTimezone] = useState(account.timezone ?? 'Europe/Moscow');
   const [start, setStart] = useState(account.working_hours_start ?? '09:00');
@@ -100,7 +103,12 @@ export function BdAccountScheduleSettings({ account, accountId, onPatched }: Pro
   };
 
   return (
-    <div className="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700 space-y-6">
+    <div
+      className={clsx(
+        'mt-6 pt-4 border-t border-gray-200 dark:border-gray-700 space-y-6',
+        className
+      )}
+    >
       <div>
         <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">
           {t('bdAccounts.workingWindowTitle', { defaultValue: 'Рабочее окно' })}

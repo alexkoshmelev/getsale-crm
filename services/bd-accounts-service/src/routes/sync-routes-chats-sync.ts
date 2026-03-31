@@ -57,7 +57,11 @@ export function registerSyncChatsSyncRoutes(router: Router, deps: SyncRouteDeps)
     const accountTelegramId = account.telegram_id != null ? String(account.telegram_id).trim() : null;
 
     const { chatsRows, junctionRows } = await withOrgContext(pool, user.organizationId, async (client) => {
-      await client.query('DELETE FROM bd_account_sync_chats WHERE bd_account_id = $1', [id]);
+      await client.query(
+        `DELETE FROM bd_account_sync_chats WHERE bd_account_id = $1
+         AND COALESCE(sync_list_origin, 'sync_selection') = 'sync_selection'`,
+        [id]
+      );
       await client.query('DELETE FROM bd_account_sync_chat_folders WHERE bd_account_id = $1', [id]);
 
       let inserted = 0;
@@ -79,8 +83,8 @@ export function registerSyncChatsSyncRoutes(router: Router, deps: SyncRouteDeps)
         }
         const primaryFolder = folderIds[0] ?? folderId ?? null;
         await client.query(
-          `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id)
-           VALUES ($1, $2, $3, $4, false, $5)`,
+          `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id, sync_list_origin)
+           VALUES ($1, $2, $3, $4, false, $5, 'sync_selection')`,
           [id, chatId, title, peerType, primaryFolder]
         );
         for (const fid of folderIds) {

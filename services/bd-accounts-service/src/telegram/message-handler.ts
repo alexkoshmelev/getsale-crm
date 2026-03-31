@@ -61,7 +61,25 @@ export class MessageHandler {
 
       if (!chatId) return;
 
-      const allowed = await this.messageDb.isChatAllowedForAccount(accountId, chatId);
+      let allowed = await this.messageDb.isChatAllowedForAccount(accountId, chatId);
+      if (!allowed && /^[0-9]+$/.test(chatId)) {
+        const clientInfo = this.clients.get(accountId);
+        if (clientInfo?.client) {
+          try {
+            const ent = await clientInfo.client.getEntity(parseInt(chatId, 10));
+            if (ent && (ent as { className?: string }).className === 'User') {
+              await this.messageDb.tryMigrateSyncChatUsernameAliases(
+                accountId,
+                chatId,
+                (ent as Api.User).username ?? undefined
+              );
+              allowed = await this.messageDb.isChatAllowedForAccount(accountId, chatId);
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
       if (!allowed) {
         this.log.info({ message: `Short: chat not in sync list, skipping, accountId=${accountId}, chatId=${chatId}` });
         return;
@@ -154,7 +172,25 @@ export class MessageHandler {
         }
       }
 
-      const allowed = await this.messageDb.isChatAllowedForAccount(accountId, chatId);
+      let allowed = await this.messageDb.isChatAllowedForAccount(accountId, chatId);
+      if (!allowed && /^[0-9]+$/.test(chatId) && message.fromId && message.fromId instanceof Api.PeerUser) {
+        const clientInfo = this.clients.get(accountId);
+        if (clientInfo?.client) {
+          try {
+            const ent = await clientInfo.client.getEntity(parseInt(chatId, 10));
+            if (ent && (ent as { className?: string }).className === 'User') {
+              await this.messageDb.tryMigrateSyncChatUsernameAliases(
+                accountId,
+                chatId,
+                (ent as Api.User).username ?? undefined
+              );
+              allowed = await this.messageDb.isChatAllowedForAccount(accountId, chatId);
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
       if (!allowed) {
         this.log.info({ message: `Chat not in sync list, skipping message, accountId=${accountId}, chatId=${chatId}` });
         return;

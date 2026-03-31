@@ -33,6 +33,24 @@ export interface LeadCreationSettings {
   default_responsible_id?: string;
 }
 
+/** BD account snapshot on campaign list/detail (from campaign-service). */
+export interface CampaignBdAccount {
+  id: string;
+  displayName: string;
+  floodWaitUntil?: string | null;
+  floodWaitSeconds?: number | null;
+  floodReason?: string | null;
+  floodLastAt?: string | null;
+  photoFileId?: string | null;
+  isActive: boolean;
+  connectionState?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  username?: string | null;
+  phoneNumber?: string | null;
+  telegramId?: string | null;
+}
+
 export interface Campaign {
   id: string;
   organization_id: string;
@@ -52,6 +70,8 @@ export interface Campaign {
   created_by_user_id?: string | null;
   owner_name?: string | null;
   bd_account_name?: string | null;
+  /** Enriched BD accounts for this campaign (order matches audience). */
+  bd_accounts?: CampaignBdAccount[];
   total_participants?: number;
   total_sent?: number;
   total_read?: number;
@@ -408,9 +428,7 @@ export async function fetchCampaignAnalytics(
   return data;
 }
 
-export interface CampaignAgent {
-  id: string;
-  displayName: string;
+export interface CampaignAgent extends CampaignBdAccount {
   sentToday: number;
 }
 

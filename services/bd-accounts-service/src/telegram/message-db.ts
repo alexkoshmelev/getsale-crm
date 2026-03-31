@@ -214,6 +214,24 @@ export class MessageDb {
     return result.rows.length > 0;
   }
 
+  /**
+   * If outbound used @username but sync row still has username, migrate row to numeric user id so inbound matches.
+   */
+  async tryMigrateSyncChatUsernameAliases(
+    accountId: string,
+    numericChatId: string,
+    username: string | null | undefined
+  ): Promise<void> {
+    const u = (username || '').trim();
+    if (!u) return;
+    const aliases = [`@${u}`, u];
+    await this.pool.query(
+      `UPDATE bd_account_sync_chats SET telegram_chat_id = $3, sync_list_origin = 'outbound_send'
+       WHERE bd_account_id = $1 AND telegram_chat_id = ANY($2::text[])`,
+      [accountId, aliases, numericChatId]
+    );
+  }
+
   async isChatInNonAllChatsFolder(accountId: string, telegramChatId: string): Promise<boolean> {
     const result = await this.pool.query(
       `SELECT 1 FROM (

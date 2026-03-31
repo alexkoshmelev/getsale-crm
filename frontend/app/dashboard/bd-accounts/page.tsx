@@ -145,17 +145,25 @@ export default function BDAccountsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">BD Аккаунты</h1>
           <p className="text-gray-500 dark:text-gray-400 mt-1">
             Управление Telegram аккаунтами для отправки сообщений
           </p>
         </div>
-        <Button onClick={() => connect.setShowConnectModal(true)}>
-          <Plus className="w-4 h-4 mr-2" />
-          Подключить аккаунт
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            href="/dashboard/bd-accounts/health"
+            className="text-sm font-medium text-primary hover:underline"
+          >
+            {t('bdAccountHealth.pageTitle')}
+          </Link>
+          <Button onClick={() => connect.setShowConnectModal(true)}>
+            <Plus className="w-4 h-4 mr-2" />
+            Подключить аккаунт
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -185,7 +193,11 @@ export default function BDAccountsPage() {
                 const inFlood = floodUntil > Date.now();
                 const conn = resolveConnectionState(account);
                 if (inFlood) {
-                  return <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0" title="FLOOD_WAIT" />;
+                  return (
+                    <span title="FLOOD_WAIT" className="shrink-0 inline-flex">
+                      <AlertTriangle className="w-5 h-5 text-amber-500" aria-hidden />
+                    </span>
+                  );
                 }
                 if (conn === 'connected') {
                   return <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0" />;

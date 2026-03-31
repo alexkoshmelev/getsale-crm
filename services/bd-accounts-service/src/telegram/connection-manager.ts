@@ -29,12 +29,18 @@ export class ConnectionManager {
   private readonly CLEANUP_INTERVAL = 60000;
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
   private readonly RECONNECT_DELAY = 5000;
-  /** Application-level health probe; GramJS already pings every ~9s — avoid conflicting reconnect storms. */
-  private readonly UPDATE_KEEPALIVE_MS = 5 * 60 * 1000;
+  /** How often to invoke updates.GetState to beat SOCKS5/firewall idle timeouts (default 15s). */
+  private readonly UPDATE_KEEPALIVE_MS =
+    parseInt(String(process.env.TELEGRAM_KEEPALIVE_INTERVAL_MS || '').trim(), 10) || 15_000;
   private reconnectAllTimeout: NodeJS.Timeout | null = null;
   private readonly RECONNECT_ALL_DEBOUNCE_MS = 12000;
   private readonly reconnectAfterTimeoutTimeouts = new Map<string, NodeJS.Timeout>();
   private readonly RECONNECT_AFTER_TIMEOUT_DEBOUNCE_MS = 8000;
+  /** Coalesce concurrent connectAccount calls per account in-process. */
+  private readonly connectingNow = new Map<string, Promise<TelegramClient>>();
+  /** Keepalive GetState failures before app-level reconnect (lets GramJS autoReconnect handle blips). */
+  private readonly keepaliveFailureCount = new Map<string, number>();
+  private readonly KEEPALIVE_FAILURES_BEFORE_ESCALATE = 3;
 
   private sessionManager!: SessionManager;
   private eventHandlerSetup!: EventHandlerSetup;
@@ -55,6 +61,7 @@ export class ConnectionManager {
     const msg = String(message || '').toUpperCase();
     const fatalCodes = [
       'AUTH_KEY_UNREGISTERED',
+      'AUTH_KEY_DUPLICATED',
       'SESSION_REVOKED',
       'AUTH_KEY_INVALID',
       'USER_DEACTIVATED',
@@ -114,7 +121,8 @@ export class ConnectionManager {
       this.scheduleReconnectAfterTimeout(accountId);
       return;
     }
-    this.log.warn({ message: 'Telegram runtime warning', accountId, error: msg });
+    this.log.warn({ message: 'Telegram runtime warning (scheduling debounced reconnect)', accountId, error: msg });
+    this.scheduleReconnectAfterTimeout(accountId);
   }
 
   // --- Distributed locking ---
@@ -166,14 +174,16 @@ export class ConnectionManager {
     }
   }
 
-  // --- Keepalive (optional app-level probe; does not schedule full client reconnect — GramJS owns transport) ---
+  // --- Keepalive ---
   startUpdateKeepalive(accountId: string, client: TelegramClient): void {
     this.stopUpdateKeepalive(accountId);
+    this.keepaliveFailureCount.delete(accountId);
     const interval = setInterval(async () => {
       const info = this.clients.get(accountId);
       if (!info?.client?.connected) return;
       try {
         await client.invoke(new Api.updates.GetState());
+        this.keepaliveFailureCount.delete(accountId);
       } catch (e: unknown) {
         const msg = getErrorMessage(e);
         const fatalCode = this.getFatalAuthCode(msg);
@@ -182,7 +192,19 @@ export class ConnectionManager {
           await this.markReauthRequired(accountId, msg);
           return;
         }
-        this.log.warn({ message: 'Keepalive GetState failed (logged only; GramJS handles connection)', accountId, error: msg });
+        const n = (this.keepaliveFailureCount.get(accountId) ?? 0) + 1;
+        this.keepaliveFailureCount.set(accountId, n);
+        if (n >= this.KEEPALIVE_FAILURES_BEFORE_ESCALATE) {
+          this.keepaliveFailureCount.delete(accountId);
+          await this.handleClientRuntimeError(accountId, e);
+        } else {
+          this.log.warn({
+            message: 'Keepalive failed; deferring app-level reconnect for GramJS autoReconnect',
+            accountId,
+            attempt: n,
+            error: msg,
+          });
+        }
       }
     }, this.UPDATE_KEEPALIVE_MS);
     this.updateKeepaliveIntervals.set(accountId, interval);
@@ -194,6 +216,7 @@ export class ConnectionManager {
       clearInterval(interval);
       this.updateKeepaliveIntervals.delete(accountId);
     }
+    this.keepaliveFailureCount.delete(accountId);
   }
 
   // --- Connect / Disconnect ---
@@ -206,13 +229,56 @@ export class ConnectionManager {
     apiHash: string,
     sessionString?: string
   ): Promise<TelegramClient> {
+    if (this.clients.has(accountId)) {
+      const existing = this.clients.get(accountId)!;
+      if (existing.isConnected) {
+        return existing.client;
+      }
+    }
+
+    const inflight = this.connectingNow.get(accountId);
+    if (inflight) return inflight;
+
+    const promise = this.runConnectAccount(
+      accountId,
+      organizationId,
+      userId,
+      phoneNumber,
+      apiId,
+      apiHash,
+      sessionString
+    );
+    this.connectingNow.set(accountId, promise);
     try {
+      return await promise;
+    } finally {
+      this.connectingNow.delete(accountId);
+    }
+  }
+
+  private async runConnectAccount(
+    accountId: string,
+    organizationId: string,
+    userId: string,
+    phoneNumber: string,
+    apiId: number,
+    apiHash: string,
+    sessionString?: string
+  ): Promise<TelegramClient> {
+    try {
+      this.stopUpdateKeepalive(accountId);
+      this.keepaliveFailureCount.delete(accountId);
       if (this.clients.has(accountId)) {
         const existing = this.clients.get(accountId)!;
         if (existing.isConnected) {
           return existing.client;
         }
         await this.disconnectAccount(accountId);
+      }
+
+      const activeCheck = await this.pool.query('SELECT is_active FROM bd_accounts WHERE id = $1', [accountId]);
+      if (activeCheck.rows.length === 0 || !activeCheck.rows[0].is_active) {
+        throw new Error('Account is not active');
       }
 
       const acquired = await this.acquireLock(accountId);

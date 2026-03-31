@@ -57,6 +57,8 @@ export enum EventType {
   BD_ACCOUNT_SYNC_FAILED = 'bd_account.sync.failed',
   /** Telegram presence/UI updates: typing, user status, read receipt, draft. Forwarded to frontend via WebSocket. */
   BD_ACCOUNT_TELEGRAM_UPDATE = 'bd_account.telegram_update',
+  /** Flood markers cleared after successful GramJS invoke; campaign-service may reschedule pending sends. */
+  BD_ACCOUNT_FLOOD_CLEARED = 'bd_account.flood.cleared',
   
   // Subscription
   SUBSCRIPTION_CREATED = 'subscription.created',
@@ -216,6 +218,13 @@ export interface BDAccountConnectedEvent extends BaseEvent {
     bdAccountId: string;
     platform: string;
     userId?: string;
+  };
+}
+
+export interface BDAccountFloodClearedEvent extends BaseEvent {
+  type: EventType.BD_ACCOUNT_FLOOD_CLEARED;
+  data: {
+    bdAccountId: string;
   };
 }
 
@@ -632,6 +641,7 @@ export type Event =
   | DealCreatedEvent
   | DealUpdatedEvent
   | BDAccountConnectedEvent
+  | BDAccountFloodClearedEvent
   | BDAccountDisconnectedEvent
   | BDAccountPurchasedEvent
   | BDAccountSyncStartedEvent

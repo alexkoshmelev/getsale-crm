@@ -3,7 +3,7 @@ import request from 'supertest';
 import { createTestApp } from '@getsale/test-utils';
 import { createLogger } from '@getsale/logger';
 import { campaignRephraseRouter } from './campaign-rephrase';
-import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL } from '../openrouter-campaign-config';
+import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL, FALLBACK_OPENROUTER_CAMPAIGN_MODELS } from '../openrouter-campaign-config';
 
 const TEST_ORG_ID = '11111111-1111-1111-1111-111111111111';
 const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
@@ -63,9 +63,22 @@ describe('Campaign Rephrase Router', () => {
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const fetchOpts = fetchMock.mock.calls[0]?.[1] as { body?: string };
-      const sent = JSON.parse(fetchOpts?.body ?? '{}') as { max_tokens?: number; messages?: unknown[]; model?: string };
+      const text = 'Hello, we have a special offer for you.';
+      const inputTokenEstimate = Math.ceil(text.length / 3);
+      const expectedMax = Math.min(512, Math.max(128, inputTokenEstimate * 2));
+      const sent = JSON.parse(fetchOpts?.body ?? '{}') as {
+        max_tokens?: number;
+        messages?: unknown[];
+        model?: string;
+        temperature?: number;
+        reasoning?: { effort?: string };
+        provider?: { require_parameters?: boolean };
+      };
       expect(sent.model).toBe(DEFAULT_OPENROUTER_CAMPAIGN_MODEL);
-      expect(sent.max_tokens).toBeGreaterThanOrEqual(2048);
+      expect(sent.max_tokens).toBe(expectedMax);
+      expect(sent.temperature).toBe(0.7);
+      expect(sent.reasoning).toEqual({ effort: 'none' });
+      expect(sent.provider).toEqual({ require_parameters: true });
       expect(Array.isArray(sent.messages)).toBe(true);
       expect((sent.messages as { role: string }[]).some((m) => m.role === 'system')).toBe(true);
     });
@@ -117,11 +130,12 @@ describe('Campaign Rephrase Router', () => {
       expect(res.status).toBe(502);
     });
 
-    it('returns 502 when OpenRouter returns empty choices', async () => {
-      vi.mocked(fetchMock).mockResolvedValueOnce({
+    it('returns 502 when OpenRouter returns empty content for all models in sequence', async () => {
+      const empty = {
         ok: true,
-        json: () => Promise.resolve({ choices: [] }),
-      } as any);
+        json: () => Promise.resolve({ choices: [{ message: { content: null } }] }),
+      } as any;
+      vi.mocked(fetchMock).mockResolvedValue(empty);
 
       const res = await request(app)
         .post('/api/ai/campaigns/rephrase')
@@ -129,6 +143,32 @@ describe('Campaign Rephrase Router', () => {
         .send({ text: 'Hello' });
 
       expect(res.status).toBe(502);
+      expect(fetchMock.mock.calls.length).toBe(1 + FALLBACK_OPENROUTER_CAMPAIGN_MODELS.length);
+    });
+
+    it('retries with fallback model when primary returns empty content', async () => {
+      vi.mocked(fetchMock)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              choices: [{ finish_reason: 'length', message: { content: null, reasoning: '...' } }],
+            }),
+        } as any)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ choices: [{ message: { content: 'Fallback rephrase' } }] }),
+        } as any);
+
+      const res = await request(app)
+        .post('/api/ai/campaigns/rephrase')
+        .set(authHeaders)
+        .send({ text: 'Hello' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe('Fallback rephrase');
+      expect(res.body.model).toBe(FALLBACK_OPENROUTER_CAMPAIGN_MODELS[0]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
   });
 });

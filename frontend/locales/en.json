@@ -617,9 +617,12 @@
     "filterHasTelegram": "Only contacts with Telegram",
     "sendDelayLabel": "Delay between sends",
     "sendDelayHint": "Pause between messages to different contacts to mimic human behavior",
+    "dailySendLimit": "Daily send limit per account",
+    "dailySendLimitHint": "Max messages one account sends per day in this campaign. Lower values reduce flood risk.",
     "delaySeconds": "{{count}}s",
     "delayMinutes": "{{count}}m",
     "enrichContactsBeforeStart": "Enrich contacts from Telegram (name, username) before start",
+    "enrichContactsBeforeStartHint": "Runs when you click Start. Resolves Telegram user id via API when missing: uses numeric ID if already on the contact, otherwise looks up by @username (requires a connected BD account). Improves reply matching.",
     "randomizeWithAI": "Randomize message text via AI service",
     "schedule": "Schedule",
     "workingHours": "Working hours",
@@ -722,6 +725,10 @@
     "statusLabel": "Status",
     "owner": "Owner",
     "bdAccount": "Account",
+    "sendingAccounts": "Sending accounts",
+    "accountFlood": "Account is in FLOOD_WAIT",
+    "floodEndsIn": "Ends in {{time}}",
+    "accountDisconnected": "Account disconnected",
     "totalSent": "Total Sent",
     "totalReplied": "Total Replied",
     "totalWon": "Total Won"
@@ -952,7 +959,124 @@
     "healthLastError": "Last error",
     "healthReason": "Reason",
     "proxySocksOnlyHint": "Only SOCKS5 proxy is supported.",
-    "proxyFixCta": "Check/update proxy"
+    "proxyFixCta": "Check/update proxy",
+    "healthLastActivity": "Last activity",
+    "floodWaitTitle": "Telegram rate limit (FLOOD_WAIT)",
+    "floodWaitUntil": "Until {{time}}",
+    "floodWaitRemainingDone": "Expired",
+    "floodWaitRemainingHms": "{{h}}h {{m}}m {{s}}s",
+    "floodWaitRemainingMs": "{{m}}m {{s}}s",
+    "floodWaitRemainingS": "{{s}}s",
+    "floodWaitHint": "Wait before bulk sends or reconnect; Telegram enforces this server-side.",
+    "floodWaitDocUrl": "",
+    "floodWaitDocLabel": "Telegram limits (docs)",
+    "floodAfterTitle": "Recent rate limit cleared",
+    "floodAfterBody": "If sends still fail, space out outreach and review account health.",
+    "floodAfterLinkHealth": "Team health dashboard",
+    "floodAfterLinkCampaigns": "Campaigns",
+    "runtimeDeferredTitle": "Runtime not activated",
+    "runtimeDeferredBody": "Activate Telegram runtime when your workspace uses this option.",
+    "runtimeDeferredCta": "Activate",
+    "detailProxyAccordion": "Proxy",
+    "detailScheduleAccordion": "Working hours & auto-responder",
+    "quickInfoTitle": "Account details",
+    "fieldUsername": "Username",
+    "fieldPhone": "Phone",
+    "fieldTelegramId": "Telegram ID",
+    "fieldConnectedAt": "Connected at",
+    "fieldLastError": "Last error",
+    "fieldBio": "Bio",
+    "messengerCta": "Messenger",
+    "reconnectQrCta": "Reconnect via QR / phone",
+    "saveProxyCta": "Save proxy",
+    "deleteAccountCta": "Delete account",
+    "weekSun": "Sun",
+    "weekMon": "Mon",
+    "weekTue": "Tue",
+    "weekWed": "Wed",
+    "weekThu": "Thu",
+    "weekFri": "Fri",
+    "weekSat": "Sat"
+  },
+  "bdAccountCard": {
+    "healthSectionTitle": "Account health",
+    "healthLevelOk": "All key signals look normal.",
+    "healthLevelAttention": "Review connection, proxy, or sync; one or more items need attention.",
+    "healthLevelCritical": "Sending or sync may be blocked until this is resolved.",
+    "teamHealthLink": "Team overview",
+    "errorDetailsToggle": "Error details",
+    "tile": {
+      "connection": {
+        "label": "Connection",
+        "hint": {
+          "ok": "Connected to Telegram.",
+          "warning": "Reconnecting or unstable.",
+          "error": "Re-login required.",
+          "neutral": "Disconnected (inactive)."
+        }
+      },
+      "sync": {
+        "label": "Sync",
+        "hint": {
+          "ok": "Chat sync healthy.",
+          "warning": "Sync in progress.",
+          "error": "Sync failed; check error details.",
+          "neutral": "No sync issues detected."
+        }
+      },
+      "proxy": {
+        "label": "Proxy",
+        "hint": {
+          "ok": "Proxy path OK.",
+          "warning": "Proxy configured; verify when not connected.",
+          "error": "Proxy error; check settings.",
+          "neutral": "No proxy configured."
+        }
+      },
+      "flood": {
+        "label": "Flood / limits",
+        "hint": {
+          "ok": "No active FLOOD_WAIT.",
+          "warning": "Approaching limits; slow down if needed.",
+          "error": "Telegram FLOOD_WAIT active.",
+          "neutral": "No flood data."
+        }
+      },
+      "autoresponder": {
+        "label": "Auto-responder",
+        "hint": {
+          "ok": "Enabled for outside working hours.",
+          "warning": "Review prompt and schedule.",
+          "error": "Auto-responder may not run as expected.",
+          "neutral": "Not enabled."
+        }
+      }
+    }
+  },
+  "bdAccountHealth": {
+    "pageTitle": "BD accounts health",
+    "backToAccounts": "Back to accounts",
+    "loadError": "Could not load health summary.",
+    "retry": "Retry",
+    "serverNote": "Snapshot from server: {{time}}",
+    "cardFlood": "Accounts in FLOOD_WAIT",
+    "cardLimits": "Accounts with daily limits set",
+    "cardWarming": "Warming groups running",
+    "cardCampaignsActive": "Active campaigns",
+    "cardCampaignsPaused": "{{count}} paused",
+    "open": "Open",
+    "riskTitle": "Accounts needing attention",
+    "riskEmpty": "No risk flags in the last check.",
+    "riskFlagUnknown": "See account",
+    "viewAccount": "Open account",
+    "riskFlag": {
+      "flood": "Flood wait",
+      "sync": "Sync error",
+      "proxy": "Proxy error",
+      "connection_reconnecting": "Reconnecting",
+      "connection_disconnected": "Disconnected",
+      "connection_reauth_required": "Re-login required"
+    }
   },
   "messaging": {
     "bdAccounts": "BD Accounts",

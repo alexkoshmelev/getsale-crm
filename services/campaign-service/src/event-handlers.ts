@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, type MessageReceivedEvent } from '@getsale/events';
+import { recalculatePendingForCampaignsUsingBdAccount } from './campaign-pending-reschedule';
 import { CampaignStatus } from '@getsale/types';
 import { Logger } from '@getsale/logger';
 import { ServiceHttpClient } from '@getsale/service-core';
@@ -10,13 +11,20 @@ import {
   ensureLeadInPipeline,
   delayHoursFromStep,
   resolveCampaignChannelId,
+  resolveDelayRange,
   spreadOffsetSecondsForSlot,
   scheduleFromBdAccountRow,
   getEffectiveSchedule,
   staggeredFirstSendAtByOffset,
   type Schedule,
+  DEFAULT_DAILY_SEND_CAP,
 } from './helpers';
 import { runAutoResponderIfEligible } from './auto-responder';
+import {
+  findCampaignParticipantsForInboundMessage,
+  mergeParticipantToEventContact,
+  reconcileParticipantChannelIds,
+} from './participant-inbound-match';
 
 export interface EventHandlerDeps {
   pool: Pool;
@@ -31,7 +39,7 @@ export interface EventHandlerDeps {
 export async function subscribeToEvents(deps: EventHandlerDeps): Promise<void> {
   const { rabbitmq } = deps;
   await rabbitmq.subscribeToEvents(
-    [EventType.MESSAGE_RECEIVED, EventType.LEAD_CREATED, EventType.LEAD_STAGE_CHANGED],
+    [EventType.MESSAGE_RECEIVED, EventType.LEAD_CREATED, EventType.LEAD_STAGE_CHANGED, EventType.BD_ACCOUNT_FLOOD_CLEARED],
     (event: any) => processEvent(deps, event),
     'events',
     'campaign-service'
@@ -40,6 +48,14 @@ export async function subscribeToEvents(deps: EventHandlerDeps): Promise<void> {
 
 async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
   const { pool, log, pipelineClient, rabbitmq } = deps;
+
+  if (event.type === EventType.BD_ACCOUNT_FLOOD_CLEARED) {
+    const bdAccountId = event.data?.bdAccountId;
+    if (typeof bdAccountId === 'string' && bdAccountId.trim()) {
+      await recalculatePendingForCampaignsUsingBdAccount(pool, bdAccountId, log);
+    }
+    return;
+  }
 
   if (event.type === EventType.LEAD_CREATED) {
     const { contactId, pipelineId, stageId } = event.data || {};
@@ -83,17 +99,46 @@ async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
 
   const bdAccountId = event.data?.bdAccountId ?? null;
   const channelId = event.data?.channelId ?? null;
+  const organizationId = event.organizationId as string | undefined;
+  if (!organizationId) {
+    log.info({ message: 'MESSAGE_RECEIVED skipped: no organizationId', eventId: event.id });
+    return;
+  }
 
-  const participants = await pool.query(
-    `SELECT cp.id, cp.campaign_id, cp.current_step, cp.next_send_at, cp.bd_account_id, cp.channel_id
-     FROM campaign_participants cp
-     JOIN campaigns c ON c.id = cp.campaign_id
-     WHERE cp.contact_id = $1::uuid AND c.status IN ('active', 'completed') AND cp.status IN ('pending', 'sent', 'completed')
-     AND (($2::text IS NULL AND $3::text IS NULL) OR (cp.bd_account_id = $2::uuid AND cp.channel_id = $3))`,
-    [contactId, bdAccountId, channelId]
-  );
+  const { rows: participantRows, matchedViaIdentityAlias } = await findCampaignParticipantsForInboundMessage(pool, {
+    organizationId,
+    eventContactId: contactId,
+    bdAccountId,
+    channelId,
+  });
 
-  if (participants.rows.length === 0 && (bdAccountId || channelId)) {
+  if (matchedViaIdentityAlias && participantRows.length > 0) {
+    await mergeParticipantToEventContact(pool, participantRows, contactId, channelId);
+    log.info({
+      message: 'MESSAGE_RECEIVED: matched participant via telegram_id/username alias; contact_id merged to event contact',
+      contactId,
+      bdAccountId,
+      channelId,
+      eventId: event.id,
+      participantIds: participantRows.map((r) => r.id),
+    });
+  } else if (!matchedViaIdentityAlias && participantRows.length > 0 && channelId) {
+    const hadChannelMismatch = participantRows.some((r) => r.channel_id !== channelId);
+    await reconcileParticipantChannelIds(pool, participantRows, channelId);
+    if (hadChannelMismatch) {
+      log.info({
+        message: 'MESSAGE_RECEIVED: reconciled participant channel_id (username vs numeric peer)',
+        contactId,
+        bdAccountId,
+        channelId,
+        eventId: event.id,
+      });
+    }
+  }
+
+  const participantsRes = { rows: participantRows };
+
+  if (participantsRes.rows.length === 0 && (bdAccountId || channelId)) {
     log.info({
       message: 'MESSAGE_RECEIVED skipped: no matching participant for chat',
       contactId,
@@ -104,7 +149,7 @@ async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
     return;
   }
 
-  for (const p of participants.rows) {
+  for (const p of participantsRes.rows) {
     const stepsRes = await pool.query(
       `SELECT order_index, trigger_type, delay_hours, delay_minutes FROM campaign_sequences WHERE campaign_id = $1 ORDER BY order_index`,
       [p.campaign_id]
@@ -292,13 +337,13 @@ async function addContactToDynamicCampaigns(
       typeof aud.dailySendTarget === 'number'
         ? Math.min(500, Math.max(1, Math.floor(aud.dailySendTarget)))
         : null;
-    const dailyCap = audienceDaily ?? (Number.isFinite(dm) && dm >= 0 ? dm : 20);
+    const dailyCap = audienceDaily ?? (Number.isFinite(dm) && dm >= 0 ? dm : DEFAULT_DAILY_SEND_CAP);
     const ord = await pool.query(
       'SELECT COALESCE(MAX(enqueue_order), -1) + 1 AS n FROM campaign_participants WHERE campaign_id = $1',
       [c.id]
     );
     const enqueueOrder = Number(ord.rows[0]?.n ?? 0);
-    const spreadSec = spreadOffsetSecondsForSlot(enqueueOrder, dailyCap, effectiveSchedule);
+    const spreadSec = spreadOffsetSecondsForSlot(enqueueOrder, dailyCap, effectiveSchedule, resolveDelayRange(aud));
     const nextSendAt = staggeredFirstSendAtByOffset(new Date(), spreadSec, effectiveSchedule);
     await pool.query(
       `INSERT INTO campaign_participants (campaign_id, contact_id, bd_account_id, channel_id, status, current_step, next_send_at, enqueue_order)

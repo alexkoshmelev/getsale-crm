@@ -8,6 +8,7 @@ import { messagingRouter } from './routes/messaging';
 import { mediaRouter } from './routes/media';
 import { internalBdAccountsRouter } from './routes/internal';
 import { messagingOrphanFallbackTotal, messageDbSqlBypassTotal } from './metrics';
+import { setBdAccountFloodPublishRabbitmq } from './bd-account-flood-persist';
 
 const MESSAGING_SERVICE_URL = process.env.MESSAGING_SERVICE_URL || 'http://localhost:3003';
 
@@ -23,6 +24,7 @@ async function main() {
   ctx.registry.registerMetric(messagingOrphanFallbackTotal);
   ctx.registry.registerMetric(messageDbSqlBypassTotal);
   const { pool, rabbitmq, log, registry } = ctx;
+  setBdAccountFloodPublishRabbitmq(rabbitmq);
 
   const redisUrl = process.env.REDIS_URL;
   const redis = redisUrl ? new RedisClient(redisUrl) : null;

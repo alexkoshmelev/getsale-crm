@@ -118,7 +118,10 @@ export function leadsRouter({ pool, rabbitmq, log, eventPublishTotal }: Deps): R
         [organizationId, contactId, pipelineId]
       );
       if (existing.rows.length > 0) {
-        throw new AppError(409, 'Contact is already in this pipeline', ErrorCodes.CONFLICT);
+        const existingLeadId = (existing.rows[0] as { id: string }).id;
+        throw new AppError(409, 'Contact is already in this pipeline', ErrorCodes.CONFLICT, {
+          leadId: existingLeadId,
+        });
       }
       const maxOrder = await client.query('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM leads WHERE stage_id = $1', [targetStageId]);
       const orderIndex = maxOrder.rows[0]?.next ?? 0;

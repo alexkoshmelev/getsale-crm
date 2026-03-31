@@ -3,9 +3,11 @@ import {
   resolveCampaignChannelId,
   scheduleFromBdAccountRow,
   getEffectiveSchedule,
+  resolveDelayRange,
   spreadOffsetSecondsForSlot,
   staggeredFirstSendAtByOffset,
   type Schedule,
+  DEFAULT_DAILY_SEND_CAP,
 } from './helpers';
 
 export type TargetAudienceShape = {
@@ -70,6 +72,7 @@ export async function bulkInsertCampaignParticipants(
     accScheduleFallback = scheduleFromBdAccountRow(accSch.rows[0]);
   }
   const effectiveSchedule = getEffectiveSchedule(campaignSchedule, accScheduleFallback);
+  const delayRange = resolveDelayRange(audience);
 
   const now = new Date();
   let insertedCount = 0;
@@ -97,10 +100,10 @@ export async function bulkInsertCampaignParticipants(
       typeof audience.dailySendTarget === 'number'
         ? Math.min(500, Math.max(1, Math.floor(audience.dailySendTarget)))
         : null;
-    const dailyCap = audienceDaily ?? (Number.isFinite(dm) && dm >= 0 ? dm : 20);
+    const dailyCap = audienceDaily ?? (Number.isFinite(dm) && dm >= 0 ? dm : DEFAULT_DAILY_SEND_CAP);
 
     const slotIndex = enqueueOrderBase + insertedCount;
-    const spreadSec = spreadOffsetSecondsForSlot(slotIndex, dailyCap, effectiveSchedule);
+    const spreadSec = spreadOffsetSecondsForSlot(slotIndex, dailyCap, effectiveSchedule, delayRange);
     const nextSendAt = staggeredFirstSendAtByOffset(now, spreadSec, effectiveSchedule);
 
     const ins = await pool.query(

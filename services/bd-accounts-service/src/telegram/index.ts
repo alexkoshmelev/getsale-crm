@@ -30,6 +30,7 @@ import { dialogMatchesFilter, getFilterIncludeExcludePeerIds } from './chat-sync
 import { MessageSender } from './message-sender';
 import { FileHandler } from './file-handler';
 import { ReactionHandler } from './reaction-handler';
+import { setTelegramFloodPersistPool } from './telegram-invoke-flood';
 
 export type { TelegramSourceType, ResolvedSource, QrLoginState } from './types';
 
@@ -82,6 +83,8 @@ export class TelegramManager {
       lockHeartbeatIntervals: new Map<string, NodeJS.Timeout>(),
       dialogFiltersCache: new Map<string, { ts: number; filters: unknown[] }>(),
     };
+
+    setTelegramFloodPersistPool(pool);
 
     // Instantiate sub-modules (messagingClient => messages/conversations via messaging-service API, A1)
     this.connectionManager = new ConnectionManager(this.deps);

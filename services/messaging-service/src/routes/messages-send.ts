@@ -124,6 +124,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       bdAccountsClient.post<{
         messageId?: string;
         date?: number;
+        resolvedChatId?: string;
         telegram_media?: Record<string, unknown> | null;
         telegram_entities?: Record<string, unknown>[] | null;
       }>(`/api/bd-accounts/${bdAccountId}/send`, makeBody(chatIdValue), undefined, { userId, organizationId });
@@ -195,6 +196,10 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
         error: status >= 500 ? 'Downstream error' : 'Internal server error',
         message: downstreamMessage || 'Failed to send message',
       });
+    }
+
+    if (resJson.resolvedChatId != null && String(resJson.resolvedChatId).trim() !== '') {
+      sentChannelId = String(resJson.resolvedChatId).trim();
     }
 
     const tgMessageId = resJson.messageId != null ? String(resJson.messageId).trim() : null;

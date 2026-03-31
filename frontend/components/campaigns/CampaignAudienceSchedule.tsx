@@ -24,6 +24,9 @@ import { clsx } from 'clsx';
 import { fetchCompanies, type Company } from '@/lib/api/crm';
 import { fetchPipelines, fetchStages, type Pipeline } from '@/lib/api/pipeline';
 import { apiClient } from '@/lib/api/client';
+import { AccountStatusAvatar } from '@/components/bd-accounts/AccountStatusAvatar';
+import { campaignBdAccountToBDAccount } from '@/lib/campaign-bd-account';
+import { isFloodActive } from '@/lib/bd-account-health';
 
 /** Reads CSV file and returns string for the backend. */
 async function readFileAsCsv(file: File): Promise<string> {
@@ -47,6 +50,10 @@ const DELAY_MIN_SECONDS = 60;
 const DELAY_MAX_SECONDS = 3600;
 const DELAY_DEFAULT_MIN_SECONDS = 180;
 const DELAY_DEFAULT_MAX_SECONDS = 300;
+
+const DAILY_SEND_MIN = 1;
+const DAILY_SEND_MAX = 500;
+const DAILY_SEND_PLACEHOLDER = 20;
 
 const DAYS_OF_WEEK = [
   { value: 0, labelKey: 'campaigns.daySun' },
@@ -140,6 +147,13 @@ export function CampaignAudienceSchedule({
   const [randomizeWithAI, setRandomizeWithAI] = useState<boolean>(() =>
     !!(campaign.target_audience as { randomizeWithAI?: boolean } | undefined)?.randomizeWithAI
   );
+  const [dailySendTarget, setDailySendTarget] = useState<string>(() => {
+    const raw = campaign.target_audience?.dailySendTarget;
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      return String(Math.min(DAILY_SEND_MAX, Math.max(DAILY_SEND_MIN, Math.floor(raw))));
+    }
+    return '';
+  });
   const [stages, setStages] = useState<{ id: string; name: string }[]>([]);
   const [teamMembers, setTeamMembers] = useState<{ user_id: string; email?: string; first_name?: string; last_name?: string }[]>([]);
   const isDraft = campaign.status === 'draft' || campaign.status === 'paused';
@@ -166,6 +180,15 @@ export function CampaignAudienceSchedule({
     const next = !!(campaign.target_audience as { enrichContactsBeforeStart?: boolean } | undefined)?.enrichContactsBeforeStart;
     setEnrichContactsBeforeStart(next);
   }, [campaign.id, campaign.target_audience]);
+
+  useEffect(() => {
+    const raw = campaign.target_audience?.dailySendTarget;
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      setDailySendTarget(String(Math.min(DAILY_SEND_MAX, Math.max(DAILY_SEND_MIN, Math.floor(raw)))));
+    } else {
+      setDailySendTarget('');
+    }
+  }, [campaign.id, campaign.target_audience?.dailySendTarget]);
 
   useEffect(() => {
     Promise.all([
@@ -202,6 +225,8 @@ export function CampaignAudienceSchedule({
     sendDelaySeconds?: number;
     sendDelayMinSeconds?: number;
     sendDelayMaxSeconds?: number;
+    /** Omit from payload when null (clear stored value). */
+    dailySendTarget?: number | null;
   } & LeadOverrides) => {
     const ids = overrides?.contactIds ?? contactIds;
     const src = overrides?.audienceSource ?? audienceSource;
@@ -210,6 +235,18 @@ export function CampaignAudienceSchedule({
     const randomizeAI = overrides?.randomizeWithAI ?? randomizeWithAI;
     const delayMin = Math.max(DELAY_MIN_SECONDS, Math.min(DELAY_MAX_SECONDS, Math.floor(overrides?.sendDelayMinSeconds ?? sendDelayMinSeconds)));
     const delayMax = Math.max(delayMin, Math.min(DELAY_MAX_SECONDS, Math.floor(overrides?.sendDelayMaxSeconds ?? sendDelayMaxSeconds)));
+    const dailyParsed: number | undefined = (() => {
+      if (overrides && 'dailySendTarget' in overrides) {
+        const d = overrides.dailySendTarget;
+        if (d === null || d === undefined) return undefined;
+        return Math.min(DAILY_SEND_MAX, Math.max(DAILY_SEND_MIN, Math.floor(Number(d))));
+      }
+      const t = dailySendTarget.trim();
+      if (t === '') return undefined;
+      const n = Math.floor(Number(t));
+      if (!Number.isFinite(n) || n < DAILY_SEND_MIN) return undefined;
+      return Math.min(DAILY_SEND_MAX, n);
+    })();
     const trigger = overrides?.leadTrigger ?? leadTrigger;
     const pipeline = overrides?.leadPipelineId ?? leadPipelineId;
     const stage = overrides?.leadStageId ?? leadStageId;
@@ -232,6 +269,7 @@ export function CampaignAudienceSchedule({
           sendDelayMaxSeconds: delayMax,
           enrichContactsBeforeStart: enrich,
           randomizeWithAI: randomizeAI,
+          ...(dailyParsed !== undefined ? { dailySendTarget: dailyParsed } : {}),
         },
         schedule: null,
         ...(trigger && pipeline
@@ -251,7 +289,7 @@ export function CampaignAudienceSchedule({
     } finally {
       setSaving(false);
     }
-  }, [campaignId, contactIds, audienceSource, bdAccountIds, companyId, pipelineId, sendDelayMinSeconds, sendDelayMaxSeconds, enrichContactsBeforeStart, randomizeWithAI, leadTrigger, leadPipelineId, leadStageId, leadResponsibleId, onUpdate]);
+  }, [campaignId, contactIds, audienceSource, bdAccountIds, companyId, pipelineId, sendDelayMinSeconds, sendDelayMaxSeconds, dailySendTarget, enrichContactsBeforeStart, randomizeWithAI, leadTrigger, leadPipelineId, leadStageId, leadResponsibleId, onUpdate]);
 
   const percentFromSeconds = (seconds: number): number =>
     ((seconds - DELAY_MIN_SECONDS) / (DELAY_MAX_SECONDS - DELAY_MIN_SECONDS)) * 100;
@@ -287,7 +325,9 @@ export function CampaignAudienceSchedule({
   }, [draggingDelayThumb, isDraft, saveAudience, secondsFromClientX, sendDelayMaxSeconds, sendDelayMinSeconds]);
 
   return (
-    <div className="space-y-8 max-w-2xl">
+    <div className="space-y-8 max-w-5xl">
+      <div className="grid grid-cols-1 lg:grid-cols-2 lg:gap-6 lg:items-start">
+        <div className="space-y-8 min-w-0">
       {/* 1. Источник контактов */}
       <section className="rounded-xl border border-border bg-card p-6">
         <h3 className="font-heading text-lg font-semibold text-foreground mb-4 flex items-center gap-2">
@@ -479,7 +519,9 @@ export function CampaignAudienceSchedule({
         )}
         {audienceSource === 'group' && groupSources.length === 0 && <p className="text-sm text-muted-foreground">{t('campaigns.noGroupsSynced')}</p>}
       </section>
+        </div>
 
+        <div className="space-y-8 min-w-0">
       {/* 2. Кто рассылает */}
       {agents.length > 0 && (
         <section className="rounded-xl border border-border bg-card p-6">
@@ -494,7 +536,7 @@ export function CampaignAudienceSchedule({
                 <label
                   key={a.id}
                   className={clsx(
-                    'flex items-center gap-2 cursor-pointer px-4 py-3 rounded-xl border-2 transition-colors',
+                    'flex items-start gap-2 cursor-pointer px-4 py-3 rounded-xl border-2 transition-colors',
                     checked ? 'border-primary bg-primary/10' : 'border-border hover:bg-muted/50',
                     !isDraft && 'opacity-60 pointer-events-none'
                   )}
@@ -510,8 +552,16 @@ export function CampaignAudienceSchedule({
                     disabled={!isDraft}
                     className="sr-only"
                   />
-                  <span className="text-sm font-medium text-foreground">{a.displayName}</span>
-                  <span className="text-xs text-muted-foreground">{t('campaigns.sentToday', { count: a.sentToday })}</span>
+                  <div className="shrink-0 pt-0.5">
+                    <AccountStatusAvatar accountId={a.id} account={a} size="sm" showTooltip />
+                  </div>
+                  <div className="flex flex-col min-w-0">
+                    <span className="text-sm font-medium text-foreground truncate">{a.displayName}</span>
+                    {isFloodActive(campaignBdAccountToBDAccount(a)) && (
+                      <span className="text-[10px] text-amber-600 dark:text-amber-400">{t('campaigns.accountFlood')}</span>
+                    )}
+                  </div>
+                  <span className="text-xs text-muted-foreground shrink-0">{t('campaigns.sentToday', { count: a.sentToday })}</span>
                 </label>
               );
             })}
@@ -587,6 +637,41 @@ export function CampaignAudienceSchedule({
         </div>
       </section>
 
+      <section className="rounded-xl border border-border bg-card p-6">
+        <h3 className="text-sm font-semibold text-foreground mb-1">{t('campaigns.dailySendLimit')}</h3>
+        <p className="text-xs text-muted-foreground mb-3">{t('campaigns.dailySendLimitHint')}</p>
+        <input
+          type="number"
+          min={DAILY_SEND_MIN}
+          max={DAILY_SEND_MAX}
+          placeholder={String(DAILY_SEND_PLACEHOLDER)}
+          value={dailySendTarget}
+          onChange={(e) => {
+            if (!isDraft) return;
+            setDailySendTarget(e.target.value);
+          }}
+          onBlur={() => {
+            if (!isDraft) return;
+            const t = dailySendTarget.trim();
+            if (t === '') {
+              saveAudience({ dailySendTarget: null });
+              return;
+            }
+            const n = Math.floor(Number(t));
+            if (!Number.isFinite(n) || n < DAILY_SEND_MIN) {
+              setDailySendTarget('');
+              saveAudience({ dailySendTarget: null });
+              return;
+            }
+            const clamped = Math.min(DAILY_SEND_MAX, Math.max(DAILY_SEND_MIN, n));
+            setDailySendTarget(String(clamped));
+            saveAudience({ dailySendTarget: clamped });
+          }}
+          disabled={!isDraft}
+          className="w-full max-w-[200px] px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-ring disabled:opacity-60"
+        />
+      </section>
+
       {/* 4. Обогащение контактов перед запуском */}
       <section className="rounded-xl border border-border bg-card p-6">
         <label className="flex items-center gap-3 cursor-pointer">
@@ -603,6 +688,7 @@ export function CampaignAudienceSchedule({
           />
           <span className="text-sm font-medium text-foreground">{t('campaigns.enrichContactsBeforeStart')}</span>
         </label>
+        <p className="text-xs text-muted-foreground mt-2 pl-7 max-w-xl">{t('campaigns.enrichContactsBeforeStartHint')}</p>
         <label className="flex items-center gap-3 cursor-pointer mt-4">
           <input
             type="checkbox"
@@ -710,6 +796,8 @@ export function CampaignAudienceSchedule({
           </div>
         )}
       </section>
+        </div>
+      </div>
 
       {pickerOpen && (
         <ContactPickerModal

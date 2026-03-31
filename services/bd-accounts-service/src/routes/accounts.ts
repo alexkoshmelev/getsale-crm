@@ -16,7 +16,7 @@ import {
 
 /** Columns returned by GET /:id and PATCH /:id (keep in sync with list when adding fields). */
 const BD_ACCOUNT_DETAIL_SELECT =
-  'id, organization_id, telegram_id, phone_number, is_active, is_demo, connected_at, last_activity, created_at, sync_status, sync_progress_done, sync_progress_total, sync_error, created_by_user_id AS owner_id, first_name, last_name, username, bio, photo_file_id, display_name, proxy_config, connection_state, disconnect_reason, last_error_code, last_error_at, flood_wait_until, flood_wait_seconds, timezone, working_hours_start, working_hours_end, working_days, auto_responder_enabled, auto_responder_system_prompt, auto_responder_history_count';
+  'id, organization_id, telegram_id, phone_number, is_active, is_demo, connected_at, last_activity, created_at, sync_status, sync_progress_done, sync_progress_total, sync_error, created_by_user_id AS owner_id, first_name, last_name, username, bio, photo_file_id, display_name, proxy_config, connection_state, disconnect_reason, last_error_code, last_error_at, flood_wait_until, flood_wait_seconds, flood_reason, flood_last_at, timezone, working_hours_start, working_hours_end, working_days, auto_responder_enabled, auto_responder_system_prompt, auto_responder_history_count';
 
 interface Deps {
   pool: Pool;
@@ -83,10 +83,17 @@ export function accountsRouter({
 
   // GET / — list BD accounts with unread counts
   router.get('/', asyncHandler(async (req, res) => {
-    const { id: userId, organizationId } = req.user;
+    const { id: userId, organizationId, role } = req.user;
 
     if (!organizationId) {
       throw new AppError(401, 'Unauthorized', ErrorCodes.UNAUTHORIZED);
+    }
+
+    const listParams: unknown[] = [organizationId];
+    let ownerFilter = '';
+    if (role === 'bidi') {
+      listParams.push(userId);
+      ownerFilter = ` AND a.created_by_user_id = $${listParams.length}`;
     }
 
     const result = await pool.query(
@@ -95,7 +102,7 @@ export function accountsRouter({
               a.created_by_user_id AS owner_id,
               a.first_name, a.last_name, a.username, a.bio, a.photo_file_id, a.display_name, a.proxy_config,
               a.connection_state, a.disconnect_reason, a.last_error_code, a.last_error_at,
-              a.flood_wait_until, a.flood_wait_seconds, a.timezone, a.working_hours_start, a.working_hours_end, a.working_days,
+              a.flood_wait_until, a.flood_wait_seconds, a.flood_reason, a.flood_last_at, a.timezone, a.working_hours_start, a.working_hours_end, a.working_days,
               a.auto_responder_enabled, a.auto_responder_system_prompt, a.auto_responder_history_count,
               s.status AS last_status, s.message AS last_status_message, s.recorded_at AS last_status_at
        FROM bd_accounts a
@@ -106,8 +113,8 @@ export function accountsRouter({
          ORDER BY recorded_at DESC
          LIMIT 1
        ) s ON true
-       WHERE a.organization_id = $1 ORDER BY a.created_at DESC`,
-      [organizationId]
+       WHERE a.organization_id = $1${ownerFilter} ORDER BY a.created_at DESC`,
+      listParams
     );
 
     const unreadResult = await pool.query(
@@ -140,6 +147,85 @@ export function accountsRouter({
       };
     });
     res.json(rows);
+  }));
+
+  /** Aggregated BD health for dashboard (campaign counts from same DB). */
+  router.get('/health-summary', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    if (!organizationId) {
+      throw new AppError(401, 'Unauthorized', ErrorCodes.UNAUTHORIZED);
+    }
+
+    const [floodR, limitsR, campR, riskR] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*)::int AS c FROM bd_accounts
+         WHERE organization_id = $1 AND flood_wait_until IS NOT NULL AND flood_wait_until > NOW()`,
+        [organizationId]
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS c FROM bd_accounts
+         WHERE organization_id = $1 AND max_dm_per_day IS NOT NULL AND max_dm_per_day > 0`,
+        [organizationId]
+      ),
+      pool.query(
+        `SELECT status, COUNT(*)::int AS c FROM campaigns WHERE organization_id = $1 GROUP BY status`,
+        [organizationId]
+      ),
+      pool.query(
+        `SELECT a.id, a.telegram_id, a.display_name, a.first_name, a.last_name, a.username,
+                a.flood_wait_until, a.connection_state, a.sync_error,
+                s.message AS last_status_message, s.status AS last_status
+         FROM bd_accounts a
+         LEFT JOIN LATERAL (
+           SELECT status, message FROM bd_account_status WHERE account_id = a.id ORDER BY recorded_at DESC LIMIT 1
+         ) s ON true
+         WHERE a.organization_id = $1
+           AND (
+             (a.flood_wait_until IS NOT NULL AND a.flood_wait_until > NOW())
+             OR (a.connection_state IS NOT NULL AND a.connection_state <> 'connected')
+             OR (a.sync_error IS NOT NULL AND TRIM(COALESCE(a.sync_error, '')) <> '')
+             OR EXISTS (
+               SELECT 1 FROM bd_account_status st
+               WHERE st.account_id = a.id
+                 AND st.status = 'error'
+                 AND (st.message ILIKE '%proxy%' OR st.message ILIKE '%socks%' OR st.message ILIKE '%connection refused%')
+             )
+           )
+         ORDER BY a.created_at DESC
+         LIMIT 50`,
+        [organizationId]
+      ),
+    ]);
+
+    let warmingRunningGroups = 0;
+    try {
+      const warmR = await pool.query(
+        `SELECT COUNT(*)::int AS c FROM warming_groups WHERE organization_id = $1 AND status = 'running'`,
+        [organizationId]
+      );
+      warmingRunningGroups = Number((warmR.rows[0] as { c?: number })?.c ?? 0);
+    } catch {
+      /* table may not exist */
+    }
+
+    const campaignCounts: Record<string, number> = {};
+    for (const row of campR.rows as { status: string; c: number }[]) {
+      campaignCounts[row.status] = row.c;
+    }
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      floodActiveCount: Number((floodR.rows[0] as { c?: number })?.c ?? 0),
+      limitsConfiguredCount: Number((limitsR.rows[0] as { c?: number })?.c ?? 0),
+      warmingRunningGroups,
+      campaigns: {
+        active: campaignCounts.active ?? 0,
+        paused: campaignCounts.paused ?? 0,
+        draft: campaignCounts.draft ?? 0,
+        completed: campaignCounts.completed ?? 0,
+      },
+      riskAccounts: riskR.rows,
+    });
   }));
 
   // GET /:id — single account

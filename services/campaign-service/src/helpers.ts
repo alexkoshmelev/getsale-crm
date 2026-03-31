@@ -1,12 +1,16 @@
 import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
 import { ServiceHttpClient, ServiceCallError } from '@getsale/service-core';
+import {
+  dateInTz,
+  isWithinOperatingScheduleAt as isWithinScheduleAt,
+  isWithinOperatingSchedule as isWithinSchedule,
+  type OperatingSchedule,
+} from '@getsale/utils';
 
-export type Schedule = {
-  timezone?: string;
-  workingHours?: { start?: string; end?: string };
-  daysOfWeek?: number[];
-} | null;
+export type Schedule = OperatingSchedule;
+
+export { dateInTz, isWithinScheduleAt, isWithinSchedule };
 
 export type StepConditions = {
   stopIfReplied?: boolean;
@@ -20,6 +24,12 @@ export type StepConditions = {
 };
 
 export const CHANNEL_TELEGRAM = 'telegram';
+
+/** Default max DMs per BD account per day when campaign has no dailySendTarget and bd_accounts.max_dm_per_day is unset. */
+export const DEFAULT_DAILY_SEND_CAP = parseInt(
+  String(process.env.CAMPAIGN_MAX_SENDS_PER_ACCOUNT_PER_DAY || 20),
+  10
+);
 
 export function normalizeTelegramUsername(username: unknown): string | null {
   if (typeof username !== 'string') return null;
@@ -103,33 +113,6 @@ export async function evaluateStepConditions(
   return true;
 }
 
-export function dateInTz(d: Date, tz: string): { hour: number; minute: number; dayOfWeek: number } {
-  const fmt = new Intl.DateTimeFormat('en-US', { timeZone: tz || 'UTC', hour: 'numeric', minute: 'numeric', hour12: false, weekday: 'short' });
-  const parts = fmt.formatToParts(d);
-  let hour = 0, minute = 0, dayOfWeek = 1;
-  for (const p of parts) {
-    if (p.type === 'hour') hour = parseInt(p.value, 10);
-    if (p.type === 'minute') minute = parseInt(p.value, 10);
-    if (p.type === 'weekday') dayOfWeek = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 }[p.value.toLowerCase().slice(0, 3)] ?? 1;
-  }
-  return { hour, minute, dayOfWeek };
-}
-
-export function isWithinScheduleAt(d: Date, schedule: Schedule): boolean {
-  if (!schedule?.workingHours?.start || !schedule?.workingHours?.end || !schedule.daysOfWeek?.length) return true;
-  const tz = schedule.timezone || 'UTC';
-  const { hour, minute, dayOfWeek } = dateInTz(d, tz);
-  const [startH] = schedule.workingHours.start.split(':').map(Number);
-  const [endH] = schedule.workingHours.end.split(':').map(Number);
-  const inWindow = hour > startH || (hour === startH && minute >= 0);
-  const beforeEnd = hour < endH || (hour === endH && minute === 0);
-  return inWindow && beforeEnd && schedule.daysOfWeek.includes(dayOfWeek);
-}
-
-export function isWithinSchedule(schedule: Schedule): boolean {
-  return isWithinScheduleAt(new Date(), schedule);
-}
-
 export type BdAccountScheduleRow = {
   timezone?: string | null;
   working_hours_start?: string | null;
@@ -157,48 +140,6 @@ export function getEffectiveSchedule(campaignSchedule: Schedule, accountSchedule
     return campaignSchedule;
   }
   return accountSchedule;
-}
-
-/**
- * Seconds offset for participant queue index so up to `dailyCap` first-wave sends spread across the working-day window.
- */
-export function spreadOffsetSecondsForSlot(slotIndex: number, dailyCap: number, schedule: Schedule): number {
-  if (!schedule?.workingHours?.start || !schedule.workingHours?.end || dailyCap <= 0) {
-    return Math.max(0, slotIndex) * 60;
-  }
-  const startParts = schedule.workingHours.start.split(':').map((x) => Number(x));
-  const endParts = schedule.workingHours.end.split(':').map((x) => Number(x));
-  const sh = startParts[0] ?? 0;
-  const sm = startParts[1] ?? 0;
-  const eh = endParts[0] ?? 0;
-  const em = endParts[1] ?? 0;
-  const windowSec = Math.max(300, eh * 3600 + em * 60 - sh * 3600 - sm * 60);
-  const baseInterval = Math.max(60, Math.floor(windowSec / Math.max(1, dailyCap)));
-  const jitterMag = Math.max(10, Math.floor(baseInterval * 0.1));
-  const jitter = slotIndex === 0 ? 0 : Math.floor(Math.random() * (2 * jitterMag + 1)) - jitterMag;
-  return Math.max(0, slotIndex * baseInterval + jitter);
-}
-
-export function nextSendAtWithSchedule(from: Date, delayHours: number, schedule: Schedule): Date {
-  const base = new Date(from.getTime() + delayHours * 60 * 60 * 1000);
-  if (!schedule?.workingHours?.start || !schedule?.workingHours?.end || !schedule.daysOfWeek?.length) return base;
-  let d = new Date(base.getTime());
-  for (let i = 0; i < 24 * 8; i++) {
-    if (isWithinScheduleAt(d, schedule)) return d;
-    d.setTime(d.getTime() + 60 * 60 * 1000);
-  }
-  return d;
-}
-
-export function delayHoursFromStep(step: { delay_hours?: number | null; delay_minutes?: number | null } | null | undefined): number {
-  if (!step) return 24;
-  const h = step.delay_hours ?? 24;
-  const m = step.delay_minutes ?? 0;
-  return h + m / 60;
-}
-
-export function nextSlotRetry(_schedule: Schedule): Date {
-  return new Date(Date.now() + 15 * 60 * 1000);
 }
 
 export interface SendDelayRange {
@@ -232,6 +173,62 @@ export function sampleDelaySeconds(range: SendDelayRange): number {
   const max = Math.max(min, Math.floor(range.maxSeconds));
   if (min === max) return min;
   return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+/** Deterministic per-slot step from audience delay range (midpoint), min 1s. Used for initial queue stagger. */
+export function representativeStepSecondsFromDelayRange(range: SendDelayRange): number {
+  const min = Math.max(0, Math.floor(range.minSeconds));
+  const max = Math.max(min, Math.floor(range.maxSeconds));
+  return Math.max(1, Math.floor((min + max) / 2));
+}
+
+/**
+ * Seconds offset for participant queue index so up to `dailyCap` first-wave sends spread across the working-day window.
+ * When `delayRange` is set (from campaign target_audience), uses it as the per-slot step instead of a hardcoded 60s.
+ */
+export function spreadOffsetSecondsForSlot(
+  slotIndex: number,
+  dailyCap: number,
+  schedule: Schedule,
+  delayRange?: SendDelayRange | null
+): number {
+  const minStep = delayRange != null ? representativeStepSecondsFromDelayRange(delayRange) : 60;
+  if (!schedule?.workingHours?.start || !schedule.workingHours?.end || dailyCap <= 0) {
+    return Math.max(0, slotIndex) * minStep;
+  }
+  const startParts = schedule.workingHours.start.split(':').map((x) => Number(x));
+  const endParts = schedule.workingHours.end.split(':').map((x) => Number(x));
+  const sh = startParts[0] ?? 0;
+  const sm = startParts[1] ?? 0;
+  const eh = endParts[0] ?? 0;
+  const em = endParts[1] ?? 0;
+  const windowSec = Math.max(300, eh * 3600 + em * 60 - sh * 3600 - sm * 60);
+  const baseInterval = Math.max(minStep, Math.floor(windowSec / Math.max(1, dailyCap)));
+  const jitterMag = Math.max(10, Math.floor(baseInterval * 0.1));
+  const jitter = slotIndex === 0 ? 0 : Math.floor(Math.random() * (2 * jitterMag + 1)) - jitterMag;
+  return Math.max(0, slotIndex * baseInterval + jitter);
+}
+
+export function nextSendAtWithSchedule(from: Date, delayHours: number, schedule: Schedule): Date {
+  const base = new Date(from.getTime() + delayHours * 60 * 60 * 1000);
+  if (!schedule?.workingHours?.start || !schedule?.workingHours?.end || !schedule.daysOfWeek?.length) return base;
+  let d = new Date(base.getTime());
+  for (let i = 0; i < 24 * 8; i++) {
+    if (isWithinScheduleAt(d, schedule)) return d;
+    d.setTime(d.getTime() + 60 * 60 * 1000);
+  }
+  return d;
+}
+
+export function delayHoursFromStep(step: { delay_hours?: number | null; delay_minutes?: number | null } | null | undefined): number {
+  if (!step) return 24;
+  const h = step.delay_hours ?? 24;
+  const m = step.delay_minutes ?? 0;
+  return h + m / 60;
+}
+
+export function nextSlotRetry(_schedule: Schedule): Date {
+  return new Date(Date.now() + 15 * 60 * 1000);
 }
 
 export function staggeredFirstSendAtByOffset(
@@ -295,8 +292,9 @@ export async function ensureLeadInPipeline(
     return body.id ?? null;
   } catch (err) {
     if (err instanceof ServiceCallError && err.statusCode === 409) {
-      const body = err.body as { leadId?: string; id?: string } | undefined;
-      return body?.leadId ?? body?.id ?? null;
+      const body = err.body as { details?: { leadId?: string }; leadId?: string; id?: string } | undefined;
+      const fromDetails = body?.details && typeof body.details === 'object' ? (body.details as { leadId?: string }).leadId : undefined;
+      return fromDetails ?? body?.leadId ?? body?.id ?? null;
     }
     log.error({ message: 'Pipeline create lead error', error: String(err) });
     return null;

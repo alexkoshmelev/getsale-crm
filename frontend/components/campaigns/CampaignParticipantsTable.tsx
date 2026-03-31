@@ -377,7 +377,9 @@ export function CampaignParticipantsTable({
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell">{formatDate(p.sent_at)}</td>
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell">{formatDate(p.replied_at)}</td>
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell" title={p.next_send_at ?? undefined}>
-                    {p.next_send_at ? formatDate(p.next_send_at) : '—'}
+                    {(p.status_phase === 'pending' || p.status_phase === 'scheduled' || p.status_phase === 'sent') && p.next_send_at
+                      ? formatDate(p.next_send_at)
+                      : '—'}
                   </td>
                   <td className="px-4 py-3">
                     {chatLink(p) ? (

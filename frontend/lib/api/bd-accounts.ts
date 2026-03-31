@@ -22,6 +22,34 @@ export async function getBdAccount(accountId: string): Promise<BDAccount> {
   return data;
 }
 
+export type BdHealthRiskRow = {
+  id: string;
+  telegram_id?: string | null;
+  display_name?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  username?: string | null;
+  flood_wait_until?: string | null;
+  connection_state?: string | null;
+  sync_error?: string | null;
+  last_status_message?: string | null;
+  last_status?: string | null;
+};
+
+export type BdAccountHealthSummary = {
+  generatedAt: string;
+  floodActiveCount: number;
+  limitsConfiguredCount: number;
+  warmingRunningGroups: number;
+  campaigns: { active: number; paused: number; draft: number; completed: number };
+  riskAccounts: BdHealthRiskRow[];
+};
+
+export async function getBdAccountHealthSummary(): Promise<BdAccountHealthSummary> {
+  const { data } = await apiClient.get<BdAccountHealthSummary>('/api/bd-accounts/health-summary');
+  return data;
+}
+
 export async function getBdAccountStatus(accountId: string): Promise<Partial<BDAccount>> {
   const { data } = await apiClient.get<Partial<BDAccount>>(`/api/bd-accounts/${accountId}/status`);
   return data;

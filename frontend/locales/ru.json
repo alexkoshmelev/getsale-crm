@@ -617,9 +617,12 @@
     "filterHasTelegram": "Только контакты с Telegram",
     "sendDelayLabel": "Задержка между отправками",
     "sendDelayHint": "Пауза между сообщениями разным контактам для имитации человека",
+    "dailySendLimit": "Лимит отправок в день на аккаунт",
+    "dailySendLimitHint": "Максимум сообщений от одного аккаунта в день в этой кампании. Меньшие значения снижают риск блокировки.",
     "delaySeconds": "{{count}} сек",
     "delayMinutes": "{{count}} мин",
     "enrichContactsBeforeStart": "Перед запуском обогащать контакты из Telegram (имя, username)",
+    "enrichContactsBeforeStartHint": "Выполняется при нажатии «Запустить». Если нет числового Telegram ID, подставляет его через API по @username (нужен подключённый BD-аккаунт). Улучшает сопоставление ответов.",
     "randomizeWithAI": "Рандомизировать текст сообщений через AI-сервис",
     "schedule": "Расписание",
     "workingHours": "Рабочие часы",
@@ -722,6 +725,10 @@
     "statusLabel": "Статус",
     "owner": "Владелец",
     "bdAccount": "Аккаунт",
+    "sendingAccounts": "Аккаунты для рассылки",
+    "accountFlood": "Аккаунт в ожидании FLOOD_WAIT",
+    "floodEndsIn": "Закончится через {{time}}",
+    "accountDisconnected": "Аккаунт отключён",
     "totalSent": "Всего отправлено",
     "totalReplied": "Всего ответов",
     "totalWon": "Всего выиграно"
@@ -952,7 +959,124 @@
     "healthLastError": "Последняя ошибка",
     "healthReason": "Причина",
     "proxySocksOnlyHint": "Поддерживается только SOCKS5 прокси.",
-    "proxyFixCta": "Проверить/обновить прокси"
+    "proxyFixCta": "Проверить/обновить прокси",
+    "healthLastActivity": "Последняя активность",
+    "floodWaitTitle": "Лимит Telegram (FLOOD_WAIT)",
+    "floodWaitUntil": "До {{time}}",
+    "floodWaitRemainingDone": "Истекло",
+    "floodWaitRemainingHms": "{{h}}ч {{m}}м {{s}}с",
+    "floodWaitRemainingMs": "{{m}}м {{s}}с",
+    "floodWaitRemainingS": "{{s}}с",
+    "floodWaitHint": "Подождите перед массовой рассылкой; ограничение задаётся сервером Telegram.",
+    "floodWaitDocUrl": "",
+    "floodWaitDocLabel": "Лимиты Telegram (документация)",
+    "floodAfterTitle": "Недавний лимит снят",
+    "floodAfterBody": "Если отправки всё ещё падают, снизьте темп и проверьте здоровье аккаунта.",
+    "floodAfterLinkHealth": "Сводка по команде",
+    "floodAfterLinkCampaigns": "Кампании",
+    "runtimeDeferredTitle": "Рантайм не активирован",
+    "runtimeDeferredBody": "Активируйте рантайм Telegram, если это доступно в вашем workspace.",
+    "runtimeDeferredCta": "Активировать",
+    "detailProxyAccordion": "Прокси",
+    "detailScheduleAccordion": "Рабочее окно и автоответчик",
+    "quickInfoTitle": "Сведения",
+    "fieldUsername": "Username",
+    "fieldPhone": "Номер",
+    "fieldTelegramId": "Telegram ID",
+    "fieldConnectedAt": "Подключён",
+    "fieldLastError": "Последняя ошибка",
+    "fieldBio": "О себе",
+    "messengerCta": "Мессенджер",
+    "reconnectQrCta": "Переподключить через QR/телефон",
+    "saveProxyCta": "Сохранить прокси",
+    "deleteAccountCta": "Удалить",
+    "weekSun": "Вс",
+    "weekMon": "Пн",
+    "weekTue": "Вт",
+    "weekWed": "Ср",
+    "weekThu": "Чт",
+    "weekFri": "Пт",
+    "weekSat": "Сб"
+  },
+  "bdAccountCard": {
+    "healthSectionTitle": "Здоровье аккаунта",
+    "healthLevelOk": "Ключевые показатели в норме.",
+    "healthLevelAttention": "Проверьте подключение, прокси или синхронизацию.",
+    "healthLevelCritical": "Отправка или синхронизация могут быть заблокированы.",
+    "teamHealthLink": "Сводка команды",
+    "errorDetailsToggle": "Детали ошибки",
+    "tile": {
+      "connection": {
+        "label": "Подключение",
+        "hint": {
+          "ok": "Подключено к Telegram.",
+          "warning": "Переподключение или нестабильно.",
+          "error": "Требуется повторный вход.",
+          "neutral": "Отключено (неактивен)."
+        }
+      },
+      "sync": {
+        "label": "Синхронизация",
+        "hint": {
+          "ok": "Синхронизация в порядке.",
+          "warning": "Идёт синхронизация.",
+          "error": "Ошибка синхронизации.",
+          "neutral": "Проблем не видно."
+        }
+      },
+      "proxy": {
+        "label": "Прокси",
+        "hint": {
+          "ok": "Прокси работает.",
+          "warning": "Прокси задан; проверьте при отсутствии связи.",
+          "error": "Ошибка прокси.",
+          "neutral": "Прокси не настроен."
+        }
+      },
+      "flood": {
+        "label": "FLOOD / лимиты",
+        "hint": {
+          "ok": "Нет активного FLOOD_WAIT.",
+          "warning": "Близко к лимитам.",
+          "error": "Активен FLOOD_WAIT Telegram.",
+          "neutral": "Нет данных."
+        }
+      },
+      "autoresponder": {
+        "label": "Автоответчик",
+        "hint": {
+          "ok": "Включён вне рабочего окна.",
+          "warning": "Проверьте промпт и расписание.",
+          "error": "Автоответчик может работать некорректно.",
+          "neutral": "Не включён."
+        }
+      }
+    }
+  },
+  "bdAccountHealth": {
+    "pageTitle": "Здоровье BD-аккаунтов",
+    "backToAccounts": "К списку аккаунтов",
+    "loadError": "Не удалось загрузить сводку.",
+    "retry": "Повторить",
+    "serverNote": "Снимок сервера: {{time}}",
+    "cardFlood": "Аккаунты в FLOOD_WAIT",
+    "cardLimits": "Аккаунты с дневными лимитами",
+    "cardWarming": "Группы прогрева (running)",
+    "cardCampaignsActive": "Активные кампании",
+    "cardCampaignsPaused": "На паузе: {{count}}",
+    "open": "Открыть",
+    "riskTitle": "Аккаунты, требующие внимания",
+    "riskEmpty": "Рисков по последней проверке нет.",
+    "riskFlagUnknown": "См. аккаунт",
+    "viewAccount": "Открыть аккаунт",
+    "riskFlag": {
+      "flood": "Flood wait",
+      "sync": "Ошибка синхронизации",
+      "proxy": "Ошибка прокси",
+      "connection_reconnecting": "Переподключение",
+      "connection_disconnected": "Отключён",
+      "connection_reauth_required": "Нужен повторный вход"
+    }
   },
   "messaging": {
     "bdAccounts": "BD Аккаунты",

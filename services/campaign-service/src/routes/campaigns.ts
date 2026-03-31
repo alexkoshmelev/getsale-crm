@@ -18,6 +18,35 @@ import {
 import { matchOrCreateContactsFromRows, parseUsernameListToRows, type CsvContactRow } from '../audience-contact-import';
 import type { QueryParam, CampaignRow, CampaignCountRow, CampaignRevenueRow, BdAccountRow } from '../types';
 
+function getBdAccountIdsFromTargetAudience(aud: unknown): string[] {
+  if (!aud || typeof aud !== 'object') return [];
+  const a = aud as { bdAccountIds?: unknown; bdAccountId?: unknown };
+  if (Array.isArray(a.bdAccountIds) && a.bdAccountIds.length > 0) {
+    return a.bdAccountIds.filter((id): id is string => typeof id === 'string');
+  }
+  if (typeof a.bdAccountId === 'string' && a.bdAccountId) return [a.bdAccountId];
+  return [];
+}
+
+function serializeBdAccountRow(row: BdAccountRow) {
+  return {
+    id: row.id,
+    displayName: getBdAccountDisplayName(row),
+    floodWaitUntil: row.flood_wait_until != null ? new Date(row.flood_wait_until).toISOString() : null,
+    floodWaitSeconds: row.flood_wait_seconds,
+    floodReason: row.flood_reason,
+    floodLastAt: row.flood_last_at != null ? new Date(row.flood_last_at).toISOString() : null,
+    photoFileId: row.photo_file_id,
+    isActive: row.is_active,
+    connectionState: row.connection_state,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    username: row.username,
+    phoneNumber: row.phone_number,
+    telegramId: row.telegram_id,
+  };
+}
+
 interface Deps {
   pool: Pool;
   rabbitmq: RabbitMQClient;
@@ -38,19 +67,59 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     );
 
     let whereClause = 'WHERE c.organization_id = $1 AND c.deleted_at IS NULL';
-    const params: QueryParam[] = [organizationId];
+    const paramsBase: QueryParam[] = [organizationId];
     if (status && typeof status === 'string') {
-      params.push(status);
-      whereClause += ` AND c.status = $${params.length}`;
+      paramsBase.push(status);
+      whereClause += ` AND c.status = $${paramsBase.length}`;
     }
 
     const countRes = await pool.query(
       `SELECT COUNT(*)::int AS total FROM campaigns c ${whereClause}`,
-      params
+      paramsBase
     );
     const totalCount = (countRes.rows[0] as { total: number }).total;
 
-    params.push(limit, offset);
+    const [summarySentRes, summaryRepliedRes, summaryWonRes] = await Promise.all([
+      pool.query(
+        `SELECT COALESCE(SUM(cnt), 0)::int AS total FROM (
+           SELECT cp.campaign_id, COUNT(DISTINCT cp.id)::int AS cnt
+           FROM campaign_sends cs
+           JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+           JOIN campaigns c ON c.id = cp.campaign_id
+           ${whereClause}
+           GROUP BY cp.campaign_id
+         ) t`,
+        paramsBase
+      ),
+      pool.query(
+        `SELECT COALESCE(SUM(cnt), 0)::int AS total FROM (
+           SELECT cp.campaign_id, COUNT(*)::int AS cnt
+           FROM campaign_participants cp
+           JOIN campaigns c ON c.id = cp.campaign_id
+           ${whereClause} AND cp.status = 'replied'
+           GROUP BY cp.campaign_id
+         ) t`,
+        paramsBase
+      ),
+      pool.query(
+        `SELECT COALESCE(SUM(cnt), 0)::int AS total FROM (
+           SELECT conv.campaign_id, COUNT(*)::int AS cnt
+           FROM conversations conv
+           JOIN campaigns c ON c.id = conv.campaign_id
+           ${whereClause} AND conv.won_at IS NOT NULL
+           GROUP BY conv.campaign_id
+         ) t`,
+        paramsBase
+      ),
+    ]);
+
+    const summaryTotals = {
+      total_sent: (summarySentRes.rows[0] as { total: number } | undefined)?.total ?? 0,
+      total_replied: (summaryRepliedRes.rows[0] as { total: number } | undefined)?.total ?? 0,
+      total_won: (summaryWonRes.rows[0] as { total: number } | undefined)?.total ?? 0,
+    };
+
+    const params = [...paramsBase, limit, offset];
     const result = await pool.query(
       `SELECT c.*,
               u.email AS owner_email,
@@ -67,7 +136,7 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     const campaigns = result.rows as { id: string; target_audience?: { bdAccountId?: string; bdAccountIds?: string[] } }[];
 
     if (campaigns.length === 0) {
-      return res.json({ data: [], total: totalCount, page, limit, summary: { total_sent: 0, total_replied: 0, total_won: 0 } });
+      return res.json({ data: [], total: totalCount, page, limit, summary: summaryTotals });
     }
 
     const ids = campaigns.map((c) => c.id);
@@ -107,7 +176,9 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       pool.query(`SELECT campaign_id, COALESCE(SUM(revenue_amount), 0)::numeric AS total FROM conversations WHERE campaign_id = ANY($1::uuid[]) AND won_at IS NOT NULL GROUP BY campaign_id`, [ids]),
       bdAccountIds.length > 0
         ? pool.query(
-            `SELECT id, display_name, first_name, last_name, username, phone_number, telegram_id FROM bd_accounts WHERE id = ANY($1::uuid[])`,
+            `SELECT id, display_name, first_name, last_name, username, phone_number, telegram_id,
+                    flood_wait_until, flood_wait_seconds, flood_reason, flood_last_at, photo_file_id, is_active, connection_state
+             FROM bd_accounts WHERE id = ANY($1::uuid[])`,
             [bdAccountIds]
           )
         : Promise.resolve({ rows: [] }),
@@ -119,21 +190,20 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     const readMap = new Map((readRes.rows as CampaignCountRow[]).map((r) => [r.campaign_id, r.cnt]));
     const wonMap = new Map((wonRes.rows as CampaignCountRow[]).map((r) => [r.campaign_id, r.cnt]));
     const revenueMap = new Map((revenueRes.rows as CampaignRevenueRow[]).map((r) => [r.campaign_id, Number(r.total)]));
-    const bdAccountNameMap = new Map(
-      (bdAccountsRes.rows as BdAccountRow[]).map((a) => [a.id, getBdAccountDisplayName(a)])
-    );
-
-    let summaryTotalSent = 0;
-    let summaryTotalReplied = 0;
-    let summaryTotalWon = 0;
+    const bdAccountMap = new Map((bdAccountsRes.rows as BdAccountRow[]).map((a) => [a.id, a]));
 
     const withKpi = campaigns.map((c) => {
       const sent = sentMap.get(c.id) ?? 0;
       const replied = repliedMap.get(c.id) ?? 0;
       const won = wonMap.get(c.id) ?? 0;
-      summaryTotalSent += sent;
-      summaryTotalReplied += replied;
-      summaryTotalWon += won;
+      const aud = c.target_audience;
+      const bdIdsOrdered = getBdAccountIdsFromTargetAudience(aud);
+      const bd_accounts = bdIdsOrdered
+        .map((bid) => bdAccountMap.get(bid))
+        .filter((r): r is BdAccountRow => r != null)
+        .map(serializeBdAccountRow);
+      const firstId = aud?.bdAccountIds?.[0] ?? aud?.bdAccountId;
+      const firstRow = firstId ? bdAccountMap.get(firstId) : undefined;
 
       return {
         ...c,
@@ -143,11 +213,8 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
         total_converted_to_shared_chat: sharedMap.get(c.id) ?? 0,
         total_won: won,
         total_revenue: revenueMap.get(c.id) ?? 0,
-        bd_account_name: (() => {
-          const aud = c.target_audience;
-          const firstId = aud?.bdAccountIds?.[0] ?? aud?.bdAccountId;
-          return firstId ? (bdAccountNameMap.get(firstId) ?? null) : null;
-        })(),
+        bd_account_name: firstRow ? getBdAccountDisplayName(firstRow) : null,
+        bd_accounts,
       };
     });
 
@@ -156,23 +223,23 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       total: totalCount,
       page,
       limit,
-      summary: { total_sent: summaryTotalSent, total_replied: summaryTotalReplied, total_won: summaryTotalWon },
+      summary: summaryTotals,
     });
   }));
 
   router.get('/agents', asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const accounts = await pool.query(
-      `SELECT a.id, a.display_name, a.first_name, a.last_name, a.username, a.phone_number, a.telegram_id
+      `SELECT a.id, a.display_name, a.first_name, a.last_name, a.username, a.phone_number, a.telegram_id,
+              a.flood_wait_until, a.flood_wait_seconds, a.flood_reason, a.flood_last_at, a.photo_file_id, a.is_active, a.connection_state
        FROM bd_accounts a
        WHERE a.organization_id = $1 AND a.is_active = true
        ORDER BY a.display_name NULLS LAST, a.phone_number`,
       [organizationId]
     );
     const sentMap = await getSentTodayByAccount(pool, organizationId);
-    const result = accounts.rows.map((a: { id: string; display_name: string | null; first_name: string | null; last_name: string | null; username: string | null; phone_number: string | null; telegram_id: string | null }) => ({
-      id: a.id,
-      displayName: getBdAccountDisplayName(a),
+    const result = (accounts.rows as BdAccountRow[]).map((a) => ({
+      ...serializeBdAccountRow(a),
       sentToday: sentMap.get(a.id) ?? 0,
     }));
     res.json(result);
@@ -348,11 +415,27 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
         : Promise.resolve({ rows: [] }),
     ]);
     const selected_contacts = selectedContactsRes?.rows ?? [];
+    const bdIds = getBdAccountIdsFromTargetAudience(campaign.target_audience);
+    let bd_accounts: ReturnType<typeof serializeBdAccountRow>[] = [];
+    if (bdIds.length > 0) {
+      const r = await pool.query(
+        `SELECT id, display_name, first_name, last_name, username, phone_number, telegram_id,
+                flood_wait_until, flood_wait_seconds, flood_reason, flood_last_at, photo_file_id, is_active, connection_state
+         FROM bd_accounts WHERE id = ANY($1::uuid[]) AND organization_id = $2`,
+        [bdIds, organizationId]
+      );
+      const map = new Map((r.rows as BdAccountRow[]).map((row) => [row.id, row]));
+      bd_accounts = bdIds
+        .map((id) => map.get(id))
+        .filter((row): row is BdAccountRow => row != null)
+        .map(serializeBdAccountRow);
+    }
     res.json({
       ...campaign,
       templates: templatesRes.rows,
       sequences: sequencesRes.rows,
       ...(selected_contacts.length > 0 ? { selected_contacts } : {}),
+      bd_accounts,
     });
   }));
 

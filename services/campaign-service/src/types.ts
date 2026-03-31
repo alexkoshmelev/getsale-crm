@@ -76,4 +76,11 @@ export interface BdAccountRow {
   username: string | null;
   phone_number: string | null;
   telegram_id: string | null;
+  flood_wait_until: Date | string | null;
+  flood_wait_seconds: number | null;
+  flood_reason: string | null;
+  flood_last_at: Date | string | null;
+  photo_file_id: string | null;
+  is_active: boolean;
+  connection_state: string | null;
 }

@@ -41,6 +41,7 @@ import {
 } from '@/lib/api/campaigns';
 import { SequenceBuilderCanvas } from '@/components/campaigns/SequenceBuilderCanvas';
 import { CampaignAudienceSchedule } from '@/components/campaigns/CampaignAudienceSchedule';
+import { CampaignSendingAccountsOverview } from '@/components/campaigns/CampaignSendingAccountsOverview';
 import { CampaignParticipantsTable } from '@/components/campaigns/CampaignParticipantsTable';
 import { Modal } from '@/components/ui/Modal';
 import { clsx } from 'clsx';
@@ -501,6 +502,10 @@ export default function CampaignDetailPage() {
               {t('campaigns.bestPracticesLink')}
             </button>
           </div>
+
+          {campaign?.bd_accounts && campaign.bd_accounts.length > 0 && (
+            <CampaignSendingAccountsOverview accounts={campaign.bd_accounts} />
+          )}
 
           {stats && (
             <>

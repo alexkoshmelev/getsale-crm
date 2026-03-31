@@ -8,6 +8,7 @@ import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, withOrgContext } from '@getsale/service-core';
 import { type Schedule } from '../helpers';
 import { bulkInsertCampaignParticipants } from '../campaign-participant-bulk';
+import { recalculatePendingNextSendAtForCampaign } from '../campaign-pending-reschedule';
 
 interface Deps {
   pool: Pool;
@@ -145,6 +146,15 @@ export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
           ErrorCodes.VALIDATION
         );
       }
+    }
+
+    if (campaign.status === CampaignStatus.PAUSED) {
+      await recalculatePendingNextSendAtForCampaign(pool, {
+        campaignId: id,
+        organizationId,
+        audience,
+        campaignSchedule,
+      });
     }
 
     await pool.query(

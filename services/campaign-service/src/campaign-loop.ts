@@ -20,12 +20,12 @@ import {
   sampleDelaySeconds,
   scheduleFromBdAccountRow,
   getEffectiveSchedule,
+  DEFAULT_DAILY_SEND_CAP,
 } from './helpers';
 import { campaignMinGapDeferTotal } from './metrics';
 import type { CampaignStep, DueParticipantRow } from './types';
 
 const CAMPAIGN_SEND_INTERVAL_MS = parseInt(String(process.env.CAMPAIGN_SEND_INTERVAL_MS || 60000), 10);
-const CAMPAIGN_MAX_SENDS_PER_ACCOUNT_PER_DAY = parseInt(String(process.env.CAMPAIGN_MAX_SENDS_PER_ACCOUNT_PER_DAY || 20), 10);
 /** Min milliseconds between two campaign-initiated sends for the same bd_account_id within one worker batch (0 = off). Reduces TG flood risk when many participants share an account. */
 const CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT = parseInt(String(process.env.CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT || '0'), 10);
 const SEND_MAX_RETRIES = 3;
@@ -47,6 +47,7 @@ interface CampaignMeta {
   pipeline_id: string | null;
   lead_creation_settings: { trigger?: string; default_stage_id?: string; default_responsible_id?: string } | null;
   randomizeWithAI?: boolean;
+  dailySendTarget?: number | null;
 }
 
 export function startCampaignLoop(deps: CampaignLoopDeps): void {
@@ -164,6 +165,7 @@ async function loadCampaignMeta(
     sendDelayMinSeconds?: number;
     sendDelayMaxSeconds?: number;
     randomizeWithAI?: boolean;
+    dailySendTarget?: number;
   };
   const lcs = c.lead_creation_settings as CampaignMeta['lead_creation_settings'];
   const meta: CampaignMeta = {
@@ -172,6 +174,7 @@ async function loadCampaignMeta(
     pipeline_id: c.pipeline_id ?? null,
     lead_creation_settings: lcs ?? null,
     randomizeWithAI: !!aud.randomizeWithAI,
+    dailySendTarget: aud.dailySendTarget ?? null,
   };
   cache.set(campaignId, meta);
   return meta;
@@ -296,12 +299,12 @@ async function sendMessageWithRetry(
   headers: { userId: string; organizationId: string },
   maxRetries: number,
   log: Logger
-): Promise<{ id?: string }> {
+): Promise<{ id?: string; channel_id?: string }> {
   let lastErr: unknown;
   let notConnectedRetries = 0;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      return await messagingClient.post<{ id?: string }>('/api/messaging/send', {
+      return await messagingClient.post<{ id?: string; channel_id?: string }>('/api/messaging/send', {
         contactId: payload.contactId,
         channel: 'telegram',
         channelId: payload.channelId,
@@ -474,7 +477,7 @@ async function processParticipant(
 
   await simulateHumanBehavior(bdAccountsClient, row.bd_account_id, row.channel_id, content.length, row.organization_id, log);
 
-  let msgJson: { id?: string };
+  let msgJson: { id?: string; channel_id?: string };
   let deliveredChannelId = row.channel_id;
   const idempotencyKey = `campaign:${row.campaign_id}:participant:${row.participant_id}:step:${row.current_step}`;
   const usernameRaw = typeof contact.username === 'string' ? contact.username.trim().replace(/^@/, '') : '';
@@ -487,6 +490,7 @@ async function processParticipant(
       SEND_MAX_RETRIES,
       log
     );
+    if (msgJson.channel_id) deliveredChannelId = msgJson.channel_id;
   } catch (sendErr) {
     if (
       isEntityResolutionSendError(sendErr) &&
@@ -513,7 +517,7 @@ async function processParticipant(
           SEND_MAX_RETRIES,
           log
         );
-        deliveredChannelId = usernameForFallback;
+        deliveredChannelId = msgJson.channel_id ?? usernameForFallback;
       } catch (fallbackErr) {
         sendErr = fallbackErr;
       }
@@ -590,10 +594,17 @@ async function processParticipant(
   sentMap.set(row.bd_account_id, (sentMap.get(row.bd_account_id) ?? 0) + 1);
   lastCampaignSendAtMsByBdAccount?.set(row.bd_account_id, Date.now());
 
+  const sendCountRes = await pool.query(
+    `SELECT COUNT(*)::int AS c FROM campaign_sends WHERE campaign_participant_id = $1`,
+    [row.participant_id]
+  );
+  const isFirstSend = Number(sendCountRes.rows[0]?.c ?? 0) === 1;
+
   const lcs = meta?.lead_creation_settings;
   const pipelineId = meta?.pipeline_id;
-  if (row.current_step === 0 && lcs?.trigger === 'on_first_send' && pipelineId) {
-    let stageId = lcs.default_stage_id || null;
+  const trigger = lcs?.trigger ?? (pipelineId ? 'on_first_send' : undefined);
+  if (isFirstSend && pipelineId && trigger === 'on_first_send') {
+    let stageId = lcs?.default_stage_id || null;
     if (!stageId) {
       const stageRow = await pool.query(
         'SELECT id FROM stages WHERE pipeline_id = $1 AND organization_id = $2 ORDER BY order_index ASC LIMIT 1',
@@ -601,7 +612,16 @@ async function processParticipant(
       );
       stageId = stageRow.rows[0]?.id || null;
     }
-    if (stageId) await ensureLeadInPipeline(pipelineClient, log, row.organization_id, row.contact_id, pipelineId, stageId, systemUserId, lcs?.default_responsible_id);
+    await ensureLeadInPipeline(
+      pipelineClient,
+      log,
+      row.organization_id,
+      row.contact_id,
+      pipelineId,
+      stageId,
+      systemUserId,
+      lcs?.default_responsible_id
+    );
   }
 
   const sendDelaySeconds = sampleDelaySeconds(meta?.sendDelayRange ?? { minSeconds: 0, maxSeconds: 0 });
@@ -677,9 +697,11 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
           continue;
         }
 
-        const accountDailyLimit = row.max_dm_per_day != null && row.max_dm_per_day >= 0
-          ? row.max_dm_per_day
-          : CAMPAIGN_MAX_SENDS_PER_ACCOUNT_PER_DAY;
+        const campaignDaily = meta?.dailySendTarget;
+        const accountMax =
+          row.max_dm_per_day != null && row.max_dm_per_day >= 0 ? row.max_dm_per_day : DEFAULT_DAILY_SEND_CAP;
+        const accountDailyLimit =
+          campaignDaily != null && campaignDaily > 0 ? Math.min(campaignDaily, accountMax) : accountMax;
         if (!checkDailyLimits(sentMap, row.bd_account_id, accountDailyLimit)) {
           const tomorrowStart = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z');
           tomorrowStart.setUTCDate(tomorrowStart.getUTCDate() + 1);
