@@ -1,7 +1,7 @@
 // @ts-nocheck — GramJS types are incomplete
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
-import { buildTelegramProxy } from './helpers';
+import { buildTelegramProxy, buildGramJsClientOptions } from './helpers';
 import type { TelegramManagerDeps, TelegramClientInfo, ProxyConfig, StructuredLog } from './types';
 import type { ConnectionManager } from './connection-manager';
 import type { SessionManager } from './session-manager';
@@ -44,18 +44,18 @@ export class AuthHandler {
       }
 
       const proxy = buildTelegramProxy(proxyConfigRaw);
-      const session = new StringSession('');
-      const client = new TelegramClient(session, apiId, apiHash, {
-        connectionRetries: 5,
-        retryDelay: 1000,
-        timeout: 30000,
-        ...(proxy ? { proxy } : {}),
+      this.log.info({
+        message: `Connecting client for sending code to ${phoneNumber}`,
+        hasProxy: !!proxy,
+        proxyHost: proxy?.ip as string | undefined,
+        proxyPort: proxy?.port as number | undefined,
       });
+      const session = new StringSession('');
+      const client = new TelegramClient(session, apiId, apiHash, buildGramJsClientOptions(proxy));
 
       try {
         await client.connect();
         this.log.info({ message: `Connected client for sending code to ${phoneNumber}` });
-        await new Promise(resolve => setTimeout(resolve, 2000));
       } catch (error: any) {
         this.log.error({ message: `Connection error for ${phoneNumber}`, error: error.message });
         throw error;

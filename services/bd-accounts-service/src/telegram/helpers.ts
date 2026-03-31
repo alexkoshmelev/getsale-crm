@@ -1,5 +1,65 @@
 // @ts-nocheck — GramJS types are incomplete
+import type { TelegramClient } from 'telegram';
 import { ProxyConfig } from './types';
+
+/** Same options as ConnectionManager.connectAccount — required for SOCKS5 (useWSS: false). */
+export function buildGramJsClientOptions(proxy: Record<string, unknown> | undefined): Record<string, unknown> {
+  return {
+    connectionRetries: 5,
+    reconnectRetries: 10,
+    retryDelay: 1000,
+    timeout: 30000,
+    autoReconnect: true,
+    ...(proxy ? { proxy, useWSS: false } : {}),
+  };
+}
+
+/** Stops GramJS _updateLoop, clears handlers, marks senders disconnected (pair with destroy()). */
+export function killTelegramClient(client: TelegramClient): void {
+  try {
+    const c = client as {
+      _destroyed?: boolean;
+      _eventBuilders?: unknown[];
+      _sender?: { userDisconnected?: boolean; _userConnected?: boolean; disconnect?: () => Promise<unknown> };
+      _exportedSenderPromises?: Map<number, Promise<unknown>>;
+    };
+    c._destroyed = true;
+    c._eventBuilders = [];
+    const sender = c._sender;
+    if (sender) {
+      sender.userDisconnected = true;
+      sender._userConnected = false;
+    }
+    const exported = c._exportedSenderPromises;
+    if (exported instanceof Map) {
+      for (const promise of exported.values()) {
+        Promise.resolve(promise)
+          .then((s: { userDisconnected?: boolean; _userConnected?: boolean; disconnect?: () => Promise<unknown> }) => {
+            if (!s) return;
+            try {
+              s.userDisconnected = true;
+              if ('_userConnected' in s) s._userConnected = false;
+              void s.disconnect?.();
+            } catch {
+              /* */
+            }
+          })
+          .catch(() => {});
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
+export async function destroyTelegramClient(client: TelegramClient): Promise<void> {
+  killTelegramClient(client);
+  try {
+    await client.destroy();
+  } catch {
+    /* */
+  }
+}
 
 export function formatLogArgs(...args: unknown[]): string {
   return args.map(a => {
@@ -15,6 +75,7 @@ export function buildTelegramProxy(cfg: ProxyConfig | null | undefined): Record<
     ip: cfg.host,
     port: cfg.port,
     socksType: 5,
+    timeout: 10,
     ...(cfg.username ? { username: cfg.username } : {}),
     ...(cfg.password ? { password: cfg.password } : {}),
   };

@@ -8,7 +8,7 @@ import {
 } from '@getsale/events';
 import { encryptSession } from '../crypto';
 import { getErrorMessage } from '../helpers';
-import { buildTelegramProxy } from './helpers';
+import { buildTelegramProxy, buildGramJsClientOptions, destroyTelegramClient } from './helpers';
 import type { TelegramManagerDeps, QrLoginState, QrSessionInternal, ProxyConfig, StructuredLog, TelegramClientInfo } from './types';
 import type { ConnectionManager } from './connection-manager';
 import type { Pool } from 'pg';
@@ -56,18 +56,19 @@ export class QrLogin {
     this.persistQrState(sessionId);
 
     const proxy = buildTelegramProxy(proxyConfigRaw);
-    const session = new StringSession('');
-    const client = new TelegramClient(session, apiId, apiHash, {
-      connectionRetries: 5,
-      retryDelay: 1000,
-      timeout: 30000,
-      ...(proxy ? { proxy } : {}),
+    this.log.info({
+      message: 'QR login: creating TelegramClient',
+      sessionId,
+      hasProxy: !!proxy,
+      proxyHost: proxy?.ip as string | undefined,
+      proxyPort: proxy?.port as number | undefined,
     });
+    const session = new StringSession('');
+    const client = new TelegramClient(session, apiId, apiHash, buildGramJsClientOptions(proxy));
 
     (async () => {
       try {
         await client.connect();
-        await new Promise((r) => setTimeout(r, 1500));
 
         const user = await client.signInUserWithQrCode(
           { apiId, apiHash },
@@ -151,7 +152,7 @@ export class QrLogin {
           [organizationId, telegramId, phoneNumber]
         );
         if (otherOrg.rows.length > 0) {
-          await client.disconnect();
+          await destroyTelegramClient(client);
           state.status = 'error';
           state.error = 'Этот аккаунт уже подключён в другой организации. Один Telegram-аккаунт можно использовать только в одной организации.';
           this.qrSessions.set(sessionId, state);
@@ -170,7 +171,7 @@ export class QrLogin {
           const row = existing.rows[0];
           accountId = row.id;
           if (row.is_active) {
-            await client.disconnect();
+            await destroyTelegramClient(client);
             state.status = 'error';
             state.error = 'Этот аккаунт уже подключён в вашей организации. Выберите его в списке или отключите перед повторным подключением.';
             this.qrSessions.set(sessionId, state);
@@ -190,7 +191,7 @@ export class QrLogin {
           accountId = insertResult.rows[0].id;
         }
 
-        await client.disconnect();
+        await destroyTelegramClient(client);
 
         await this.connectionManager.connectAccount(accountId, organizationId, userId, phoneNumber, apiId, apiHash, sessionString);
 
@@ -225,9 +226,9 @@ export class QrLogin {
           this.persistQrState(sessionId);
         }
         try {
-          await client.disconnect();
+          await destroyTelegramClient(client);
         } catch (err) {
-          this.log.debug({ message: 'disconnect after QR error', error: getErrorMessage(err) });
+          this.log.debug({ message: 'destroy after QR error', error: getErrorMessage(err) });
         }
       }
     })();

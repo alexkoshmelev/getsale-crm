@@ -1,10 +1,9 @@
 // @ts-nocheck — GramJS types are incomplete
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
-import { randomUUID } from 'crypto';
 import { decryptIfNeeded } from '../crypto';
 import { getErrorMessage } from '../helpers';
-import { buildTelegramProxy } from './helpers';
+import { buildTelegramProxy, buildGramJsClientOptions, killTelegramClient } from './helpers';
 import type { TelegramManagerDeps, TelegramClientInfo, ProxyConfig, StructuredLog } from './types';
 import type { SessionManager } from './session-manager';
 import type { EventHandlerSetup } from './event-handlers';
@@ -30,7 +29,8 @@ export class ConnectionManager {
   private readonly CLEANUP_INTERVAL = 60000;
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
   private readonly RECONNECT_DELAY = 5000;
-  private readonly UPDATE_KEEPALIVE_MS = 30 * 1000;
+  /** Application-level health probe; GramJS already pings every ~9s — avoid conflicting reconnect storms. */
+  private readonly UPDATE_KEEPALIVE_MS = 5 * 60 * 1000;
   private reconnectAllTimeout: NodeJS.Timeout | null = null;
   private readonly RECONNECT_ALL_DEBOUNCE_MS = 12000;
   private readonly reconnectAfterTimeoutTimeouts = new Map<string, NodeJS.Timeout>();
@@ -166,7 +166,7 @@ export class ConnectionManager {
     }
   }
 
-  // --- Keepalive ---
+  // --- Keepalive (optional app-level probe; does not schedule full client reconnect — GramJS owns transport) ---
   startUpdateKeepalive(accountId: string, client: TelegramClient): void {
     this.stopUpdateKeepalive(accountId);
     const interval = setInterval(async () => {
@@ -175,7 +175,14 @@ export class ConnectionManager {
       try {
         await client.invoke(new Api.updates.GetState());
       } catch (e: unknown) {
-        await this.handleClientRuntimeError(accountId, e);
+        const msg = getErrorMessage(e);
+        const fatalCode = this.getFatalAuthCode(msg);
+        if (fatalCode) {
+          this.log.error({ message: 'Fatal Telegram auth error during keepalive', accountId, fatalCode, error: msg });
+          await this.markReauthRequired(accountId, msg);
+          return;
+        }
+        this.log.warn({ message: 'Keepalive GetState failed (logged only; GramJS handles connection)', accountId, error: msg });
       }
     }, this.UPDATE_KEEPALIVE_MS);
     this.updateKeepaliveIntervals.set(accountId, interval);
@@ -226,36 +233,29 @@ export class ConnectionManager {
 
       const session = new StringSession(sessionString);
       const proxy = buildTelegramProxy(proxyConfig);
-      const client = new TelegramClient(session, apiId, apiHash, {
-        connectionRetries: 5,
-        retryDelay: 1000,
-        timeout: 30000,
-        ...(proxy ? { proxy } : {}),
+      this.log.info({
+        message: `Connecting account ${accountId}`,
+        hasProxy: !!proxy,
+        proxyHost: proxy?.ip as string | undefined,
+        proxyPort: proxy?.port as number | undefined,
       });
+      const client = new TelegramClient(session, apiId, apiHash, buildGramJsClientOptions(proxy));
 
       await client.connect();
       this.log.info({ message: `Connected account ${accountId} (${phoneNumber})` });
-
-      await new Promise(resolve => setTimeout(resolve, 2000));
 
       try {
         await client.getMe();
         this.log.info({ message: `Session verified for account ${accountId}` });
       } catch (error: unknown) {
         this.log.error({ message: `Session invalid for account ${accountId}`, error: getErrorMessage(error) });
-        await client.disconnect();
+        killTelegramClient(client);
+        await client.destroy().catch(() => {});
         throw new Error('Invalid session. Please reconnect the account.');
       }
 
       this.eventHandlerSetup.setupEventHandlers(client, accountId, organizationId);
       this.log.info({ message: `Event handlers registered for account ${accountId}` });
-
-      try {
-        await client.getMe();
-        this.log.info({ message: `getMe() after handlers — update stream active for account ${accountId}` });
-      } catch (e: unknown) {
-        this.log.warn({ message: `getMe() after handlers failed (non-fatal)`, error: getErrorMessage(e) });
-      }
 
       await this.sessionManager.saveSession(accountId, client);
       await this.sessionManager.saveAccountProfile(accountId, client);
@@ -303,17 +303,22 @@ export class ConnectionManager {
     this.stopLockHeartbeat(accountId);
     const clientInfo = this.clients.get(accountId);
     if (clientInfo) {
+      const client = clientInfo.client;
+      killTelegramClient(client);
       try {
-        await clientInfo.client.disconnect();
+        await client.destroy();
       } catch (error: unknown) {
-        this.log.error({ message: `Error disconnecting account ${accountId}`, error: getErrorMessage(error) });
+        this.log.error({ message: `Error destroying Telegram client for account ${accountId}`, error: getErrorMessage(error) });
       }
+      setTimeout(() => {
+        killTelegramClient(client);
+      }, 3000);
       this.clients.delete(accountId);
       this.dialogFiltersCache.delete(accountId);
 
       const interval = this.reconnectIntervals.get(accountId);
       if (interval) {
-        clearInterval(interval);
+        clearTimeout(interval);
         this.reconnectIntervals.delete(accountId);
       }
     }
@@ -357,6 +362,7 @@ export class ConnectionManager {
       }
       const timeout = setTimeout(() => {
         this.reconnectAfterTimeoutTimeouts.delete(accountId);
+        if (!this.clients.has(accountId)) return;
         this.reconnectOneAccountAfterTimeout(accountId).catch((err) => {
           this.log.error({ message: 'reconnectOneAccountAfterTimeout failed', accountId, error: String(err) });
         });
@@ -452,10 +458,11 @@ export class ConnectionManager {
 
       const existing = this.reconnectIntervals.get(accountId);
       if (existing) {
-        clearInterval(existing);
+        clearTimeout(existing);
       }
 
       const interval = setTimeout(async () => {
+      if (!this.clients.has(accountId)) return;
       try {
         clientInfo.reconnectAttempts++;
         this.log.info({ message: `Attempting to reconnect account ${accountId} (attempt ${clientInfo.reconnectAttempts})` });
