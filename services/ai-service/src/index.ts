@@ -12,7 +12,7 @@ import { campaignRephraseRouter } from './routes/campaign-rephrase';
 import { autoRespondRouter } from './routes/auto-respond';
 import { AIRateLimiter } from './rate-limiter';
 import { DRAFT_SYSTEM, PROMPT_VERSION } from './prompts';
-import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL } from './openrouter-campaign-config';
+import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL, DEFAULT_OPENROUTER_CAMPAIGN_PRESET } from './openrouter-campaign-config';
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || '';
 const isPlaceholder = /your[_\-]?openai|placeholder|your_ope/i.test(OPENAI_API_KEY);
@@ -37,11 +37,14 @@ async function main() {
   }
 
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
-  const openRouterModel = process.env.OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_CAMPAIGN_MODEL;
+  const envOpenRouterModel = process.env.OPENROUTER_MODEL?.trim();
+  const campaignRephraseModel = envOpenRouterModel || DEFAULT_OPENROUTER_CAMPAIGN_PRESET;
+  const autoRespondModel = envOpenRouterModel || DEFAULT_OPENROUTER_CAMPAIGN_MODEL;
   if (openRouterKey) {
     log.info({
-      message: 'OPENROUTER_API_KEY is set; campaign rephrase endpoint is available',
-      openrouter_model: openRouterModel,
+      message: 'OPENROUTER_API_KEY is set; campaign rephrase and auto-respond endpoints are available',
+      openrouter_campaign_rephrase_model: campaignRephraseModel,
+      openrouter_auto_respond_model: autoRespondModel,
     });
   } else {
     log.warn({ message: 'OPENROUTER_API_KEY not set; campaign rephrase will return 503' });

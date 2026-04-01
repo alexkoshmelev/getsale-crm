@@ -1,16 +1,10 @@
 /**
- * OpenRouter defaults for campaign message rephrase.
+ * OpenRouter — campaign message rephrase uses a saved preset (prompt/model in OpenRouter).
+ * https://openrouter.ai/docs — `model`: `@preset/<name>`.
  *
- * Primary default: `openai/gpt-5-mini`. Fallbacks are free instruct Gemma models if the primary returns
- * empty content. Avoid using `openrouter/free` as the *primary* model: the pool may route to
- * "thinking" models that burn `max_tokens` on `reasoning` and return `message.content: null` → 502.
- *
- * Override with `OPENROUTER_MODEL` in env. See docs/DEPLOYMENT.md and docs/ARCHITECTURE_CAMPAIGN_AI.md.
+ * Override: `OPENROUTER_MODEL=@preset/copyright` (or another preset id).
  */
-export const DEFAULT_OPENROUTER_CAMPAIGN_MODEL = 'openai/gpt-5-mini';
+export const DEFAULT_OPENROUTER_CAMPAIGN_PRESET = '@preset/copyright';
 
-/** Instruct-style free models used when the primary model returns empty content (thinking burn). */
-export const FALLBACK_OPENROUTER_CAMPAIGN_MODELS = [
-  'google/gemma-3-12b-it:free',
-  'google/gemma-3-4b-it:free',
-] as const;
+/** Default for non-preset OpenRouter routes (e.g. auto-respond) when `OPENROUTER_MODEL` is unset. */
+export const DEFAULT_OPENROUTER_CAMPAIGN_MODEL = 'openai/gpt-5-mini';

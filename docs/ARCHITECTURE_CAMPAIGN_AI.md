@@ -10,7 +10,7 @@
 
 Пул `openrouter/free` может отдать **reasoning/thinking** модели. Они часто заполняют `choices[0].message.reasoning` и оставляют `message.content: null`, особенно при ограниченном `max_tokens` → 502 «empty response».
 
-**Дефолт в репозитории:** `openai/gpt-5-mini` (константа `DEFAULT_OPENROUTER_CAMPAIGN_MODEL` в ai-service). Переопределение: `OPENROUTER_MODEL`. Fallback при пустом ответе первичной модели — бесплатные instruct Gemma (`FALLBACK_OPENROUTER_CAMPAIGN_MODELS`).
+**Дефолт для репрайза кампании:** пресет OpenRouter `@preset/copyright` (константа `DEFAULT_OPENROUTER_CAMPAIGN_PRESET` в ai-service): запрос идёт в Chat Completions с `model: @preset/...` и одним сообщением `user` с текстом кампании; инструкции задаются в пресете в OpenRouter. Переопределение: `OPENROUTER_MODEL`. Другие маршруты ai-service (например auto-respond) при отсутствии `OPENROUTER_MODEL` используют `DEFAULT_OPENROUTER_CAMPAIGN_MODEL` (`openai/gpt-5-mini`).
 
 ## Обогащение контактов и FLOOD_WAIT
 

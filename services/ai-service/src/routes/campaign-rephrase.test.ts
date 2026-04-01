@@ -3,7 +3,7 @@ import request from 'supertest';
 import { createTestApp } from '@getsale/test-utils';
 import { createLogger } from '@getsale/logger';
 import { campaignRephraseRouter } from './campaign-rephrase';
-import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL, FALLBACK_OPENROUTER_CAMPAIGN_MODELS } from '../openrouter-campaign-config';
+import { DEFAULT_OPENROUTER_CAMPAIGN_PRESET } from '../openrouter-campaign-config';
 
 const TEST_ORG_ID = '11111111-1111-1111-1111-111111111111';
 const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
@@ -24,7 +24,7 @@ describe('Campaign Rephrase Router', () => {
     vi.clearAllMocks();
     process.env = { ...originalEnv };
     process.env.OPENROUTER_API_KEY = 'sk-test-key';
-    process.env.OPENROUTER_MODEL = DEFAULT_OPENROUTER_CAMPAIGN_MODEL;
+    process.env.OPENROUTER_MODEL = DEFAULT_OPENROUTER_CAMPAIGN_PRESET;
 
     fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -58,7 +58,7 @@ describe('Campaign Rephrase Router', () => {
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
         content: 'Rephrased message for Telegram',
-        model: DEFAULT_OPENROUTER_CAMPAIGN_MODEL,
+        model: DEFAULT_OPENROUTER_CAMPAIGN_PRESET,
         provider: 'openrouter',
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -68,19 +68,14 @@ describe('Campaign Rephrase Router', () => {
       const expectedMax = Math.min(512, Math.max(128, inputTokenEstimate * 2));
       const sent = JSON.parse(fetchOpts?.body ?? '{}') as {
         max_tokens?: number;
-        messages?: unknown[];
+        messages?: { role: string; content: string }[];
         model?: string;
-        temperature?: number;
-        reasoning?: { effort?: string };
-        provider?: { require_parameters?: boolean };
       };
-      expect(sent.model).toBe(DEFAULT_OPENROUTER_CAMPAIGN_MODEL);
+      expect(sent.model).toBe(DEFAULT_OPENROUTER_CAMPAIGN_PRESET);
       expect(sent.max_tokens).toBe(expectedMax);
-      expect(sent.temperature).toBe(0.7);
-      expect(sent.reasoning).toEqual({ effort: 'none' });
-      expect(sent.provider).toEqual({ require_parameters: true });
       expect(Array.isArray(sent.messages)).toBe(true);
-      expect((sent.messages as { role: string }[]).some((m) => m.role === 'system')).toBe(true);
+      expect(sent.messages).toHaveLength(1);
+      expect(sent.messages?.[0]).toEqual({ role: 'user', content: text });
     });
 
     it('returns 503 when OPENROUTER_API_KEY is not set', async () => {
@@ -130,7 +125,7 @@ describe('Campaign Rephrase Router', () => {
       expect(res.status).toBe(502);
     });
 
-    it('returns 502 when OpenRouter returns empty content for all models in sequence', async () => {
+    it('returns 502 when OpenRouter returns empty content', async () => {
       const empty = {
         ok: true,
         json: () => Promise.resolve({ choices: [{ message: { content: null } }] }),
@@ -143,32 +138,7 @@ describe('Campaign Rephrase Router', () => {
         .send({ text: 'Hello' });
 
       expect(res.status).toBe(502);
-      expect(fetchMock.mock.calls.length).toBe(1 + FALLBACK_OPENROUTER_CAMPAIGN_MODELS.length);
-    });
-
-    it('retries with fallback model when primary returns empty content', async () => {
-      vi.mocked(fetchMock)
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              choices: [{ finish_reason: 'length', message: { content: null, reasoning: '...' } }],
-            }),
-        } as any)
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve({ choices: [{ message: { content: 'Fallback rephrase' } }] }),
-        } as any);
-
-      const res = await request(app)
-        .post('/api/ai/campaigns/rephrase')
-        .set(authHeaders)
-        .send({ text: 'Hello' });
-
-      expect(res.status).toBe(200);
-      expect(res.body.content).toBe('Fallback rephrase');
-      expect(res.body.model).toBe(FALLBACK_OPENROUTER_CAMPAIGN_MODELS[0]);
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls.length).toBe(1);
     });
   });
 });
