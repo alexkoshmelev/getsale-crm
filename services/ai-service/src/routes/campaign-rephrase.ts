@@ -61,8 +61,6 @@ function buildOpenRouterPresetBody(model: string, userText: string, maxTokens: n
   return {
     model,
     messages: [{ role: 'user', content: userText }],
-    max_tokens: maxTokens,
-    reasoning: { effort: 'none' },
   };
 }
 
