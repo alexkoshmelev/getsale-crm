@@ -46,6 +46,14 @@ export const AuSwitchWorkspaceSchema = z.object({
   organizationId: z.string().uuid(),
 });
 
+export const AuCreateWorkspaceSchema = z.object({
+  name: z.string().min(1, 'Name is required').max(AU_ORG_NAME_MAX_LEN).trim(),
+});
+
+export const AuWorkspaceIdParamSchema = z.object({
+  organizationId: z.string().uuid(),
+});
+
 export const AuInviteTokenParamSchema = z.object({
   token: z.string().min(1, 'Token is required').max(512).regex(/^[a-zA-Z0-9_-]+$/, 'Invalid token format'),
 });

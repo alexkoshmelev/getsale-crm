@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
-import { ServiceHttpClient, ServiceCallError } from '@getsale/service-core';
+import { ServiceHttpClient, ServiceCallError, type BdAccountsListScope } from '@getsale/service-core';
 import {
   dateInTz,
   isWithinOperatingScheduleAt as isWithinScheduleAt,
@@ -37,6 +37,10 @@ export function normalizeTelegramUsername(username: unknown): string | null {
   return normalized !== '' ? normalized : null;
 }
 
+/**
+ * Peer channel for campaign sends. Prefer numeric Telegram user id when present so
+ * bd-accounts MessageSender can use numeric peer without contacts.ResolveUsername per send.
+ */
 export function resolveCampaignChannelId(
   telegramId: unknown,
   username: unknown
@@ -44,7 +48,7 @@ export function resolveCampaignChannelId(
   const usernameNorm = normalizeTelegramUsername(username);
   const telegramIdNorm =
     telegramId != null && String(telegramId).trim() !== '' ? String(telegramId).trim() : null;
-  return usernameNorm ?? telegramIdNorm;
+  return telegramIdNorm ?? usernameNorm;
 }
 
 export function getContactField(
@@ -396,4 +400,15 @@ export function substituteVariables(
     .replace(/\{\{company\.name\}\}/g, companyName);
   out = out.replace(/[ \t]+/g, ' ').replace(/\n +/g, '\n').replace(/ +\n/g, '\n').trim();
   return out;
+}
+
+/** Filters BD account rows for campaign list/detail responses (viewer: none; bidi: own only). */
+export function filterBdAccountRowsForScope<T extends { created_by_user_id: string | null }>(
+  rows: T[],
+  scope: BdAccountsListScope,
+  userId: string
+): T[] {
+  if (scope === 'none') return [];
+  if (scope === 'own_only') return rows.filter((r) => r.created_by_user_id != null && r.created_by_user_id === userId);
+  return rows;
 }

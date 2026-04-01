@@ -25,7 +25,7 @@ async function main() {
   ctx.mount('/api/auth', authRouter(deps));
   ctx.mount('/api/auth/2fa', twoFactorRouter(deps));
   ctx.mount('/api/auth', organizationRouter(deps));
-  ctx.mount('/api/auth', workspacesRouter(deps));
+  ctx.mount('/api/auth', workspacesRouter({ pool, rabbitmq, log }));
   ctx.mount('/api/invite', invitesRouter(deps));
 
   ctx.start();

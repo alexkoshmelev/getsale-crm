@@ -32,6 +32,20 @@ export function canTransferOwnership(role: string | undefined | null): boolean {
   return normalizeRole(role) === 'owner';
 }
 
+/** Leave workspace: any member except owner (owner must transfer first). */
+export function canLeaveWorkspace(role: string | undefined | null): boolean {
+  const r = normalizeRole(role);
+  return r !== '' && r !== 'owner';
+}
+
+/**
+ * Delete workspace: owner only (not admin, supervisor, bidi, or viewer).
+ * Must match current JWT role for the active workspace.
+ */
+export function canDeleteWorkspace(role: string | undefined | null): boolean {
+  return normalizeRole(role) === 'owner';
+}
+
 /** CRM (contacts, companies, deals): owner, admin, supervisor */
 export function canManageCRM(role: string | undefined | null): boolean {
   const r = normalizeRole(role);

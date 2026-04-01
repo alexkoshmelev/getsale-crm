@@ -24,6 +24,9 @@ interface AuthState {
   refreshAccessToken: () => Promise<void>;
   fetchWorkspaces: () => Promise<void>;
   switchWorkspace: (organizationId: string) => Promise<void>;
+  createWorkspace: (name: string) => Promise<void>;
+  leaveWorkspace: (organizationId: string) => Promise<void>;
+  deleteWorkspace: (organizationId: string) => Promise<void>;
   refreshUser: () => Promise<void>;
 }
 
@@ -89,6 +92,60 @@ export const useAuthStore = create<AuthState>()(
             localStorage.setItem(key, JSON.stringify(payload));
           } catch (e) {
             (await import('../error-reporter')).reportWarning('localStorage setItem failed', { error: e, action: 'switchWorkspace' });
+          }
+          window.location.href = '/dashboard';
+        }
+      },
+
+      createWorkspace: async (name: string) => {
+        const { user } = get();
+        if (!user) throw new Error('Not authenticated');
+        const response = await authApi.post<{ user: User }>('/workspaces', { name: name.trim() });
+        const { user: newUser } = response.data;
+        set({ user: newUser, workspaces: null });
+        if (typeof window !== 'undefined') {
+          const key = 'auth-storage';
+          const payload = { state: { user: newUser, isAuthenticated: true }, version: 0 };
+          try {
+            localStorage.setItem(key, JSON.stringify(payload));
+          } catch (e) {
+            (await import('../error-reporter')).reportWarning('localStorage setItem failed', { error: e, action: 'createWorkspace' });
+          }
+          window.location.href = '/dashboard';
+        }
+      },
+
+      leaveWorkspace: async (organizationId: string) => {
+        const { user } = get();
+        if (!user) throw new Error('Not authenticated');
+        const response = await authApi.post<{ user: User }>(`/workspaces/${organizationId}/leave`);
+        const { user: newUser } = response.data;
+        set({ user: newUser, workspaces: null });
+        if (typeof window !== 'undefined') {
+          const key = 'auth-storage';
+          const payload = { state: { user: newUser, isAuthenticated: true }, version: 0 };
+          try {
+            localStorage.setItem(key, JSON.stringify(payload));
+          } catch (e) {
+            (await import('../error-reporter')).reportWarning('localStorage setItem failed', { error: e, action: 'leaveWorkspace' });
+          }
+          window.location.href = '/dashboard';
+        }
+      },
+
+      deleteWorkspace: async (organizationId: string) => {
+        const { user } = get();
+        if (!user) throw new Error('Not authenticated');
+        const response = await authApi.delete<{ user: User }>(`/workspaces/${organizationId}`);
+        const { user: newUser } = response.data;
+        set({ user: newUser, workspaces: null });
+        if (typeof window !== 'undefined') {
+          const key = 'auth-storage';
+          const payload = { state: { user: newUser, isAuthenticated: true }, version: 0 };
+          try {
+            localStorage.setItem(key, JSON.stringify(payload));
+          } catch (e) {
+            (await import('../error-reporter')).reportWarning('localStorage setItem failed', { error: e, action: 'deleteWorkspace' });
           }
           window.location.href = '/dashboard';
         }

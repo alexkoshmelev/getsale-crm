@@ -70,6 +70,7 @@ export interface CampaignRevenueRow {
 
 export interface BdAccountRow {
   id: string;
+  created_by_user_id: string | null;
   display_name: string | null;
   first_name: string | null;
   last_name: string | null;

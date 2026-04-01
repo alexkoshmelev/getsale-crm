@@ -39,3 +39,12 @@ export {
 export { interServiceHttpDefaults } from './inter-service-http-defaults';
 
 export { withOrgContext } from './rls';
+
+export {
+  BIDI_ROLE,
+  VIEWER_ROLE,
+  isBdAgentRole,
+  isBdViewerRole,
+  bdAccountsListScope,
+  type BdAccountsListScope,
+} from './bd-account-scope';

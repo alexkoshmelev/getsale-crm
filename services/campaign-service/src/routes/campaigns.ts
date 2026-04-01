@@ -5,8 +5,8 @@ import { RabbitMQClient } from '@getsale/utils';
 import { EventType, Event } from '@getsale/events';
 import { CampaignStatus } from '@getsale/types';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes, validate, withOrgContext, parsePageLimit, parseLimit } from '@getsale/service-core';
-import { parseCsv, getBdAccountDisplayName, getSentTodayByAccount } from '../helpers';
+import { asyncHandler, AppError, ErrorCodes, validate, withOrgContext, parsePageLimit, parseLimit, bdAccountsListScope } from '@getsale/service-core';
+import { parseCsv, getBdAccountDisplayName, getSentTodayByAccount, filterBdAccountRowsForScope } from '../helpers';
 import {
   CampaignCreateSchema,
   CampaignPatchSchema,
@@ -57,7 +57,7 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
   const router = Router();
 
   router.get('/', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const { organizationId, id: userId, role } = req.user;
     const { status, page: pageRaw, limit: limitRaw } = req.query;
 
     const { page, limit, offset } = parsePageLimit(
@@ -124,15 +124,7 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       `SELECT c.*,
               u.email AS owner_email,
               COALESCE(NULLIF(TRIM(CONCAT_WS(' ', up.first_name, up.last_name)), ''), u.email) AS owner_name,
-              COALESCE(
-                NULLIF((SELECT COUNT(*)::int FROM campaign_participants cp2 WHERE cp2.campaign_id = c.id), 0),
-                CASE
-                  WHEN c.status IN ('draft', 'paused')
-                    AND jsonb_typeof(COALESCE(c.target_audience, '{}'::jsonb) -> 'contactIds') = 'array'
-                  THEN jsonb_array_length(COALESCE((c.target_audience -> 'contactIds'), '[]'::jsonb))
-                  ELSE 0
-                END
-              )::int AS total_participants
+              (SELECT COUNT(*)::int FROM campaign_participants cp2 WHERE cp2.campaign_id = c.id) AS total_participants
        FROM campaigns c
        LEFT JOIN users u ON u.id = c.created_by_user_id
        LEFT JOIN user_profiles up ON up.user_id = u.id
@@ -170,24 +162,22 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
         [ids]
       ),
       pool.query(
-        `SELECT first_sends.campaign_id, COUNT(*)::int AS cnt FROM (
-           SELECT DISTINCT ON (cp.id) cp.campaign_id, cs.message_id AS mid
-           FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
-           WHERE cp.campaign_id = ANY($1::uuid[])
-           ORDER BY cp.id, cs.sent_at
-         ) first_sends
-         JOIN messages m ON m.id = first_sends.mid AND m.status = 'read'
-         GROUP BY first_sends.campaign_id`,
+        `SELECT cp.campaign_id, COUNT(DISTINCT cp.id)::int AS cnt
+         FROM campaign_sends cs
+         JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+         JOIN messages m ON m.id = cs.message_id AND m.status = 'read'
+         WHERE cp.campaign_id = ANY($1::uuid[])
+         GROUP BY cp.campaign_id`,
         [ids]
       ),
       pool.query(`SELECT campaign_id, COUNT(*)::int AS cnt FROM conversations WHERE campaign_id = ANY($1::uuid[]) AND won_at IS NOT NULL GROUP BY campaign_id`, [ids]),
       pool.query(`SELECT campaign_id, COALESCE(SUM(revenue_amount), 0)::numeric AS total FROM conversations WHERE campaign_id = ANY($1::uuid[]) AND won_at IS NOT NULL GROUP BY campaign_id`, [ids]),
       bdAccountIds.length > 0
         ? pool.query(
-            `SELECT id, display_name, first_name, last_name, username, phone_number, telegram_id,
+            `SELECT id, created_by_user_id, display_name, first_name, last_name, username, phone_number, telegram_id,
                     flood_wait_until, flood_wait_seconds, flood_reason, flood_last_at, photo_file_id, is_active, connection_state
-             FROM bd_accounts WHERE id = ANY($1::uuid[])`,
-            [bdAccountIds]
+             FROM bd_accounts WHERE id = ANY($1::uuid[]) AND organization_id = $2`,
+            [bdAccountIds, organizationId]
           )
         : Promise.resolve({ rows: [] }),
     ]);
@@ -198,7 +188,9 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     const readMap = new Map((readRes.rows as CampaignCountRow[]).map((r) => [r.campaign_id, r.cnt]));
     const wonMap = new Map((wonRes.rows as CampaignCountRow[]).map((r) => [r.campaign_id, r.cnt]));
     const revenueMap = new Map((revenueRes.rows as CampaignRevenueRow[]).map((r) => [r.campaign_id, Number(r.total)]));
-    const bdAccountMap = new Map((bdAccountsRes.rows as BdAccountRow[]).map((a) => [a.id, a]));
+    const scope = bdAccountsListScope(role);
+    const visibleBdRows = filterBdAccountRowsForScope(bdAccountsRes.rows as BdAccountRow[], scope, userId);
+    const bdAccountMap = new Map(visibleBdRows.map((a) => [a.id, a]));
 
     const withKpi = campaigns.map((c) => {
       const sent = sentMap.get(c.id) ?? 0;
@@ -236,14 +228,25 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
   }));
 
   router.get('/agents', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const { organizationId, id: userId, role } = req.user;
+    const scope = bdAccountsListScope(role);
+    if (scope === 'none') {
+      res.json([]);
+      return;
+    }
+    const params: QueryParam[] = [organizationId];
+    let ownerClause = '';
+    if (scope === 'own_only') {
+      params.push(userId);
+      ownerClause = ` AND a.created_by_user_id = $${params.length}`;
+    }
     const accounts = await pool.query(
-      `SELECT a.id, a.display_name, a.first_name, a.last_name, a.username, a.phone_number, a.telegram_id,
+      `SELECT a.id, a.created_by_user_id, a.display_name, a.first_name, a.last_name, a.username, a.phone_number, a.telegram_id,
               a.flood_wait_until, a.flood_wait_seconds, a.flood_reason, a.flood_last_at, a.photo_file_id, a.is_active, a.connection_state
        FROM bd_accounts a
-       WHERE a.organization_id = $1 AND a.is_active = true
+       WHERE a.organization_id = $1 AND a.is_active = true${ownerClause}
        ORDER BY a.display_name NULLS LAST, a.phone_number`,
-      [organizationId]
+      params
     );
     const sentMap = await getSentTodayByAccount(pool, organizationId);
     const result = (accounts.rows as BdAccountRow[]).map((a) => ({
@@ -393,7 +396,7 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const { organizationId, id: userId, role } = req.user;
     const { id } = req.params;
     const campaignRes = await pool.query(
       'SELECT * FROM campaigns WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL',
@@ -427,12 +430,14 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     let bd_accounts: ReturnType<typeof serializeBdAccountRow>[] = [];
     if (bdIds.length > 0) {
       const r = await pool.query(
-        `SELECT id, display_name, first_name, last_name, username, phone_number, telegram_id,
+        `SELECT id, created_by_user_id, display_name, first_name, last_name, username, phone_number, telegram_id,
                 flood_wait_until, flood_wait_seconds, flood_reason, flood_last_at, photo_file_id, is_active, connection_state
          FROM bd_accounts WHERE id = ANY($1::uuid[]) AND organization_id = $2`,
         [bdIds, organizationId]
       );
-      const map = new Map((r.rows as BdAccountRow[]).map((row) => [row.id, row]));
+      const scope = bdAccountsListScope(role);
+      const visible = filterBdAccountRowsForScope(r.rows as BdAccountRow[], scope, userId);
+      const map = new Map(visible.map((row) => [row.id, row]));
       bd_accounts = bdIds
         .map((id) => map.get(id))
         .filter((row): row is BdAccountRow => row != null)

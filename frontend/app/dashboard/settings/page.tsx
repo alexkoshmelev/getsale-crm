@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
 import { useAuthStore } from '@/lib/stores/auth-store';
-import { canAccessWorkspaceSettings } from '@/lib/permissions';
+import { canAccessWorkspaceSettings, canLeaveWorkspace, canDeleteWorkspace } from '@/lib/permissions';
 import { User, CreditCard, Key, Bell, Building2, FileText } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
@@ -16,7 +16,7 @@ type SettingsTab = 'profile' | 'workspace' | 'subscription' | 'security' | 'noti
 
 const tabsConfig: { id: SettingsTab; i18nKey: string; icon: typeof User; ownerAdminOnly?: boolean }[] = [
   { id: 'profile', i18nKey: 'profile', icon: User },
-  { id: 'workspace', i18nKey: 'workspace', icon: Building2, ownerAdminOnly: true },
+  { id: 'workspace', i18nKey: 'workspace', icon: Building2 },
   { id: 'subscription', i18nKey: 'subscription', icon: CreditCard },
   { id: 'security', i18nKey: 'security', icon: Key },
   { id: 'notifications', i18nKey: 'notifications', icon: Bell },
@@ -25,8 +25,10 @@ const tabsConfig: { id: SettingsTab; i18nKey: string; icon: typeof User; ownerAd
 
 export default function SettingsPage() {
   const { t } = useTranslation();
-  const { user } = useAuthStore();
+  const { user, workspaces, fetchWorkspaces, leaveWorkspace, deleteWorkspace } = useAuthStore();
   const canEditWorkspace = canAccessWorkspaceSettings(user?.role);
+  const showLeave = canLeaveWorkspace(user?.role);
+  const showDelete = canDeleteWorkspace(user?.role);
 
   const [profile, setProfile] = useState<any>(null);
   const [profileFirstName, setProfileFirstName] = useState('');
@@ -45,9 +47,11 @@ export default function SettingsPage() {
   const [workspaceError, setWorkspaceError] = useState('');
   const [auditLogs, setAuditLogs] = useState<{ id: string; user_id: string; action: string; resource_type: string | null; resource_id: string | null; old_value: unknown; new_value: unknown; ip: string | null; created_at: string }[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
+  const [deleteConfirmName, setDeleteConfirmName] = useState('');
+  const [workspaceActionLoading, setWorkspaceActionLoading] = useState(false);
 
   useEffect(() => {
-    if (!canEditWorkspace && (activeTab === 'workspace' || activeTab === 'audit')) {
+    if (!canEditWorkspace && activeTab === 'audit') {
       setActiveTab('profile');
     }
   }, [canEditWorkspace, activeTab]);
@@ -71,6 +75,12 @@ export default function SettingsPage() {
       }).catch(() => setOrganization(null));
     }
   }, [activeTab, organization]);
+
+  useEffect(() => {
+    if (activeTab === 'workspace') {
+      void fetchWorkspaces();
+    }
+  }, [activeTab, fetchWorkspaces]);
 
   useEffect(() => {
     if (activeTab === 'workspace' && user?.role === 'owner') {
@@ -149,6 +159,44 @@ export default function SettingsPage() {
       setWorkspaceError(e?.response?.data?.error || 'Failed to save');
     } finally {
       setWorkspaceSaving(false);
+    }
+  };
+
+  const handleLeaveWorkspace = async () => {
+    if (!user?.organizationId || !organization) return;
+    if (!window.confirm(t('workspaces.leaveConfirm'))) return;
+    setWorkspaceActionLoading(true);
+    try {
+      await leaveWorkspace(user.organizationId);
+    } catch (e: unknown) {
+      const msg =
+        e && typeof e === 'object' && 'response' in e
+          ? (e as { response?: { data?: { error?: string } } }).response?.data?.error
+          : null;
+      alert(msg || t('workspaces.leaveError'));
+    } finally {
+      setWorkspaceActionLoading(false);
+    }
+  };
+
+  const handleDeleteWorkspace = async () => {
+    if (!user?.organizationId || !organization) return;
+    if (deleteConfirmName.trim() !== organization.name) {
+      alert(t('workspaces.deleteNameMismatch'));
+      return;
+    }
+    if (!window.confirm(t('workspaces.deleteConfirm'))) return;
+    setWorkspaceActionLoading(true);
+    try {
+      await deleteWorkspace(user.organizationId);
+    } catch (e: unknown) {
+      const msg =
+        e && typeof e === 'object' && 'response' in e
+          ? (e as { response?: { data?: { error?: string } } }).response?.data?.error
+          : null;
+      alert(msg || t('workspaces.deleteError'));
+    } finally {
+      setWorkspaceActionLoading(false);
     }
   };
 
@@ -312,6 +360,61 @@ export default function SettingsPage() {
                             {transferring ? t('common.loading') : t('settings.transferOwnership')}
                           </Button>
                         </div>
+                      </div>
+                    )}
+                    {!showDelete && user?.role && String(user.role).toLowerCase() !== 'owner' && (
+                      <p className="text-xs text-muted-foreground pt-2">{t('workspaces.deleteOwnerOnlyHint')}</p>
+                    )}
+                    {(showLeave || showDelete) && (
+                      <div className="pt-6 border-t border-border space-y-4">
+                        <h3 className="text-sm font-semibold text-destructive">{t('workspaces.dangerZone')}</h3>
+                        {showLeave && (
+                          <div className="space-y-2">
+                            <p className="text-sm text-muted-foreground">{t('workspaces.leaveHint')}</p>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="border-destructive/50 text-destructive hover:bg-destructive/10"
+                              onClick={handleLeaveWorkspace}
+                              disabled={workspaceActionLoading || !workspaces || workspaces.length <= 1}
+                            >
+                              {workspaceActionLoading ? t('common.loading') : t('workspaces.leave')}
+                            </Button>
+                            {workspaces && workspaces.length <= 1 && (
+                              <p className="text-xs text-muted-foreground">{t('workspaces.cannotLeaveOnly')}</p>
+                            )}
+                          </div>
+                        )}
+                        {showDelete && (
+                          <div className="space-y-2">
+                            <p className="text-sm text-muted-foreground">{t('workspaces.deleteHint')}</p>
+                            <Input
+                              label={t('workspaces.deleteTypeName')}
+                              type="text"
+                              value={deleteConfirmName}
+                              onChange={(e) => setDeleteConfirmName(e.target.value)}
+                              placeholder={organization.name}
+                              autoComplete="off"
+                            />
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="border-destructive text-destructive hover:bg-destructive/10"
+                              onClick={handleDeleteWorkspace}
+                              disabled={
+                                workspaceActionLoading ||
+                                !workspaces ||
+                                workspaces.length <= 1 ||
+                                deleteConfirmName.trim() !== organization.name
+                              }
+                            >
+                              {workspaceActionLoading ? t('common.loading') : t('workspaces.delete')}
+                            </Button>
+                            {workspaces && workspaces.length <= 1 && (
+                              <p className="text-xs text-muted-foreground">{t('workspaces.cannotDeleteOnly')}</p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

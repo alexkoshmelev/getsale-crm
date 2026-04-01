@@ -10,6 +10,10 @@ import type { Pool } from 'pg';
 /** Minimum delay (ms) before send after a resolve/session call to avoid Telegram rate limits. */
 const SEND_DELAY_AFTER_RESOLVE_MS = 300;
 
+/** Cache resolved InputPeer per (bd_account, username) to avoid repeated contacts.ResolveUsername (FLOOD_WAIT). */
+const USERNAME_PEER_CACHE_TTL_MS = 60 * 60 * 1000;
+const USERNAME_PEER_CACHE_MAX = 10_000;
+
 /**
  * Sending messages, typing, read receipts, drafts.
  */
@@ -17,11 +21,38 @@ export class MessageSender {
   private readonly pool: Pool;
   private readonly log: StructuredLog;
   private readonly clients: Map<string, TelegramClientInfo>;
+  /** Key: `${accountId}:${normalizedUsername}` */
+  private readonly usernamePeerCache = new Map<string, { peer: Api.TypeInputPeer; expiresAt: number }>();
 
   constructor(private readonly deps: TelegramManagerDeps) {
     this.pool = deps.pool;
     this.log = deps.log;
     this.clients = deps.clients;
+  }
+
+  private usernameCacheKey(accountId: string, usernameRaw: string): string {
+    const u = (usernameRaw ?? '').trim().replace(/^@/, '').toLowerCase();
+    return `${accountId}:${u}`;
+  }
+
+  private getCachedUsernamePeer(accountId: string, usernameRaw: string): Api.TypeInputPeer | undefined {
+    const key = this.usernameCacheKey(accountId, usernameRaw);
+    const entry = this.usernamePeerCache.get(key);
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) {
+      this.usernamePeerCache.delete(key);
+      return undefined;
+    }
+    return entry.peer;
+  }
+
+  private setCachedUsernamePeer(accountId: string, usernameRaw: string, peer: Api.TypeInputPeer): void {
+    if (this.usernamePeerCache.size >= USERNAME_PEER_CACHE_MAX) {
+      const firstKey = this.usernamePeerCache.keys().next().value as string | undefined;
+      if (firstKey) this.usernamePeerCache.delete(firstKey);
+    }
+    const key = this.usernameCacheKey(accountId, usernameRaw);
+    this.usernamePeerCache.set(key, { peer, expiresAt: Date.now() + USERNAME_PEER_CACHE_TTL_MS });
   }
 
   /** GramJS expects numeric peer ids (e.g. -1000012345 for supergroups) as number, not string, else PEER_ID_INVALID. */
@@ -123,17 +154,26 @@ export class MessageSender {
         }
       }
 
-      // Username: resolve via contacts.ResolveUsername first (guaranteed delivery, no cache dependency)
+      // Username: prefer in-memory cache (same account + username) to avoid repeated contacts.ResolveUsername.
       if (typeof peer === 'string' && peer.length > 0 && isUsernameLike(peer)) {
+        const cached = this.getCachedUsernamePeer(accountId, peer);
+        if (cached) {
+          if (SEND_DELAY_AFTER_RESOLVE_MS > 0) {
+            await new Promise((r) => setTimeout(r, SEND_DELAY_AFTER_RESOLVE_MS));
+          }
+          return trySend(cached);
+        }
         const resolved = await resolveUsernameToInputPeer(client, peer, { log: this.log, accountId });
         if (resolved) {
+          this.setCachedUsernamePeer(accountId, peer, resolved);
           if (SEND_DELAY_AFTER_RESOLVE_MS > 0) {
             await new Promise((r) => setTimeout(r, SEND_DELAY_AFTER_RESOLVE_MS));
           }
           return trySend(resolved);
         }
-        peer = await client.getInputEntity(peer);
-        return trySend(peer);
+        const inputPeer = await client.getInputEntity(peer);
+        this.setCachedUsernamePeer(accountId, peer, inputPeer as Api.TypeInputPeer);
+        return trySend(inputPeer);
       }
 
       if (typeof peer === 'string' && peer.length > 0 && Number.isNaN(Number(peer))) {
@@ -167,9 +207,16 @@ export class MessageSender {
           }
 
           if (typeof peerRetry === 'string' && peerRetry.length > 0 && isUsernameLike(peerRetry)) {
+            const cachedRetry = this.getCachedUsernamePeer(accountId, peerRetry);
+            if (cachedRetry) return trySend(cachedRetry);
             const resolved = await resolveUsernameToInputPeer(client, peerRetry, { log: this.log, accountId });
-            if (resolved) return trySend(resolved);
-            peerRetry = await client.getInputEntity(peerRetry);
+            if (resolved) {
+              this.setCachedUsernamePeer(accountId, peerRetry, resolved);
+              return trySend(resolved);
+            }
+            const inputPeerRetry = await client.getInputEntity(peerRetry);
+            this.setCachedUsernamePeer(accountId, peerRetry, inputPeerRetry as Api.TypeInputPeer);
+            peerRetry = inputPeerRetry;
           } else if (typeof peerRetry === 'string' && peerRetry.length > 0 && Number.isNaN(Number(peerRetry))) {
             peerRetry = await client.getInputEntity(peerRetry);
           }

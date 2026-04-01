@@ -10,7 +10,11 @@
 
 Пул `openrouter/free` может отдать **reasoning/thinking** модели. Они часто заполняют `choices[0].message.reasoning` и оставляют `message.content: null`, особенно при ограниченном `max_tokens` → 502 «empty response».
 
-**Дефолт в репозитории:** `google/gemma-3-27b-it:free` (константа `DEFAULT_OPENROUTER_CAMPAIGN_MODEL` в ai-service). Переопределение: `OPENROUTER_MODEL`.
+**Дефолт в репозитории:** `openai/gpt-5-mini` (константа `DEFAULT_OPENROUTER_CAMPAIGN_MODEL` в ai-service). Переопределение: `OPENROUTER_MODEL`. Fallback при пустом ответе первичной модели — бесплатные instruct Gemma (`FALLBACK_OPENROUTER_CAMPAIGN_MODELS`).
+
+## Обогащение контактов и FLOOD_WAIT
+
+Галочка «обогатить контакт перед отправкой» (`enrichContactsBeforeStart` в `target_audience`) при старте кампании вызывает только пакетное `enrichContactsFromTelegram` во фронте; **без галочки этого шага нет**. Отдельно от этого, при рассылке по **username** (как `channel_id` участника) bd-accounts `MessageSender` при отправке вызывает `contacts.ResolveUsername` для разрешения peer — это не «лишние» запросы от enrich, а необходимость API для доставки по @username. Чтобы снизить число resolve, нужен peer в виде числового user id (и успешная отправка без ветки username), что может потребовать иной приоритет `telegram_id` vs `username` при формировании `channel_id` у участников.
 
 ## Переменные окружения
 

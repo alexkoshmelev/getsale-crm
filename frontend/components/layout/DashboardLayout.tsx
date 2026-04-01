@@ -31,6 +31,7 @@ import {
   Loader2,
   Send,
   Search,
+  Plus,
 } from 'lucide-react';
 import { useNotificationsStore } from '@/lib/stores/notifications-store';
 import { clsx } from 'clsx';
@@ -38,6 +39,8 @@ import { GlobalSearch } from '@/components/layout/GlobalSearch';
 import { Breadcrumbs } from '@/components/layout/Breadcrumbs';
 import { NotificationsDropdown } from '@/components/layout/NotificationsDropdown';
 import { KeyboardShortcutsModal } from '@/components/layout/KeyboardShortcutsModal';
+import { Input } from '@/components/ui/Input';
+import { Button } from '@/components/ui/Button';
 import { HelpDropdown } from '@/components/layout/HelpDropdown';
 import { OnboardingModal } from '@/components/layout/OnboardingModal';
 import { runWhenIdle } from '@/lib/run-when-idle';
@@ -72,7 +75,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const { t } = useTranslation();
   const router = useRouter();
   const pathname = usePathname();
-  const { user, logout, workspaces, fetchWorkspaces, switchWorkspace } = useAuthStore();
+  const { user, logout, workspaces, fetchWorkspaces, switchWorkspace, createWorkspace } = useAuthStore();
   const { sidebarCollapsed, toggleSidebar } = useLayoutStore();
   const { mode: themeMode, setMode: setThemeMode } = useThemeStore();
   const { locale, setLocale } = useLocaleStore();
@@ -80,6 +83,9 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [workspaceDropdownOpen, setWorkspaceDropdownOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
+  const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
+  const [createWorkspaceName, setCreateWorkspaceName] = useState('');
+  const [createWorkspaceLoading, setCreateWorkspaceLoading] = useState(false);
 
   // Session is validated in app/dashboard/layout.tsx (/api/auth/me). Avoid a second /me here.
   // Workspaces are only needed for the sidebar switcher — load after idle so home/route data wins the network.
@@ -89,6 +95,22 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
       void fetchWorkspaces();
     }, 3000);
   }, [user?.id, fetchWorkspaces]);
+
+  const handleCreateWorkspaceSubmit = async () => {
+    const name = createWorkspaceName.trim();
+    if (!name) return;
+    setCreateWorkspaceLoading(true);
+    try {
+      await createWorkspace(name);
+    } catch (e: unknown) {
+      const msg =
+        e && typeof e === 'object' && 'response' in e
+          ? (e as { response?: { data?: { error?: string } } }).response?.data?.error
+          : null;
+      alert(msg || t('workspaces.createError'));
+      setCreateWorkspaceLoading(false);
+    }
+  };
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -261,6 +283,17 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
                           {w.name}
                         </button>
                       ))}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setWorkspaceDropdownOpen(false);
+                          setCreateWorkspaceOpen(true);
+                        }}
+                        className="w-full px-3 py-2 text-left text-sm border-t border-border flex items-center gap-2 text-primary hover:bg-accent font-medium"
+                      >
+                        <Plus className="w-4 h-4 shrink-0" />
+                        {t('workspaces.create')}
+                      </button>
                     </div>
                   </>
                 )}
@@ -318,6 +351,17 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
                           {w.name}
                         </button>
                       ))}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setWorkspaceDropdownOpen(false);
+                          setCreateWorkspaceOpen(true);
+                        }}
+                        className="w-full px-3 py-2 text-left text-sm border-t border-border flex items-center gap-2 text-primary hover:bg-accent font-medium"
+                      >
+                        <Plus className="w-4 h-4 shrink-0" />
+                        {t('workspaces.create')}
+                      </button>
                     </div>
                   </>
                 )}
@@ -472,6 +516,51 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
       </div>
       <OnboardingModal />
       <KeyboardShortcutsModal isOpen={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+
+      {createWorkspaceOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-[100] bg-black/50"
+            aria-hidden
+            onClick={() => {
+              if (!createWorkspaceLoading) setCreateWorkspaceOpen(false);
+            }}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-workspace-title"
+            className="fixed left-1/2 top-1/2 z-[101] w-[min(100%,24rem)] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border bg-card p-6 shadow-lg"
+          >
+            <h2 id="create-workspace-title" className="font-heading text-lg font-semibold text-foreground mb-4">
+              {t('workspaces.createTitle')}
+            </h2>
+            <Input
+              label={t('workspaces.nameLabel')}
+              value={createWorkspaceName}
+              onChange={(e) => setCreateWorkspaceName(e.target.value)}
+              placeholder={t('workspaces.namePlaceholder')}
+              autoComplete="organization"
+              disabled={createWorkspaceLoading}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void handleCreateWorkspaceSubmit();
+              }}
+            />
+            <div className="flex justify-end gap-2 mt-4">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => !createWorkspaceLoading && setCreateWorkspaceOpen(false)}
+              >
+                {t('common.cancel')}
+              </Button>
+              <Button type="button" onClick={() => void handleCreateWorkspaceSubmit()} disabled={createWorkspaceLoading || !createWorkspaceName.trim()}>
+                {createWorkspaceLoading ? t('common.loading') : t('workspaces.createButton')}
+              </Button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

@@ -17,6 +17,7 @@ import {
   spreadOffsetSecondsForSlot,
   staggeredFirstSendAtByOffset,
   staggeredFirstSendAt,
+  filterBdAccountRowsForScope,
   type Schedule,
 } from './helpers';
 
@@ -201,12 +202,16 @@ describe('sampleDelaySeconds', () => {
 });
 
 describe('campaign channel id resolution', () => {
-  it('prefers username over telegram id when both exist', () => {
-    expect(resolveCampaignChannelId('123456789', '@john_doe')).toBe('john_doe');
+  it('prefers telegram id over username when both exist', () => {
+    expect(resolveCampaignChannelId('123456789', '@john_doe')).toBe('123456789');
   });
 
   it('falls back to telegram id when username is missing', () => {
     expect(resolveCampaignChannelId('123456789', null)).toBe('123456789');
+  });
+
+  it('uses username when telegram id is missing', () => {
+    expect(resolveCampaignChannelId(null, '@only_user')).toBe('only_user');
   });
 
   it('normalizes username by trimming and removing @', () => {
@@ -241,5 +246,24 @@ describe('staggeredFirstSendAtByOffset', () => {
   it('adds exact offset when schedule is empty', () => {
     const base = new Date('2026-03-19T10:00:00.000Z');
     expect(staggeredFirstSendAtByOffset(base, 193, {}).getTime()).toBe(base.getTime() + 193_000);
+  });
+});
+
+describe('filterBdAccountRowsForScope', () => {
+  const rows = [
+    { id: 'a', created_by_user_id: 'u1' },
+    { id: 'b', created_by_user_id: 'u2' },
+  ] as const;
+
+  it('none returns empty', () => {
+    expect(filterBdAccountRowsForScope([...rows], 'none', 'u1')).toEqual([]);
+  });
+
+  it('own_only keeps matching creator', () => {
+    expect(filterBdAccountRowsForScope([...rows], 'own_only', 'u1')).toEqual([{ id: 'a', created_by_user_id: 'u1' }]);
+  });
+
+  it('all returns rows unchanged', () => {
+    expect(filterBdAccountRowsForScope([...rows], 'all', 'u1')).toEqual([...rows]);
   });
 });

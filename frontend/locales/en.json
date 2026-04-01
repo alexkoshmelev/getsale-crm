@@ -109,6 +109,28 @@
     "goToLogin": "Go to login",
     "failedToJoin": "Failed to join"
   },
+  "workspaces": {
+    "create": "Create workspace",
+    "createTitle": "New workspace",
+    "nameLabel": "Workspace name",
+    "namePlaceholder": "My team",
+    "createButton": "Create",
+    "createError": "Could not create workspace",
+    "leave": "Leave workspace",
+    "leaveConfirm": "Leave this workspace? You will lose access until invited again.",
+    "leaveError": "Could not leave workspace",
+    "leaveHint": "You will keep access to your other workspaces.",
+    "delete": "Delete workspace",
+    "deleteConfirm": "Permanently delete this workspace and all its data? This cannot be undone.",
+    "deleteError": "Could not delete workspace",
+    "deleteHint": "You must be the only member, have at least one other workspace, and type the workspace name to confirm.",
+    "deleteTypeName": "Type the workspace name to confirm",
+    "deleteNameMismatch": "Name does not match",
+    "cannotLeaveOnly": "You cannot leave your only workspace.",
+    "cannotDeleteOnly": "You cannot delete your only workspace.",
+    "dangerZone": "Danger zone",
+    "deleteOwnerOnlyHint": "Only the workspace owner can delete this workspace. Admins and other roles cannot."
+  },
   "dashboard": {
     "title": "Dashboard",
     "subtitle": "Overview of your CRM",

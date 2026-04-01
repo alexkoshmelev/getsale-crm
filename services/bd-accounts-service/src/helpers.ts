@@ -1,6 +1,15 @@
 import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
-import { AppError, ErrorCodes } from '@getsale/service-core';
+import {
+  AppError,
+  ErrorCodes,
+  BIDI_ROLE,
+  VIEWER_ROLE,
+  isBdAgentRole,
+  isBdViewerRole,
+  bdAccountsListScope,
+  type BdAccountsListScope,
+} from '@getsale/service-core';
 
 /** Safe extraction of error message from unknown (catch). Use in catch (err: unknown) and for logging. */
 export function getErrorMessage(err: unknown): string {
@@ -71,29 +80,14 @@ export function getTelegramApiCredentials(): { apiId: number; apiHash: string } 
   return { apiId: parseInt(String(apiId), 10), apiHash };
 }
 
-/** Agent (bidi) role: can write only from accounts they connected themselves. */
-export const BIDI_ROLE = 'bidi';
-
-/** Viewer: below agent; no access to BD Telegram accounts. */
-export const VIEWER_ROLE = 'viewer';
-
-/** True for BD agents only (not owner/admin/supervisor/viewer). */
-export function isBdAgentRole(role: string | undefined | null): boolean {
-  return (role || '').toLowerCase() === BIDI_ROLE;
-}
-
-export function isBdViewerRole(role: string | undefined | null): boolean {
-  return (role || '').toLowerCase() === VIEWER_ROLE;
-}
-
-export type BdAccountsListScope = 'all' | 'own_only' | 'none';
-
-/** Who can see which BD accounts: viewer none; agent own only; owner/admin/supervisor all org accounts. */
-export function bdAccountsListScope(role: string | undefined | null): BdAccountsListScope {
-  if (isBdViewerRole(role)) return 'none';
-  if (isBdAgentRole(role)) return 'own_only';
-  return 'all';
-}
+export {
+  BIDI_ROLE,
+  VIEWER_ROLE,
+  isBdAgentRole,
+  isBdViewerRole,
+  bdAccountsListScope,
+  type BdAccountsListScope,
+};
 
 /** Block viewer on any BD account API except empty list (GET / returns []). */
 export function assertBdAccountsNotViewer(user: { role?: string }): void {

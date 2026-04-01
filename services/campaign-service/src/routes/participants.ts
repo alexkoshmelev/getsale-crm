@@ -50,14 +50,11 @@ export function participantsRouter({ pool, log }: Deps): Router {
       [id]
     );
     const totalReadRes = await pool.query(
-      `SELECT COUNT(*)::int AS cnt FROM (
-         SELECT DISTINCT ON (cp.id) cs.message_id AS mid
-         FROM campaign_sends cs
-         JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
-         WHERE cp.campaign_id = $1
-         ORDER BY cp.id, cs.sent_at
-       ) first_sends
-       JOIN messages m ON m.id = first_sends.mid AND m.status = 'read'`,
+      `SELECT COUNT(DISTINCT cp.id)::int AS cnt
+       FROM campaign_participants cp
+       INNER JOIN campaign_sends cs ON cs.campaign_participant_id = cp.id
+       INNER JOIN messages m ON m.id = cs.message_id AND m.status = 'read'
+       WHERE cp.campaign_id = $1`,
       [id]
     );
     const totalSharedRes = await pool.query(
