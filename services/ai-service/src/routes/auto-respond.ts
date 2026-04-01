@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { AIRateLimiter } from '../rate-limiter';
-import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL } from '../openrouter-campaign-config';
+import { resolveOpenRouterAutoRespondModel } from '../openrouter-models';
 import { AiAutoRespondSchema } from '../validation';
 
 interface Deps {
@@ -58,7 +58,7 @@ export function autoRespondRouter({ log, rateLimiter }: Deps): Router {
     };
 
     const apiKey = process.env.OPENROUTER_API_KEY?.trim();
-    const model = process.env.OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_CAMPAIGN_MODEL;
+    const model = resolveOpenRouterAutoRespondModel();
 
     if (!apiKey) {
       throw new AppError(
@@ -91,6 +91,7 @@ export function autoRespondRouter({ log, rateLimiter }: Deps): Router {
           ],
           max_tokens: 1024,
           temperature: 0.65,
+          reasoning: { effort: 'none' },
         }),
         signal: controller.signal,
       });

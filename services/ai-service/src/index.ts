@@ -12,7 +12,11 @@ import { campaignRephraseRouter } from './routes/campaign-rephrase';
 import { autoRespondRouter } from './routes/auto-respond';
 import { AIRateLimiter } from './rate-limiter';
 import { DRAFT_SYSTEM, PROMPT_VERSION } from './prompts';
-import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL, DEFAULT_OPENROUTER_CAMPAIGN_PRESET } from './openrouter-campaign-config';
+import {
+  resolveOpenRouterAutoRespondModel,
+  resolveOpenRouterCampaignModel,
+  resolveOpenRouterChatSummarizeModel,
+} from './openrouter-models';
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || '';
 const isPlaceholder = /your[_\-]?openai|placeholder|your_ope/i.test(OPENAI_API_KEY);
@@ -37,17 +41,24 @@ async function main() {
   }
 
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
-  const envOpenRouterModel = process.env.OPENROUTER_MODEL?.trim();
-  const campaignRephraseModel = envOpenRouterModel || DEFAULT_OPENROUTER_CAMPAIGN_PRESET;
-  const autoRespondModel = envOpenRouterModel || DEFAULT_OPENROUTER_CAMPAIGN_MODEL;
   if (openRouterKey) {
+    const summarizeOr = resolveOpenRouterChatSummarizeModel();
     log.info({
-      message: 'OPENROUTER_API_KEY is set; campaign rephrase and auto-respond endpoints are available',
-      openrouter_campaign_rephrase_model: campaignRephraseModel,
-      openrouter_auto_respond_model: autoRespondModel,
+      message: 'OPENROUTER_API_KEY is set; OpenRouter-backed AI routes are available',
+      openrouter_campaign_rephrase_model: resolveOpenRouterCampaignModel(),
+      openrouter_auto_respond_model: resolveOpenRouterAutoRespondModel(),
+      chat_summarize: summarizeOr
+        ? { provider: 'openrouter', model: summarizeOr }
+        : { provider: 'openai', model: models.summarize },
     });
+    if (process.env.OPENROUTER_MODEL?.trim()) {
+      log.warn({
+        message:
+          'OPENROUTER_MODEL is deprecated; when set it is used only as fallback where OPENROUTER_CAMPAIGN_MODEL, OPENROUTER_AUTO_RESPOND_MODEL, or OPENROUTER_CHAT_SUMMARIZE_MODEL are empty. Prefer per-feature variables.',
+      });
+    }
   } else {
-    log.warn({ message: 'OPENROUTER_API_KEY not set; campaign rephrase will return 503' });
+    log.warn({ message: 'OPENROUTER_API_KEY not set; campaign rephrase and OpenRouter summarize will return 503 when used' });
   }
 
   const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6380');

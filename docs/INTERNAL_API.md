@@ -100,7 +100,7 @@
 | Метод | Путь | Описание |
 |-------|------|----------|
 | POST | `/api/ai/conversations/analyze` | Анализ диалога. Body: `{ messages }`. |
-| POST | `/api/ai/chat/summarize` | Суммаризация. Body: `{ messages }`. |
+| POST | `/api/ai/chat/summarize` | Суммаризация. Body: `{ messages }`. Модель: OpenAI (`AI_MODEL_SUMMARIZE`), если не заданы `OPENROUTER_CHAT_SUMMARIZE_MODEL` и не сработал legacy `OPENROUTER_MODEL`; иначе OpenRouter. |
 
 **Callers:** `messaging-service` (conversations: lead-context, summarize).
 

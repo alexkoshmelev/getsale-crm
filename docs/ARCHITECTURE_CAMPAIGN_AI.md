@@ -8,9 +8,9 @@
 
 ## Почему не `openrouter/free` по умолчанию
 
-Пул `openrouter/free` может отдать **reasoning/thinking** модели. Они часто заполняют `choices[0].message.reasoning` и оставляют `message.content: null`, особенно при ограниченном `max_tokens` → 502 «empty response».
+Пул `openrouter/free` может отдать **reasoning/thinking** модели. Они часто заполняют `choices[0].message.reasoning` и оставляют `message.content: null`, особенно при ограниченном `max_tokens` → 502 «empty response». В запросе к OpenRouter для репрайза передаётся `reasoning: { effort: "none" }`, чтобы по возможности отключить выделение бюджета на reasoning; если всё равно пусто — задайте конкретную не-reasoning модель или пресет (`@preset/...`), не полагайтесь на случайный free-маршрут.
 
-**Дефолт для репрайза кампании:** пресет OpenRouter `@preset/copyright` (константа `DEFAULT_OPENROUTER_CAMPAIGN_PRESET` в ai-service): запрос идёт в Chat Completions с `model: @preset/...` и одним сообщением `user` с текстом кампании; инструкции задаются в пресете в OpenRouter. Переопределение: `OPENROUTER_MODEL`. Другие маршруты ai-service (например auto-respond) при отсутствии `OPENROUTER_MODEL` используют `DEFAULT_OPENROUTER_CAMPAIGN_MODEL` (`openai/gpt-5-mini`).
+**Дефолт для репрайза кампании:** пресет OpenRouter `@preset/copyright` (константа `DEFAULT_OPENROUTER_CAMPAIGN_PRESET` в [`openrouter-models.ts`](../services/ai-service/src/openrouter-models.ts)): запрос идёт в Chat Completions с `model: @preset/...` и одним сообщением `user` с текстом кампании. Переопределение: **`OPENROUTER_CAMPAIGN_MODEL`**. Устаревший **`OPENROUTER_MODEL`** используется только как fallback, если feature-specific переменная пуста. Auto-respond и саммаризация чата задаются отдельно: **`OPENROUTER_AUTO_RESPOND_MODEL`**, **`OPENROUTER_CHAT_SUMMARIZE_MODEL`** (см. `.env.example`).
 
 ## Обогащение контактов и FLOOD_WAIT
 
@@ -20,7 +20,7 @@
 
 | Сервис | Переменные |
 |--------|------------|
-| **ai-service** | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OPENROUTER_MAX_TOKENS`, `OPENROUTER_TIMEOUT_MS` |
+| **ai-service** | `OPENROUTER_API_KEY`, `OPENROUTER_CAMPAIGN_MODEL`, `OPENROUTER_AUTO_RESPOND_MODEL`, `OPENROUTER_CHAT_SUMMARIZE_MODEL` (опционально), устар. `OPENROUTER_MODEL` (fallback), `OPENROUTER_MAX_TOKENS`, `OPENROUTER_TIMEOUT_MS` |
 | **campaign-service** | `AI_SERVICE_URL` (в Docker: `http://ai-service:3005`), HTTP client timeout ≥ времени ответа ai-service |
 
 Локальный `npm run dev` для ai-service: корневой `.env` подхватывается через `src/load-env.ts`.

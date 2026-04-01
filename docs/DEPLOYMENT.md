@@ -126,7 +126,7 @@ TELEGRAM_API_HASH=your_api_hash
 
 Для опции «рандомизация через AI» в кампаниях:
 
-1. **ai-service:** задать `OPENROUTER_API_KEY`. По умолчанию в compose: `OPENROUTER_MODEL=openai/gpt-5-mini`, `OPENROUTER_MAX_TOKENS=2048`, `OPENROUTER_TIMEOUT_MS=55000`. Fallback в коде при пустом ответе — бесплатные instruct Gemma; пул `openrouter/free` как основная модель можно включить явно, но он иногда отдаёт reasoning-модели с пустым `content` — см. [ARCHITECTURE_CAMPAIGN_AI.md](ARCHITECTURE_CAMPAIGN_AI.md).
+1. **ai-service:** задать `OPENROUTER_API_KEY`. Модели — **по фичам**: `OPENROUTER_CAMPAIGN_MODEL`, `OPENROUTER_AUTO_RESPOND_MODEL`, `OPENROUTER_CHAT_SUMMARIZE_MODEL`. В **[docker-compose.server.yml](docker-compose.server.yml)** у `ai-service` заданы дефолты для прода (`@preset/copyright`, `google/gemma-3-27b-it:free` для auto-respond и саммаризации); переопределение — в `.env` на хосте рядом с `docker compose`. Устаревший `OPENROUTER_MODEL` лучше не использовать. `OPENROUTER_MAX_TOKENS`, `OPENROUTER_TIMEOUT_MS` — общие. Пул `openrouter/free` может отдавать reasoning-модели с пустым `content` — см. [ARCHITECTURE_CAMPAIGN_AI.md](ARCHITECTURE_CAMPAIGN_AI.md).
 2. **campaign-service:** `AI_SERVICE_URL` должен указывать на ai-service (в `docker-compose.server.yml` уже `http://ai-service:3005`).
 
 ### Воркер отправок кампаний (campaign-service)

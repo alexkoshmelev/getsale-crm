@@ -3,7 +3,7 @@ import request from 'supertest';
 import { createTestApp } from '@getsale/test-utils';
 import { createLogger } from '@getsale/logger';
 import { campaignRephraseRouter } from './campaign-rephrase';
-import { DEFAULT_OPENROUTER_CAMPAIGN_PRESET } from '../openrouter-campaign-config';
+import { DEFAULT_OPENROUTER_CAMPAIGN_PRESET } from '../openrouter-models';
 
 const TEST_ORG_ID = '11111111-1111-1111-1111-111111111111';
 const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
@@ -24,7 +24,8 @@ describe('Campaign Rephrase Router', () => {
     vi.clearAllMocks();
     process.env = { ...originalEnv };
     process.env.OPENROUTER_API_KEY = 'sk-test-key';
-    process.env.OPENROUTER_MODEL = DEFAULT_OPENROUTER_CAMPAIGN_PRESET;
+    delete process.env.OPENROUTER_MODEL;
+    process.env.OPENROUTER_CAMPAIGN_MODEL = DEFAULT_OPENROUTER_CAMPAIGN_PRESET;
 
     fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -70,8 +71,10 @@ describe('Campaign Rephrase Router', () => {
         max_tokens?: number;
         messages?: { role: string; content: string }[];
         model?: string;
+        reasoning?: { effort?: string };
       };
       expect(sent.model).toBe(DEFAULT_OPENROUTER_CAMPAIGN_PRESET);
+      expect(sent.reasoning).toEqual({ effort: 'none' });
       expect(sent.max_tokens).toBe(expectedMax);
       expect(Array.isArray(sent.messages)).toBe(true);
       expect(sent.messages).toHaveLength(1);

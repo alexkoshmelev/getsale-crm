@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
 import { AIRateLimiter } from '../rate-limiter';
-import { DEFAULT_OPENROUTER_CAMPAIGN_PRESET } from '../openrouter-campaign-config';
+import { DEFAULT_OPENROUTER_CAMPAIGN_PRESET, resolveOpenRouterCampaignModel } from '../openrouter-models';
 import { AiCampaignRephraseSchema, type AiCampaignRephraseInput } from '../validation';
 import { sanitizeCampaignRephraseOutput } from './campaign-rephrase-sanitize';
 
@@ -52,12 +52,17 @@ type OpenRouterChatCompletionData = {
   }>;
 };
 
-/** Preset carries system instructions in OpenRouter; only user message = campaign text to rewrite. */
+/**
+ * Preset carries system instructions in OpenRouter; only user message = campaign text to rewrite.
+ * `reasoning.effort: none` avoids free/reasoning models spending the whole budget on `message.reasoning`
+ * and leaving `message.content` empty (see OpenRouter reasoning-tokens docs).
+ */
 function buildOpenRouterPresetBody(model: string, userText: string, maxTokens: number): Record<string, unknown> {
   return {
     model,
     messages: [{ role: 'user', content: userText }],
     max_tokens: maxTokens,
+    reasoning: { effort: 'none' },
   };
 }
 
@@ -68,7 +73,7 @@ export function campaignRephraseRouter({ log, rateLimiter }: Deps): Router {
     const { organizationId } = req.user;
     const { text } = req.body as AiCampaignRephraseInput;
     const apiKey = process.env.OPENROUTER_API_KEY?.trim();
-    const model = process.env.OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_CAMPAIGN_PRESET;
+    const model = resolveOpenRouterCampaignModel();
 
     if (!apiKey) {
       log.warn({ message: 'Campaign rephrase: OPENROUTER_API_KEY not set in ai-service' });
@@ -122,7 +127,7 @@ export function campaignRephraseRouter({ log, rateLimiter }: Deps): Router {
           hint:
             finishReason === 'length'
               ? 'Raise OPENROUTER_MAX_TOKENS or adjust the preset in OpenRouter.'
-              : `Check preset and OPENROUTER_MODEL (default ${DEFAULT_OPENROUTER_CAMPAIGN_PRESET}).`,
+              : `Check OPENROUTER_CAMPAIGN_MODEL / preset (default ${DEFAULT_OPENROUTER_CAMPAIGN_PRESET}).`,
           model,
           body: data,
         });

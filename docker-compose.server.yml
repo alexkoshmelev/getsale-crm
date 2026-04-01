@@ -13,7 +13,7 @@
 #   crm-service:    INTERNAL_AUTH_SECRET, DATABASE_URL, REDIS_URL, RABBITMQ_URL, BD_ACCOUNTS_SERVICE_URL, CAMPAIGN_SERVICE_URL
 #   messaging:       INTERNAL_AUTH_SECRET, DATABASE_URL, REDIS_URL, RABBITMQ_URL, WEBSOCKET_SERVICE_URL, BD_ACCOUNTS_SERVICE_URL, AI_SERVICE_URL
 #   websocket:       INTERNAL_AUTH_SECRET, JWT_SECRET, REDIS_URL, RABBITMQ_URL, AUTH_SERVICE_URL, CORS_ORIGIN (prod)
-#   ai-service:     INTERNAL_AUTH_SECRET, REDIS_URL, RABBITMQ_URL; OPENAI_API_KEY optional; OPENROUTER_* optional (campaign rephrase: KEY, MODEL, MAX_TOKENS, TIMEOUT_MS)
+#   ai-service:     INTERNAL_AUTH_SECRET, REDIS_URL, RABBITMQ_URL; OPENAI_API_KEY optional; OPENROUTER_API_KEY + per-feature OPENROUTER_*_MODEL optional (see .env.example)
 #   user-service:   INTERNAL_AUTH_SECRET, DATABASE_URL, REDIS_URL, RABBITMQ_URL; STRIPE_* optional
 #   bd-accounts:    INTERNAL_AUTH_SECRET, SESSION_ENCRYPTION_KEY, TELEGRAM_API_ID, TELEGRAM_API_HASH, MESSAGING_SERVICE_URL (uses env_file)
 #   pipeline, automation, analytics, activity, team, campaign: INTERNAL_AUTH_SECRET, DATABASE_URL, REDIS_URL (if used), RABBITMQ_URL; *_SERVICE_URL as needed (campaign needs AI_SERVICE_URL for AI rephrase)
@@ -250,8 +250,14 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - RABBITMQ_URL=amqp://getsale:${RABBITMQ_PASSWORD:-set_me_in_env}@rabbitmq:5672
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # OPENROUTER_API_KEY обязателен для репрайза кампаний и любых маршрутов через OpenRouter.
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-openai/gpt-5-mini}
+      # Модели по фичам (переопределяются в .env на хосте). Не используйте один OPENROUTER_MODEL для всего — см. .env.example.
+      - OPENROUTER_CAMPAIGN_MODEL=${OPENROUTER_CAMPAIGN_MODEL:-@preset/copyright}
+      - OPENROUTER_AUTO_RESPOND_MODEL=${OPENROUTER_AUTO_RESPOND_MODEL:-google/gemma-3-27b-it:free}
+      - OPENROUTER_CHAT_SUMMARIZE_MODEL=${OPENROUTER_CHAT_SUMMARIZE_MODEL:-google/gemma-3-27b-it:free}
+      # Устаревший fallback; оставьте пустым, если заданы переменные выше.
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-}
       - OPENROUTER_MAX_TOKENS=${OPENROUTER_MAX_TOKENS:-2048}
       - OPENROUTER_TIMEOUT_MS=${OPENROUTER_TIMEOUT_MS:-55000}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET}
