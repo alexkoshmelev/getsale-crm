@@ -15,15 +15,15 @@ export function clientsRouter({ pool }: Deps): Router {
 
   router.post('/assign', validate(TmAssignClientSchema), asyncHandler(async (req, res) => {
     const user = req.user;
-    const { teamId, clientId, assignedTo } = req.body;
+    const { clientId, assignedTo } = req.body;
 
     const result = await pool.query(
-      `INSERT INTO team_client_assignments (team_id, client_id, assigned_to)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (team_id, client_id) 
-       DO UPDATE SET assigned_to = EXCLUDED.assigned_to, assigned_at = NOW()
+      `INSERT INTO organization_client_assignments (organization_id, client_id, assigned_to, assigned_by)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (organization_id, client_id)
+       DO UPDATE SET assigned_to = EXCLUDED.assigned_to, assigned_at = NOW(), assigned_by = EXCLUDED.assigned_by
        RETURNING *`,
-      [teamId, clientId, assignedTo]
+      [user.organizationId, clientId, assignedTo, user.id]
     );
 
     res.json(result.rows[0]);
@@ -31,25 +31,15 @@ export function clientsRouter({ pool }: Deps): Router {
 
   router.get('/shared', asyncHandler(async (req, res) => {
     const user = req.user;
-    const { teamId } = req.query;
 
-    let query = `
-      SELECT DISTINCT c.*, tca.assigned_to, tca.assigned_at
+    const query = `
+      SELECT DISTINCT c.*, oca.assigned_to, oca.assigned_at
       FROM contacts c
-      JOIN team_client_assignments tca ON c.id = tca.client_id
-      JOIN teams t ON tca.team_id = t.id
-      WHERE t.organization_id = $1
+      JOIN organization_client_assignments oca ON c.id = oca.client_id AND oca.organization_id = $1
+      ORDER BY oca.assigned_at DESC
     `;
-    const params: unknown[] = [user.organizationId];
 
-    if (teamId) {
-      params.push(teamId);
-      query += ` AND t.id = $${params.length}`;
-    }
-
-    query += ' ORDER BY tca.assigned_at DESC';
-
-    const result = await pool.query(query, params);
+    const result = await pool.query(query, [user.organizationId]);
     res.json(result.rows);
   }));
 

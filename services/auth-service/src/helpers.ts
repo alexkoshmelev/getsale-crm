@@ -133,3 +133,21 @@ export async function resolveRole(pool: Pool, userId: string, organizationId: st
   );
   return memberRow.rows[0]?.role ?? '';
 }
+
+/**
+ * Role for access-token JWT: prefer `organization_members` (workspace truth), fallback to `users.role`.
+ * Keeps JWT aligned with team/org role changes; `users.role` is legacy primary-org mirror.
+ */
+export async function getRoleForWorkspace(
+  pool: Pool,
+  userId: string,
+  organizationId: string,
+  userTableRole: string
+): Promise<string> {
+  const memberRow = await pool.query(
+    'SELECT role FROM organization_members WHERE user_id = $1 AND organization_id = $2',
+    [userId, organizationId]
+  );
+  const r = memberRow.rows[0]?.role;
+  return r != null && String(r).trim() !== '' ? String(r) : userTableRole;
+}

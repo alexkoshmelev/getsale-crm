@@ -67,15 +67,12 @@ describe('Auth Router', () => {
     it('returns 200 and sets auth cookies on successful signup', async () => {
       const org = { id: TEST_ORG_ID, name: 'Test Org' };
       const user = { id: TEST_USER_ID, email: 'new@example.com', organization_id: TEST_ORG_ID, role: 'owner' };
-      const team = { id: '33333333-3333-3333-3333-333333333333' };
 
       pool.query
         .mockResolvedValueOnce(undefined) // BEGIN
         .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // SELECT slug
         .mockResolvedValueOnce({ rows: [org], rowCount: 1 }) // INSERT organizations
         .mockResolvedValueOnce({ rows: [user], rowCount: 1 }) // INSERT users
-        .mockResolvedValueOnce({ rows: [team], rowCount: 1 }) // INSERT teams
-        .mockResolvedValueOnce(undefined) // INSERT team_members
         .mockResolvedValueOnce(undefined) // INSERT organization_members
         .mockResolvedValueOnce(undefined) // COMMIT
         .mockResolvedValueOnce(undefined); // INSERT refresh_tokens
@@ -119,6 +116,7 @@ describe('Auth Router', () => {
       };
       pool.query
         .mockResolvedValueOnce({ rows: [user], rowCount: 1 }) // SELECT users
+        .mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 }) // organization_members role
         .mockResolvedValueOnce(undefined); // INSERT refresh_tokens
 
       const res = await request(app)
@@ -314,7 +312,8 @@ describe('Auth Router', () => {
           rows: [{ id: 'rt1', user_id: TEST_USER_ID, expires_at: futureExpiry }],
           rowCount: 1,
         })
-        .mockResolvedValueOnce({ rows: [user], rowCount: 1 });
+        .mockResolvedValueOnce({ rows: [user], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 }); // organization_members role
 
       const res = await request(app)
         .post('/api/auth/refresh')

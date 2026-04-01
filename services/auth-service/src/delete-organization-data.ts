@@ -68,11 +68,7 @@ export async function deleteOrganizationData(client: PoolClient, organizationId:
   // subscriptions: one row per user — caller should reassign organization_id before delete if needed
   await client.query(`DELETE FROM user_profiles WHERE organization_id = $1`, [o]);
 
-  // Teams
-  await client.query(`DELETE FROM team_invitations WHERE team_id IN (SELECT id FROM teams WHERE organization_id = $1)`, [o]);
-  await client.query(`DELETE FROM team_client_assignments WHERE team_id IN (SELECT id FROM teams WHERE organization_id = $1)`, [o]);
-  await client.query(`DELETE FROM team_members WHERE team_id IN (SELECT id FROM teams WHERE organization_id = $1)`, [o]);
-  await client.query(`DELETE FROM teams WHERE organization_id = $1`, [o]);
+  await client.query(`DELETE FROM organization_client_assignments WHERE organization_id = $1`, [o]);
 
   await client.query(`DELETE FROM audit_logs WHERE organization_id = $1`, [o]);
   await client.query(`DELETE FROM organization_invite_links WHERE organization_id = $1`, [o]);

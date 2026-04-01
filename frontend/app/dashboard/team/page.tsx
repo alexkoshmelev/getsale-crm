@@ -14,13 +14,12 @@ import { apiClient } from '@/lib/api/client';
 import { reportError } from '@/lib/error-reporter';
 
 interface TeamMember {
-  id?: string;
   user_id: string;
   userId?: string;
-  team_member_id?: string;
   role: string;
-  team_name?: string;
   email?: string;
+  member_status?: string;
+  joined_at?: string;
 }
 
 interface InviteLinkItem {
@@ -30,14 +29,6 @@ interface InviteLinkItem {
   expiresAt: string;
   createdAt: string;
   expired: boolean;
-}
-
-interface PendingInvitation {
-  id: string;
-  email: string;
-  role: string;
-  expiresAt: string;
-  teamName?: string;
 }
 
 const UNIFIED_ROLES: { value: string; labelKey: string }[] = [
@@ -64,9 +55,6 @@ export default function TeamPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
   const [updatingRoleId, setUpdatingRoleId] = useState<string | null>(null);
-  const [pendingInvitations, setPendingInvitations] = useState<PendingInvitation[]>([]);
-  const [pendingInvitationsLoading, setPendingInvitationsLoading] = useState(true);
-  const [revokingInvitationId, setRevokingInvitationId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchMembers();
@@ -75,23 +63,6 @@ export default function TeamPage() {
   useEffect(() => {
     fetchInviteLinks();
   }, []);
-
-  useEffect(() => {
-    fetchPendingInvitations();
-  }, []);
-
-  const fetchPendingInvitations = async () => {
-    setPendingInvitationsLoading(true);
-    try {
-      const response = await apiClient.get('/api/team/invitations');
-      setPendingInvitations(Array.isArray(response.data) ? response.data : []);
-    } catch (error) {
-      reportError(error, { component: 'TeamPage', action: 'fetchPendingInvitations' });
-      setPendingInvitations([]);
-    } finally {
-      setPendingInvitationsLoading(false);
-    }
-  };
 
   const fetchInviteLinks = async () => {
     setInviteLinksLoading(true);
@@ -134,13 +105,11 @@ export default function TeamPage() {
       await apiClient.post('/api/team/members/invite', {
         email: inviteEmail,
         role: inviteRole,
-        teamId: 'default',
       });
       setShowInviteModal(false);
       setInviteEmail('');
       setInviteRole('bidi');
       fetchMembers();
-      fetchPendingInvitations();
     } catch (error) {
       reportError(error, { component: 'TeamPage', action: 'inviteMember' });
     } finally {
@@ -187,20 +156,8 @@ export default function TeamPage() {
     }
   };
 
-  const handleRevokeInvitation = async (id: string) => {
-    setRevokingInvitationId(id);
-    try {
-      await apiClient.delete(`/api/team/invitations/${id}`);
-      setPendingInvitations((prev) => prev.filter((inv) => inv.id !== id));
-    } catch (error) {
-      reportError(error, { component: 'TeamPage', action: 'revokeInvitation' });
-    } finally {
-      setRevokingInvitationId(null);
-    }
-  };
-
   const handleMemberRoleChange = async (member: TeamMember, newRole: string) => {
-    const id = member.user_id ?? member.userId ?? member.team_member_id;
+    const id = member.user_id ?? member.userId;
     if (!id) return;
     setUpdatingRoleId(id);
     try {
@@ -248,7 +205,7 @@ export default function TeamPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {members.map((member, index) => (
               <div
-                key={member.team_member_id ?? member.user_id ?? `member-${index}`}
+                key={member.user_id ?? `member-${index}`}
                 className="p-4 rounded-xl border border-border hover:shadow-soft transition-shadow"
               >
                 <div className="flex items-center gap-3 mb-3">
@@ -259,12 +216,12 @@ export default function TeamPage() {
                     <p className="font-medium text-foreground truncate">
                       {member.email || `User ${member.user_id?.slice(0, 8)}`}
                     </p>
-                    {(member.team_member_id || member.user_id) ? (
+                    {member.user_id ? (
                       canChangeRoles ? (
                         <select
                           value={['owner', 'admin', 'supervisor', 'bidi', 'viewer'].includes(member.role) ? member.role : 'bidi'}
                           onChange={(e) => handleMemberRoleChange(member, e.target.value)}
-                          disabled={updatingRoleId === (member.team_member_id ?? member.user_id)}
+                          disabled={updatingRoleId === member.user_id}
                           className="mt-1 text-sm border border-input rounded px-2 py-1 bg-background text-foreground"
                         >
                           {UNIFIED_ROLES.map((r) => (
@@ -279,9 +236,6 @@ export default function TeamPage() {
                     )}
                   </div>
                 </div>
-                {member.team_name && (
-                  <p className="text-xs text-muted-foreground">{t('team.teamName')}: {member.team_name}</p>
-                )}
               </div>
             ))}
           </div>
@@ -299,58 +253,6 @@ export default function TeamPage() {
           />
         )}
       </Card>
-
-      {(pendingInvitationsLoading || pendingInvitations.length > 0) && (
-        <Card className="p-6">
-          <div className="flex items-center gap-2 mb-2">
-            <UserPlus className="w-5 h-5 text-muted-foreground shrink-0" />
-            <h2 className="font-heading text-lg font-semibold text-foreground tracking-tight">
-              {t('team.pendingInvitations')}
-            </h2>
-          </div>
-          <p className="text-sm text-muted-foreground mb-4">{t('team.pendingInvitationsHint')}</p>
-          {pendingInvitationsLoading ? (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <span>…</span>
-            </div>
-          ) : pendingInvitations.length > 0 ? (
-            <ul className="space-y-2">
-              {pendingInvitations.map((inv) => (
-                <li
-                  key={inv.id}
-                  className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-lg border border-border bg-muted/20"
-                >
-                  <div>
-                    <span className="font-medium text-foreground">{inv.email}</span>
-                    <span className="text-sm text-muted-foreground ml-2">
-                      {t(UNIFIED_ROLES.find((r) => r.value === inv.role)?.labelKey ?? 'team.roleAgent')}
-                      {inv.teamName && ` · ${inv.teamName}`}
-                    </span>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="text-destructive hover:bg-destructive/10"
-                    onClick={() => handleRevokeInvitation(inv.id)}
-                    disabled={revokingInvitationId === inv.id}
-                  >
-                    {revokingInvitationId === inv.id ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <>
-                        <Trash2 className="w-3.5 h-3.5 mr-1" />
-                        {t('team.revokeInvitation')}
-                      </>
-                    )}
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </Card>
-      )}
 
       <Card className="p-6">
         <div className="flex items-center gap-2 mb-2">

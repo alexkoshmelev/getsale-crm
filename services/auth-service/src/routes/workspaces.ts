@@ -81,17 +81,6 @@ export function workspacesRouter({ pool, rabbitmq, log }: Deps): Router {
         [user.id, organizationId, UserRole.OWNER]
       );
 
-      const teamResult = await client.query(
-        'INSERT INTO teams (organization_id, name, created_by) VALUES ($1, $2, $3) RETURNING id',
-        [organizationId, orgName, user.id]
-      );
-      await client.query('INSERT INTO team_members (team_id, user_id, role, invited_by) VALUES ($1, $2, $3, $4)', [
-        teamResult.rows[0].id,
-        user.id,
-        'admin',
-        user.id,
-      ]);
-
       await client.query('UPDATE users SET organization_id = $1, role = $2 WHERE id = $3', [
         organizationId,
         UserRole.OWNER,

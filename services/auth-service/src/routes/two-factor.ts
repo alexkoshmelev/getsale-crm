@@ -19,6 +19,7 @@ import {
   hashRefreshToken,
   verifyTempToken,
   getClientIp,
+  getRoleForWorkspace,
 } from '../helpers';
 import { AUTH_COOKIE_ACCESS, REFRESH_EXPIRY_MS } from '../cookies';
 import { checkRateLimit, setAuthCookiesAndRespond } from './auth';
@@ -225,10 +226,11 @@ export function twoFactorRouter({ pool, log, redis }: Deps): Router {
       throw new AppError(401, 'Invalid verification code', ErrorCodes.UNAUTHORIZED);
     }
 
+    const role = await getRoleForWorkspace(pool, user.id, user.organization_id, user.role);
     const accessToken = signAccessToken({
       userId: user.id,
       organizationId: user.organization_id,
-      role: user.role,
+      role,
     });
     const refreshToken = signRefreshToken(user.id);
     const tokenHash = hashRefreshToken(refreshToken);
@@ -255,7 +257,7 @@ export function twoFactorRouter({ pool, log, redis }: Deps): Router {
       id: user.id,
       email: user.email,
       organizationId: user.organization_id,
-      role: user.role,
+      role,
     });
   }));
 

@@ -2,8 +2,8 @@ import { Router } from 'express';
 import { Pool } from 'pg';
 import { randomBytes } from 'crypto';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, canPermission, requireUser, AppError, ErrorCodes, validate } from '@getsale/service-core';
-import { auditLog, getClientIp, normalizeRole, getRoleLevel } from '../helpers';
+import { asyncHandler, canPermission, requireUser, validate, AppError, ErrorCodes } from '@getsale/service-core';
+import { normalizeRole, getRoleLevel } from '../helpers';
 import { TmCreateInviteLinkSchema } from '../validation';
 
 interface Deps {
@@ -11,52 +11,16 @@ interface Deps {
   log: Logger;
 }
 
-export function invitesRouter({ pool }: Deps): Router {
+/** Legacy email invitations (team_invitations) removed; use workspace invite links only. */
+export function invitesRouter(_deps: Deps): Router {
   const router = Router();
   router.use(requireUser());
-  const checkPermission = canPermission(pool);
 
-  router.get('/', asyncHandler(async (req, res) => {
-    const user = req.user;
-    const result = await pool.query(
-      `SELECT ti.id, ti.email, ti.role, ti.expires_at AS "expiresAt", ti.created_at AS "createdAt", t.name AS "teamName"
-       FROM team_invitations ti
-       JOIN teams t ON t.id = ti.team_id
-       WHERE t.organization_id = $1 AND ti.accepted_at IS NULL AND ti.expires_at > NOW()
-       ORDER BY ti.created_at DESC`,
-      [user.organizationId]
-    );
-    res.json(result.rows);
+  router.get('/', asyncHandler(async (_req, res) => {
+    res.json([]);
   }));
 
-  router.delete('/:id', asyncHandler(async (req, res) => {
-    const user = req.user;
-    const allowed = await checkPermission(user.role, 'invitations', 'delete');
-    if (!allowed) {
-      throw new AppError(403, 'Only owner or admin can revoke invitations', ErrorCodes.FORBIDDEN);
-    }
-
-    const { id } = req.params;
-    const result = await pool.query(
-      `DELETE FROM team_invitations ti
-       USING teams t
-       WHERE ti.id = $1 AND ti.team_id = t.id AND t.organization_id = $2
-       RETURNING ti.id, ti.email, ti.role`,
-      [id, user.organizationId]
-    );
-    if (result.rowCount === 0) {
-      throw new AppError(404, 'Invitation not found', ErrorCodes.NOT_FOUND);
-    }
-    const row = result.rows[0] as { email: string; role: string };
-    await auditLog(pool, {
-      organizationId: user.organizationId,
-      userId: user.id,
-      action: 'team.invitation_revoked',
-      resourceType: 'invitation',
-      resourceId: id,
-      oldValue: { email: row?.email, role: row?.role },
-      ip: getClientIp(req),
-    });
+  router.delete('/:id', asyncHandler(async (_req, res) => {
     res.status(204).send();
   }));
 

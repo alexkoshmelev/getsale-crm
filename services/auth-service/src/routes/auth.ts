@@ -19,6 +19,7 @@ import {
 import {
   signAccessToken, signRefreshToken, signWsToken, verifyAccessToken, verifyRefreshToken, hashRefreshToken,
   signTempToken,
+  getRoleForWorkspace,
 } from '../helpers';
 import {
   AUTH_COOKIE_ACCESS,
@@ -180,12 +181,6 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
         );
         user = userResult.rows[0];
 
-        const teamResult = await client.query(
-          'INSERT INTO teams (organization_id, name, created_by) VALUES ($1, $2, $3) RETURNING *',
-          [organization.id, organization.name, user.id]
-        );
-        await client.query('INSERT INTO team_members (team_id, user_id, role, invited_by) VALUES ($1, $2, $3, $4)',
-          [teamResult.rows[0].id, user.id, 'admin', user.id]);
         await client.query('INSERT INTO organization_members (user_id, organization_id, role) VALUES ($1, $2, $3)',
           [user.id, organization.id, user.role]);
       }
@@ -271,7 +266,8 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
       return;
     }
 
-    const accessToken = signAccessToken({ userId: user.id, organizationId: user.organization_id, role: user.role });
+    const role = await getRoleForWorkspace(pool, user.id, user.organization_id, user.role);
+    const accessToken = signAccessToken({ userId: user.id, organizationId: user.organization_id, role });
     const refreshToken = signRefreshToken(user.id);
     const tokenHash = hashRefreshToken(refreshToken);
     const familyId = randomUUID();
@@ -294,7 +290,7 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
     log.info({ message: 'User signed in', entity_type: 'user', entity_id: user.id });
 
     setAuthCookiesAndRespond(res, accessToken, refreshToken, {
-      id: user.id, email: user.email, organizationId: user.organization_id, role: user.role,
+      id: user.id, email: user.email, organizationId: user.organization_id, role,
     });
   }));
 
@@ -408,7 +404,8 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
       const userResult = await pool.query('SELECT id, organization_id, role FROM users WHERE id = $1', [decoded.userId]);
       if (userResult.rows.length === 0) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
       const u = userResult.rows[0];
-      payload = { userId: u.id, organizationId: u.organization_id, role: u.role ?? '' };
+      const wsRole = await getRoleForWorkspace(pool, u.id, u.organization_id, u.role ?? '');
+      payload = { userId: u.id, organizationId: u.organization_id, role: wsRole };
     }
 
     const token = signWsToken(payload);
@@ -475,7 +472,8 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
     const user = userResult.rows[0];
     const newRefreshToken = signRefreshToken(user.id);
     const newTokenHash = hashRefreshToken(newRefreshToken);
-    const accessToken = signAccessToken({ userId: user.id, organizationId: user.organization_id, role: user.role });
+    const role = await getRoleForWorkspace(pool, user.id, user.organization_id, user.role);
+    const accessToken = signAccessToken({ userId: user.id, organizationId: user.organization_id, role });
 
     const client = await pool.connect();
     try {
@@ -496,7 +494,7 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
     res.cookie(AUTH_COOKIE_ACCESS, accessToken, { ...AUTH_COOKIE_OPTS, maxAge: ACCESS_MAX_AGE_SEC * 1000 });
     res.cookie(AUTH_COOKIE_REFRESH, newRefreshToken, { ...AUTH_COOKIE_OPTS, maxAge: REFRESH_MAX_AGE_SEC * 1000 });
     res.json({
-      user: { id: user.id, email: user.email, organizationId: user.organization_id, role: user.role },
+      user: { id: user.id, email: user.email, organizationId: user.organization_id, role },
     });
   }));
 
