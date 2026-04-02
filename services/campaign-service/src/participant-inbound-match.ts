@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import type { Logger } from '@getsale/logger';
 
 /** Row shape used by campaign MESSAGE_RECEIVED handler. */
 export type InboundParticipantRow = {
@@ -133,22 +134,59 @@ export async function reconcileParticipantChannelIds(
   }
 }
 
-/** Point participant at canonical event contact and channel after alias match. */
+/**
+ * Point participant at canonical event contact and channel after alias match.
+ *
+ * Runs before reply/sent checks in MESSAGE_RECEIVED so identity aligns for later sends.
+ * If another row in the same campaign already has `eventContactId`, merge is skipped
+ * (avoids unique violation on `(campaign_id, contact_id)`).
+ */
 export async function mergeParticipantToEventContact(
   pool: Pool,
   rows: InboundParticipantRow[],
   eventContactId: string,
-  channelId: string | null
+  channelId: string | null,
+  log?: Pick<Logger, 'warn'>
 ): Promise<void> {
   for (const row of rows) {
-    await pool.query(
-      `UPDATE campaign_participants
-       SET contact_id = $1::uuid,
-           channel_id = COALESCE($2, channel_id),
-           updated_at = NOW()
-       WHERE id = $3`,
-      [eventContactId, channelId, row.id]
+    const dup = await pool.query(
+      `SELECT 1 FROM campaign_participants
+       WHERE campaign_id = $1 AND contact_id = $2::uuid AND id <> $3
+       LIMIT 1`,
+      [row.campaign_id, eventContactId, row.id]
     );
+    if (dup.rows.length > 0) {
+      log?.warn({
+        message: 'mergeParticipantToEventContact skipped: target contact already a participant in this campaign',
+        participantId: row.id,
+        campaignId: row.campaign_id,
+        eventContactId,
+      });
+      continue;
+    }
+
+    try {
+      await pool.query(
+        `UPDATE campaign_participants
+         SET contact_id = $1::uuid,
+             channel_id = COALESCE($2, channel_id),
+             updated_at = NOW()
+         WHERE id = $3`,
+        [eventContactId, channelId, row.id]
+      );
+    } catch (e: unknown) {
+      const code = e && typeof e === 'object' && 'code' in e ? (e as { code?: string }).code : undefined;
+      if (code === '23505') {
+        log?.warn({
+          message: 'mergeParticipantToEventContact: unique violation (concurrent merge), skipped',
+          participantId: row.id,
+          campaignId: row.campaign_id,
+          eventContactId,
+        });
+        continue;
+      }
+      throw e;
+    }
     if (channelId) row.channel_id = channelId;
   }
 }

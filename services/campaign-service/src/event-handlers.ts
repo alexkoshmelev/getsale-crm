@@ -176,7 +176,7 @@ async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
   });
 
   if (matchedViaIdentityAlias && participantRows.length > 0) {
-    await mergeParticipantToEventContact(pool, participantRows, contactId, channelId);
+    await mergeParticipantToEventContact(pool, participantRows, contactId, channelId, log);
     log.info({
       message: 'MESSAGE_RECEIVED: matched participant via telegram_id/username alias; contact_id merged to event contact',
       contactId,
