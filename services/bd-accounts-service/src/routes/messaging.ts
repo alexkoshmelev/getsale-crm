@@ -137,6 +137,18 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     const usernameHintNorm =
       typeof usernameHint === 'string' && usernameHint.trim() ? usernameHint.trim().replace(/^@/, '') : '';
 
+    const bdHttpT0 = Date.now();
+    const correlationId = req.correlationId;
+    const chatIdTrim = String(chatId).trim();
+    const chatIdSuffix = chatIdTrim.length <= 6 ? chatIdTrim : chatIdTrim.slice(-6);
+    log.info({
+      message: 'bd_send_http_enter',
+      correlation_id: correlationId,
+      account_id: id,
+      chat_id_suffix: chatIdSuffix,
+      has_file: !!(fileBase64 && typeof fileBase64 === 'string'),
+    });
+
     const account = await getAccountOr404<{ id: string; is_demo?: boolean }>(pool, id, organizationId, 'id, is_demo');
     if (account.is_demo) {
       throw new AppError(403, 'Sending messages is disabled for demo accounts. Connect a real Telegram account to send messages.', ErrorCodes.FORBIDDEN);
@@ -147,20 +159,46 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
       throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
     }
 
+    log.info({
+      message: 'bd_send_prechecks',
+      correlation_id: correlationId,
+      account_id: id,
+      elapsed_ms: Date.now() - bdHttpT0,
+    });
+
     const sendToPeer = async (peer: string): Promise<{ id: unknown; date?: unknown; peerId?: unknown }> => {
-      if (fileBase64 && typeof fileBase64 === 'string') {
-        const buf = Buffer.from(fileBase64, 'base64');
-        if (buf.length > MAX_FILE_SIZE_BYTES) {
-          throw new AppError(413, 'Maximum file size is 2 GB', ErrorCodes.VALIDATION);
+      log.info({
+        message: 'bd_send_telegram_invoke_start',
+        correlation_id: correlationId,
+        account_id: id,
+      });
+      const invokeT0 = Date.now();
+      try {
+        if (fileBase64 && typeof fileBase64 === 'string') {
+          const buf = Buffer.from(fileBase64, 'base64');
+          if (buf.length > MAX_FILE_SIZE_BYTES) {
+            throw new AppError(413, 'Maximum file size is 2 GB', ErrorCodes.VALIDATION);
+          }
+          return await telegramManager.sendFile(id, peer, buf, {
+            caption: typeof text === 'string' ? text : '',
+            filename: typeof fileName === 'string' ? fileName.trim() || 'file' : 'file',
+            replyTo: replyToMessageId != null ? Number(replyToMessageId) : undefined,
+            traceId: correlationId,
+          });
         }
-        return telegramManager.sendFile(id, peer, buf, {
-          caption: typeof text === 'string' ? text : '',
-          filename: typeof fileName === 'string' ? fileName.trim() || 'file' : 'file',
-          replyTo: replyToMessageId != null ? Number(replyToMessageId) : undefined,
+        const replyTo = replyToMessageId != null && String(replyToMessageId).trim() ? Number(replyToMessageId) : undefined;
+        return await telegramManager.sendMessage(id, peer, typeof text === 'string' ? text : '', {
+          replyTo,
+          traceId: correlationId,
+        });
+      } finally {
+        log.info({
+          message: 'bd_send_telegram_invoke_done',
+          correlation_id: correlationId,
+          account_id: id,
+          duration_ms: Date.now() - invokeT0,
         });
       }
-      const replyTo = replyToMessageId != null && String(replyToMessageId).trim() ? Number(replyToMessageId) : undefined;
-      return telegramManager.sendMessage(id, peer, typeof text === 'string' ? text : '', { replyTo });
     };
 
     const mapSendError = async (sendErr: unknown, peerForLog: string): Promise<never> => {
@@ -268,6 +306,7 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
 
     const chatIdStr = usedPeerForSync;
     let resolvedChatId: string = chatIdStr;
+    const afterTelegramInvoke = Date.now();
     if (chatIdStr) {
       const peerType = peerTypeFromChatId(chatIdStr);
       await pool.query(
@@ -280,6 +319,13 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
       await mergeOutboundSendSyncRow(pool, id, chatIdStr, canonical);
       resolvedChatId = canonical || chatIdStr;
     }
+
+    log.info({
+      message: 'bd_send_post_sync_db',
+      correlation_id: correlationId,
+      account_id: id,
+      elapsed_ms: Date.now() - afterTelegramInvoke,
+    });
 
     const serialized = serializeMessage(message);
     const payload: Record<string, unknown> = {

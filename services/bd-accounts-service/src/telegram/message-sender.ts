@@ -102,8 +102,9 @@ export class MessageSender {
     accountId: string,
     chatId: string,
     text: string,
-    opts: { replyTo?: number } = {}
+    opts: { replyTo?: number; traceId?: string } = {}
   ): Promise<Api.Message> {
+    const correlationId = opts.traceId;
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo || !clientInfo.isConnected) {
       throw new Error(`Account ${accountId} is not connected`);
@@ -125,6 +126,15 @@ export class MessageSender {
     };
 
     const trySend = async (peer: Api.TypeInputPeer | number | string): Promise<Api.Message> => {
+      if (correlationId) {
+        this.log.info({
+          message: 'send_gramjs_send_message_start',
+          correlation_id: correlationId,
+          accountId,
+          chatId: effectiveChatId,
+        });
+      }
+      const gramjsT0 = Date.now();
       const message = await telegramInvokeWithFloodRetry(
         this.log,
         accountId,
@@ -132,6 +142,15 @@ export class MessageSender {
         () => client.sendMessage(peer, params),
         { pool: this.pool }
       );
+      if (correlationId) {
+        this.log.info({
+          message: 'send_gramjs_send_message_ms',
+          correlation_id: correlationId,
+          duration_ms: Date.now() - gramjsT0,
+          accountId,
+          chatId: effectiveChatId,
+        });
+      }
       clientInfo.lastActivity = new Date();
       await this.pool.query(
         'UPDATE bd_accounts SET last_activity = NOW() WHERE id = $1',
@@ -141,12 +160,31 @@ export class MessageSender {
     };
 
     try {
+      const tResolvePeer = Date.now();
       let peer: Api.TypeInputPeer | number | string = await this.resolvePeer(accountId, effectiveChatId);
+      if (correlationId) {
+        this.log.info({
+          message: 'send_resolve_peer_row_ms',
+          correlation_id: correlationId,
+          elapsed_ms: Date.now() - tResolvePeer,
+          accountId,
+          chatId: effectiveChatId,
+        });
+      }
 
       // Important: for numeric user ids we often don't have access_hash in GramJS session cache.
       // Telegram client resolves access_hash server-side; we mimic that by resolving the entity first.
       if (typeof peer === 'number') {
         try {
+          if (correlationId) {
+            this.log.info({
+              message: 'send_resolve_entity_start',
+              correlation_id: correlationId,
+              accountId,
+              chatId: effectiveChatId,
+              kind: 'numeric_peer',
+            });
+          }
           const entity = await client.getEntity(peer);
           peer = await client.getInputEntity(entity as any);
         } catch {
@@ -163,6 +201,15 @@ export class MessageSender {
           }
           return trySend(cached);
         }
+        if (correlationId) {
+          this.log.info({
+            message: 'send_resolve_entity_start',
+            correlation_id: correlationId,
+            accountId,
+            chatId: effectiveChatId,
+            kind: 'username',
+          });
+        }
         const resolved = await resolveUsernameToInputPeer(client, peer, { log: this.log, accountId });
         if (resolved) {
           this.setCachedUsernamePeer(accountId, peer, resolved);
@@ -177,6 +224,15 @@ export class MessageSender {
       }
 
       if (typeof peer === 'string' && peer.length > 0 && Number.isNaN(Number(peer))) {
+        if (correlationId) {
+          this.log.info({
+            message: 'send_resolve_entity_start',
+            correlation_id: correlationId,
+            accountId,
+            chatId: effectiveChatId,
+            kind: 'string_entity',
+          });
+        }
         peer = await client.getInputEntity(peer);
       }
       return trySend(peer);
@@ -191,11 +247,40 @@ export class MessageSender {
       // Prime dialog cache (e.g. new shared chat or numeric user id never seen); retry send.
       if (isEntityNotFound) {
         try {
+          const dg0 = Date.now();
+          if (correlationId) {
+            this.log.info({
+              message: 'send_cache_prime_get_dialogs_start',
+              correlation_id: correlationId,
+              accountId,
+              chatId: effectiveChatId,
+            });
+          }
           await client.getDialogs({ limit: 100 });
+          if (correlationId) {
+            this.log.info({
+              message: 'send_cache_prime_get_dialogs_ms',
+              correlation_id: correlationId,
+              duration_ms: Date.now() - dg0,
+              accountId,
+              chatId: effectiveChatId,
+            });
+          }
           if (SEND_DELAY_AFTER_RESOLVE_MS > 0) {
             await new Promise((r) => setTimeout(r, SEND_DELAY_AFTER_RESOLVE_MS));
           }
+          const tRetryPeer = Date.now();
           let peerRetry: Api.TypeInputPeer | number | string = await this.resolvePeer(accountId, effectiveChatId);
+          if (correlationId) {
+            this.log.info({
+              message: 'send_resolve_peer_row_ms',
+              correlation_id: correlationId,
+              elapsed_ms: Date.now() - tRetryPeer,
+              accountId,
+              chatId: effectiveChatId,
+              phase: 'after_dialogs',
+            });
+          }
 
           if (typeof peerRetry === 'number') {
             try {

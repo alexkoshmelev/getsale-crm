@@ -300,6 +300,14 @@ async function sendMessageWithRetry(
   let notConnectedRetries = 0;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
+      const traceId = randomUUID();
+      log.info({
+        message: 'Campaign send attempt',
+        trace_id: traceId,
+        attempt,
+        bd_account_id: payload.bdAccountId,
+        idempotency_key_prefix: payload.idempotencyKey.slice(0, 48),
+      });
       return await messagingClient.post<{ id?: string; channel_id?: string }>('/api/messaging/send', {
         contactId: payload.contactId,
         channel: 'telegram',
@@ -308,7 +316,11 @@ async function sendMessageWithRetry(
         bdAccountId: payload.bdAccountId,
         source: 'campaign',
         idempotencyKey: payload.idempotencyKey,
-      }, undefined, { userId: headers.userId, organizationId: headers.organizationId });
+      }, undefined, {
+        userId: headers.userId,
+        organizationId: headers.organizationId,
+        correlationId: traceId,
+      });
     } catch (err) {
       lastErr = err;
       if (err instanceof ServiceCallError && err.statusCode === 429) {

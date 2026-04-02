@@ -89,8 +89,9 @@ export class FileHandler {
     accountId: string,
     chatId: string,
     fileBuffer: Buffer,
-    opts: { caption?: string; filename?: string; replyTo?: number } = {}
+    opts: { caption?: string; filename?: string; replyTo?: number; traceId?: string } = {}
   ): Promise<Api.Message> {
+    const correlationId = opts.traceId;
     const clientInfo = this.clients.get(accountId);
     if (!clientInfo || !clientInfo.isConnected) {
       throw new Error(`Account ${accountId} is not connected`);
@@ -100,8 +101,28 @@ export class FileHandler {
         name: opts.filename || 'file',
       });
       const client = clientInfo.client as any;
+      const tPeer0 = Date.now();
       let peer: Api.TypeInputPeer | number | string = await this.resolvePeer(accountId, chatId);
+      if (correlationId) {
+        this.log.info({
+          message: 'send_resolve_peer_row_ms',
+          correlation_id: correlationId,
+          elapsed_ms: Date.now() - tPeer0,
+          accountId,
+          chatId,
+          kind: 'sendFile',
+        });
+      }
       if (typeof peer === 'string' && peer.length > 0 && isUsernameLike(peer)) {
+        if (correlationId) {
+          this.log.info({
+            message: 'send_resolve_entity_start',
+            correlation_id: correlationId,
+            accountId,
+            chatId,
+            kind: 'username',
+          });
+        }
         const resolved = await resolveUsernameToInputPeer(clientInfo.client, peer, {
           log: this.log,
           accountId,
@@ -109,8 +130,27 @@ export class FileHandler {
         if (resolved) peer = resolved;
         else peer = await client.getInputEntity(peer);
       } else if (typeof peer === 'string' && peer.length > 0 && Number.isNaN(Number(peer))) {
+        if (correlationId) {
+          this.log.info({
+            message: 'send_resolve_entity_start',
+            correlation_id: correlationId,
+            accountId,
+            chatId,
+            kind: 'string_entity',
+          });
+        }
         peer = await client.getInputEntity(peer);
       }
+      if (correlationId) {
+        this.log.info({
+          message: 'send_gramjs_send_message_start',
+          correlation_id: correlationId,
+          accountId,
+          chatId,
+          kind: 'SendFile',
+        });
+      }
+      const gramjsT0 = Date.now();
       const message = await telegramInvokeWithFloodRetry(
         this.log,
         accountId,
@@ -123,6 +163,16 @@ export class FileHandler {
           }),
         { pool: this.pool }
       );
+      if (correlationId) {
+        this.log.info({
+          message: 'send_gramjs_send_message_ms',
+          correlation_id: correlationId,
+          duration_ms: Date.now() - gramjsT0,
+          accountId,
+          chatId,
+          kind: 'SendFile',
+        });
+      }
       clientInfo.lastActivity = new Date();
       await this.pool.query(
         'UPDATE bd_accounts SET last_activity = NOW() WHERE id = $1',

@@ -241,7 +241,12 @@ export class TelegramManager {
   }
 
   // --- Sending ---
-  async sendMessage(accountId: string, chatId: string, text: string, opts?: { replyTo?: number }): Promise<Api.Message> {
+  async sendMessage(
+    accountId: string,
+    chatId: string,
+    text: string,
+    opts?: { replyTo?: number; traceId?: string }
+  ): Promise<Api.Message> {
     return this.messageSender.sendMessage(accountId, chatId, text, opts);
   }
   async setTyping(accountId: string, chatId: string): Promise<void> { return this.messageSender.setTyping(accountId, chatId); }
@@ -267,7 +272,12 @@ export class TelegramManager {
 
   // --- Files ---
   async downloadMessageMedia(accountId: string, channelId: string, messageId: string) { return this.fileHandler.downloadMessageMedia(accountId, channelId, messageId); }
-  async sendFile(accountId: string, chatId: string, fileBuffer: Buffer, opts?: { caption?: string; filename?: string; replyTo?: number }): Promise<Api.Message> {
+  async sendFile(
+    accountId: string,
+    chatId: string,
+    fileBuffer: Buffer,
+    opts?: { caption?: string; filename?: string; replyTo?: number; traceId?: string }
+  ): Promise<Api.Message> {
     return this.fileHandler.sendFile(accountId, chatId, fileBuffer, opts);
   }
   async downloadAccountProfilePhoto(accountId: string) { return this.fileHandler.downloadAccountProfilePhoto(accountId); }

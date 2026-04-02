@@ -48,7 +48,17 @@ export async function telegramInvokeWithFloodRetry<T>(
   const pool = resolveFloodPool(floodPersist ?? undefined);
   const deferRetry = floodPersist?.deferRetry === true;
   try {
+    const invokeT0 = Date.now();
     const out = await run();
+    const durationMs = Date.now() - invokeT0;
+    if (durationMs > 5000) {
+      log.warn({
+        message: 'invoke_slow_success',
+        op,
+        accountId,
+        duration_ms: durationMs,
+      });
+    }
     if (pool) await clearBdAccountTelegramFlood(pool, accountId);
     return out;
   } catch (e: unknown) {

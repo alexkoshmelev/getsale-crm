@@ -32,6 +32,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
 
   router.post('/send', validate(MsgSendMessageSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
+    const sendFlowStart = Date.now();
     const {
       contactId,
       channel,
@@ -105,6 +106,14 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       return res.status(400).json({ error: 'bdAccountId is required for Telegram messages' });
     }
 
+    log.info({
+      message: 'telegram_send_flow_start',
+      correlation_id: req.correlationId,
+      bd_account_id: bdAccountId,
+      source: source ?? null,
+      has_file: !!(fileBase64 && typeof fileBase64 === 'string'),
+    });
+
     // Campaign idempotency guard: if the same logical send was already persisted, return it.
     if (source === 'campaign' && typeof idempotencyKey === 'string' && idempotencyKey.trim()) {
       const idem = idempotencyKey.trim();
@@ -125,6 +134,13 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
         return res.json(existing.rows[0]);
       }
     }
+
+    log.info({
+      message: 'telegram_send_flow_contacts_loaded',
+      correlation_id: req.correlationId,
+      bd_account_id: bdAccountId,
+      elapsed_ms: Date.now() - sendFlowStart,
+    });
 
     const makeBody = (chatIdValue: string): Record<string, string> => {
       const body: Record<string, string> = {
@@ -147,19 +163,49 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       return body;
     };
     let sentChannelId = channelId;
-    const doSend = (chatIdValue: string) =>
-      bdAccountsClient.post<{
-        messageId?: string;
-        date?: number;
-        resolvedChatId?: string;
-        telegram_media?: Record<string, unknown> | null;
-        telegram_entities?: Record<string, unknown>[] | null;
-      }>(`/api/bd-accounts/${bdAccountId}/send`, makeBody(chatIdValue), undefined, { userId, organizationId });
+    const correlationId = req.correlationId;
+    const bdCtx = { userId, organizationId, correlationId };
+    const invokeBdSend = async (chatIdValue: string) => {
+      log.info({
+        message: 'bd_accounts_invoke_start',
+        correlation_id: correlationId,
+        bd_account_id: bdAccountId,
+        channel_id_suffix: String(chatIdValue).slice(-8),
+        source: source ?? null,
+      });
+      const invokeStart = Date.now();
+      try {
+        const result = await bdAccountsClient.post<{
+          messageId?: string;
+          date?: number;
+          resolvedChatId?: string;
+          telegram_media?: Record<string, unknown> | null;
+          telegram_entities?: Record<string, unknown>[] | null;
+        }>(`/api/bd-accounts/${bdAccountId}/send`, makeBody(chatIdValue), undefined, bdCtx);
+        log.info({
+          message: 'bd_accounts_invoke_done',
+          correlation_id: correlationId,
+          bd_account_id: bdAccountId,
+          duration_ms: Date.now() - invokeStart,
+          ok: true,
+        });
+        return result;
+      } catch (e) {
+        log.info({
+          message: 'bd_accounts_invoke_done',
+          correlation_id: correlationId,
+          bd_account_id: bdAccountId,
+          duration_ms: Date.now() - invokeStart,
+          ok: false,
+        });
+        throw e;
+      }
+    };
 
-    let resJson: Awaited<ReturnType<typeof doSend>> | null = null;
+    let resJson: Awaited<ReturnType<typeof invokeBdSend>> | null = null;
     let lastError: unknown = null;
     try {
-      resJson = await doSend(channelId);
+      resJson = await invokeBdSend(channelId);
     } catch (error: unknown) {
       const isNotConnected =
         error instanceof ServiceCallError &&
@@ -168,7 +214,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       if (isNotConnected) {
         await new Promise((r) => setTimeout(r, 2500));
         try {
-          resJson = await doSend(channelId);
+          resJson = await invokeBdSend(channelId);
         } catch (retryErr: unknown) {
           lastError = retryErr;
         }
@@ -186,7 +232,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       contactUsernameNorm !== String(channelId).trim()
     ) {
       try {
-        resJson = await doSend(contactUsernameNorm);
+        resJson = await invokeBdSend(contactUsernameNorm);
         sentChannelId = contactUsernameNorm;
       } catch (fallbackErr: unknown) {
         lastError = fallbackErr;
@@ -202,7 +248,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       hintFromRequest !== contactUsernameNorm
     ) {
       try {
-        resJson = await doSend(hintFromRequest);
+        resJson = await invokeBdSend(hintFromRequest);
         sentChannelId = hintFromRequest;
       } catch (fallbackErr: unknown) {
         lastError = fallbackErr;
@@ -225,7 +271,7 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       const u = un?.username ? String(un.username).trim().replace(/^@/, '') : '';
       if (u && u !== String(channelId).trim()) {
         try {
-          resJson = await doSend(u);
+          resJson = await invokeBdSend(u);
           sentChannelId = u;
         } catch (fallbackErr: unknown) {
           lastError = fallbackErr;
