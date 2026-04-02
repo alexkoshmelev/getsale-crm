@@ -18,7 +18,7 @@ import {
   fetchBdAccountAvatarBlob,
 } from '@/lib/api/bd-accounts';
 import { useAuthStore } from '@/lib/stores/auth-store';
-import { canActOnBdAccountRow } from '@/lib/permissions';
+import { canActOnBdAccountRow, canManageBdAccountDetailSettings } from '@/lib/permissions';
 import {
   ArrowLeft,
   Loader2,
@@ -269,7 +269,7 @@ export default function BDAccountCardPage() {
                     <h1 className="text-xl font-bold text-gray-900 dark:text-white">
                       {getAccountDisplayName(account)}
                     </h1>
-                    {account.is_owner && (
+                    {canManageBdAccountDetailSettings(currentUser?.role, account) && (
                       <button
                         type="button"
                         onClick={() => setEditingDisplayName(true)}
@@ -303,7 +303,7 @@ export default function BDAccountCardPage() {
                   <MessageSquare className="w-4 h-4 mr-2" />
                   {t('bdAccounts.messengerCta')}
                 </Link>
-                {account.is_owner && (
+                {canManageBdAccountDetailSettings(currentUser?.role, account) && (
                   <>
                     {resolveConnectionState(account) === 'reauth_required' ? (
                       <Button variant="outline" size="sm" onClick={() => router.push('/dashboard/bd-accounts')}>
@@ -349,7 +349,7 @@ export default function BDAccountCardPage() {
           </div>
         </Card>
 
-        {account.is_owner && (
+        {canManageBdAccountDetailSettings(currentUser?.role, account) && (
           <Card className="p-0 overflow-hidden border-gray-200 dark:border-gray-700">
             <details id="proxy-settings-block" className="group">
               <summary className="cursor-pointer list-none flex items-center justify-between gap-2 px-4 py-3 text-sm font-semibold text-gray-900 dark:text-white hover:bg-gray-50 dark:hover:bg-gray-800/50 [&::-webkit-details-marker]:hidden">
@@ -407,7 +407,7 @@ export default function BDAccountCardPage() {
           </Card>
         )}
 
-        {account.is_owner && (
+        {canManageBdAccountDetailSettings(currentUser?.role, account) && (
           <Card className="p-0 overflow-hidden border-gray-200 dark:border-gray-700">
             <details className="group">
               <summary className="cursor-pointer list-none flex items-center justify-between gap-2 px-4 py-3 text-sm font-semibold text-gray-900 dark:text-white hover:bg-gray-50 dark:hover:bg-gray-800/50 [&::-webkit-details-marker]:hidden">

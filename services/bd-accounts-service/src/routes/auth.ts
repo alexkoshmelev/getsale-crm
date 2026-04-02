@@ -9,7 +9,7 @@ import { TelegramManager } from '../telegram';
 import {
   getTelegramApiCredentials,
   getAccountOr404,
-  requireAccountOwner,
+  canManageBdAccountAsConnectorOrOrgAdmin,
   requireBidiOwnAccount,
   assertBdAccountsNotViewer,
 } from '../helpers';
@@ -303,9 +303,9 @@ export function authRouter({ pool, rabbitmq, log, telegramManager }: Deps): Rout
 
     await getAccountOr404(pool, id, user.organizationId, 'id');
     await requireBidiOwnAccount(pool, id, user);
-    const isOwner = await requireAccountOwner(pool, id, user);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, id, user);
     const canSettings = await checkPermission(user.role, 'bd_accounts', 'settings');
-    if (!isOwner && !canSettings) {
+    if (!canManage && !canSettings) {
       throw new AppError(403, 'No permission to disconnect account', ErrorCodes.FORBIDDEN);
     }
 

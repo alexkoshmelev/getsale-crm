@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { asyncHandler, AppError, ErrorCodes, validate, withOrgContext } from '@getsale/service-core';
 import {
   getAccountOr404,
-  requireAccountOwner,
+  canManageBdAccountAsConnectorOrOrgAdmin,
   requireBidiOwnAccount,
   ensureFoldersFromSyncChats,
   SYNC_STALE_MINUTES,
@@ -49,9 +49,13 @@ export function registerSyncChatsSyncRoutes(router: Router, deps: SyncRouteDeps)
 
     const account = await getAccountOr404<{ id: string; telegram_id?: string | null }>(pool, id, user.organizationId, 'id, telegram_id');
     await requireBidiOwnAccount(pool, id, user);
-    const isOwner = await requireAccountOwner(pool, id, user);
-    if (!isOwner) {
-      throw new AppError(403, 'Only the account owner can change sync chats', ErrorCodes.FORBIDDEN);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, id, user);
+    if (!canManage) {
+      throw new AppError(
+        403,
+        'Only the account connector or an organization owner/admin can change sync chats',
+        ErrorCodes.FORBIDDEN
+      );
     }
 
     const accountTelegramId = account.telegram_id != null ? String(account.telegram_id).trim() : null;
@@ -141,9 +145,13 @@ export function registerSyncChatsSyncRoutes(router: Router, deps: SyncRouteDeps)
 
     const account = await getAccountOr404<{ id: string; organization_id: string; sync_status?: string; sync_started_at?: unknown }>(pool, id, user.organizationId, 'id, organization_id, sync_status, sync_started_at');
     await requireBidiOwnAccount(pool, id, user);
-    const isOwner = await requireAccountOwner(pool, id, user);
-    if (!isOwner) {
-      throw new AppError(403, 'Only the account owner can start sync', ErrorCodes.FORBIDDEN);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, id, user);
+    if (!canManage) {
+      throw new AppError(
+        403,
+        'Only the account connector or an organization owner/admin can start sync',
+        ErrorCodes.FORBIDDEN
+      );
     }
     const startedAt = account.sync_started_at ? new Date(account.sync_started_at as string | number | Date).getTime() : 0;
     const isStale = account.sync_status === 'syncing' && startedAt && Date.now() - startedAt > SYNC_STALE_MINUTES * 60 * 1000;
@@ -215,6 +223,14 @@ export function registerSyncChatsSyncRoutes(router: Router, deps: SyncRouteDeps)
 
     await getAccountOr404(pool, accountId, user.organizationId, 'id');
     await requireBidiOwnAccount(pool, accountId, user);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, accountId, user);
+    if (!canManage) {
+      throw new AppError(
+        403,
+        'Only the account connector or an organization owner/admin can change chat folder assignment',
+        ErrorCodes.FORBIDDEN
+      );
+    }
 
     let folderIds: number[] = [];
     if (Array.isArray(folderIdsRaw) && folderIdsRaw.length > 0) {
@@ -254,9 +270,9 @@ export function registerSyncChatsSyncRoutes(router: Router, deps: SyncRouteDeps)
 
     await getAccountOr404(pool, accountId, user.organizationId, 'id');
     await requireBidiOwnAccount(pool, accountId, user);
-    const isOwner = await requireAccountOwner(pool, accountId, user);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, accountId, user);
     const canDeleteChat = await checkPermission(user.role, 'bd_accounts', 'chat.delete');
-    if (!isOwner && !canDeleteChat) {
+    if (!canManage && !canDeleteChat) {
       throw new AppError(403, 'No permission to remove a chat from the list', ErrorCodes.FORBIDDEN);
     }
 

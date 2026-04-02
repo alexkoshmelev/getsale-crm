@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { asyncHandler, AppError, ErrorCodes, validate, withOrgContext } from '@getsale/service-core';
 import {
   getAccountOr404,
-  requireAccountOwner,
+  canManageBdAccountAsConnectorOrOrgAdmin,
   requireBidiOwnAccount,
   isAccountOwnerName,
   ensureFoldersFromSyncChats,
@@ -72,9 +72,13 @@ export function registerSyncFoldersWriteRoutes(router: Router, deps: SyncRouteDe
 
     await getAccountOr404(pool, id, user.organizationId, 'id');
     await requireBidiOwnAccount(pool, id, user);
-    const isOwner = await requireAccountOwner(pool, id, user);
-    if (!isOwner) {
-      throw new AppError(403, 'Only the account owner can change sync folders', ErrorCodes.FORBIDDEN);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, id, user);
+    if (!canManage) {
+      throw new AppError(
+        403,
+        'Only the account connector or an organization owner/admin can change sync folders',
+        ErrorCodes.FORBIDDEN
+      );
     }
 
     const result = await withOrgContext(pool, user.organizationId, async (client) => {
@@ -144,9 +148,13 @@ export function registerSyncFoldersWriteRoutes(router: Router, deps: SyncRouteDe
 
     await getAccountOr404(pool, id, user.organizationId, 'id');
     await requireBidiOwnAccount(pool, id, user);
-    const isOwner = await requireAccountOwner(pool, id, user);
-    if (!isOwner) {
-      throw new AppError(403, 'Only the account owner can create folders', ErrorCodes.FORBIDDEN);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, id, user);
+    if (!canManage) {
+      throw new AppError(
+        403,
+        'Only the account connector or an organization owner/admin can create folders',
+        ErrorCodes.FORBIDDEN
+      );
     }
     const title = (folderTitle != null ? String(folderTitle).trim() : '').slice(0, 12) || 'New folder';
     const iconVal = icon != null && String(icon).trim() ? String(icon).trim().slice(0, 20) : null;
@@ -178,9 +186,13 @@ export function registerSyncFoldersWriteRoutes(router: Router, deps: SyncRouteDe
 
     await getAccountOr404(pool, id, user.organizationId, 'id');
     await requireBidiOwnAccount(pool, id, user);
-    const isOwner = await requireAccountOwner(pool, id, user);
-    if (!isOwner) {
-      throw new AppError(403, 'Only the account owner can reorder folders', ErrorCodes.FORBIDDEN);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, id, user);
+    if (!canManage) {
+      throw new AppError(
+        403,
+        'Only the account connector or an organization owner/admin can reorder folders',
+        ErrorCodes.FORBIDDEN
+      );
     }
     const result = await withOrgContext(pool, user.organizationId, async (client) => {
       for (let i = 0; i < order.length; i++) {
@@ -204,6 +216,14 @@ export function registerSyncFoldersWriteRoutes(router: Router, deps: SyncRouteDe
 
     await getAccountOr404(pool, accountId, user.organizationId, 'id');
     await requireBidiOwnAccount(pool, accountId, user);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, accountId, user);
+    if (!canManage) {
+      throw new AppError(
+        403,
+        'Only the account connector or an organization owner/admin can update sync folders',
+        ErrorCodes.FORBIDDEN
+      );
+    }
     const updates: string[] = [];
     const values: (string | null)[] = [];
     let i = 1;
@@ -238,9 +258,13 @@ export function registerSyncFoldersWriteRoutes(router: Router, deps: SyncRouteDe
 
     await getAccountOr404(pool, accountId, user.organizationId, 'id');
     await requireBidiOwnAccount(pool, accountId, user);
-    const isOwner = await requireAccountOwner(pool, accountId, user);
-    if (!isOwner) {
-      throw new AppError(403, 'Only the account owner can delete folders', ErrorCodes.FORBIDDEN);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, accountId, user);
+    if (!canManage) {
+      throw new AppError(
+        403,
+        'Only the account connector or an organization owner/admin can delete folders',
+        ErrorCodes.FORBIDDEN
+      );
     }
     const folderRow = await pool.query(
       'SELECT id, folder_id, is_user_created FROM bd_account_sync_folders WHERE id = $1 AND bd_account_id = $2',
@@ -282,9 +306,13 @@ export function registerSyncFoldersWriteRoutes(router: Router, deps: SyncRouteDe
 
     await getAccountOr404(pool, id, user.organizationId, 'id');
     await requireBidiOwnAccount(pool, id, user);
-    const isOwner = await requireAccountOwner(pool, id, user);
-    if (!isOwner) {
-      throw new AppError(403, 'Only the account owner can push folders to Telegram', ErrorCodes.FORBIDDEN);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, id, user);
+    if (!canManage) {
+      throw new AppError(
+        403,
+        'Only the account connector or an organization owner/admin can push folders to Telegram',
+        ErrorCodes.FORBIDDEN
+      );
     }
     const result = await telegramManager.pushFoldersToTelegram(id);
     res.json({ success: true, updated: result.updated, errors: result.errors });

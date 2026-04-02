@@ -119,6 +119,27 @@ export async function requireAccountOwner(
   return isAccountOwner(pool, accountId, user);
 }
 
+/** Organization roles that may manage any BD account in the org (not only accounts they connected). */
+export function isOrgOwnerOrAdminRole(role: string | undefined): boolean {
+  const r = String(role ?? '')
+    .trim()
+    .toLowerCase();
+  return r === 'owner' || r === 'admin';
+}
+
+/**
+ * True if the user connected this BD account or has org owner/admin role.
+ * Use after requireBidiOwnAccount for mutating routes.
+ */
+export async function canManageBdAccountAsConnectorOrOrgAdmin(
+  pool: Pool,
+  accountId: string,
+  user: { id: string; organizationId: string; role?: string }
+): Promise<boolean> {
+  if (isOrgOwnerOrAdminRole(user.role)) return true;
+  return isAccountOwner(pool, accountId, user);
+}
+
 /**
  * For role "bidi" (agent): allow write only if the user is the one who connected this BD account.
  * Other roles are not restricted. Throws 403 if agent tries to write to an account they don't own.

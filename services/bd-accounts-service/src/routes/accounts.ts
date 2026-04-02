@@ -6,7 +6,7 @@ import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, canPermission, validate, withOrgContext, ServiceHttpClient } from '@getsale/service-core';
 import { TelegramManager } from '../telegram';
 import {
-  requireAccountOwner,
+  canManageBdAccountAsConnectorOrOrgAdmin,
   requireBidiOwnAccount,
   getAccountOr404,
   bdAccountsListScope,
@@ -324,9 +324,13 @@ export function accountsRouter({
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
     await requireBidiOwnAccount(pool, id, user);
-    const isOwner = await requireAccountOwner(pool, id, user);
-    if (!isOwner) {
-      throw new AppError(403, 'Only the account owner can update', ErrorCodes.FORBIDDEN);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, id, user);
+    if (!canManage) {
+      throw new AppError(
+        403,
+        'Only the account connector or an organization owner/admin can update this account',
+        ErrorCodes.FORBIDDEN
+      );
     }
 
     const sets: string[] = [];
@@ -535,9 +539,9 @@ export function accountsRouter({
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
     await requireBidiOwnAccount(pool, id, user);
-    const isOwner = await requireAccountOwner(pool, id, user);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, id, user);
     const canSettings = await checkPermission(user.role, 'bd_accounts', 'settings');
-    if (!isOwner && !canSettings) {
+    if (!canManage && !canSettings) {
       throw new AppError(403, 'No permission to enable account', ErrorCodes.FORBIDDEN);
     }
 
@@ -589,9 +593,9 @@ export function accountsRouter({
       throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
     }
     await requireBidiOwnAccount(pool, id, user);
-    const isOwner = await requireAccountOwner(pool, id, user);
+    const canManage = await canManageBdAccountAsConnectorOrOrgAdmin(pool, id, user);
     const canSettings = await checkPermission(user.role, 'bd_accounts', 'settings');
-    if (!isOwner && !canSettings) {
+    if (!canManage && !canSettings) {
       throw new AppError(403, 'No permission to delete account', ErrorCodes.FORBIDDEN);
     }
 

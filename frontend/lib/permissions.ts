@@ -111,6 +111,19 @@ export function canManageBDAccounts(role: string | undefined | null): boolean {
   return r === 'owner' || r === 'admin';
 }
 
+/**
+ * BD account detail page: edit display name, proxy, schedule, disconnect/delete/sync entry points.
+ * Org owner/admin may manage any org account; bidi only accounts they connected.
+ */
+export function canManageBdAccountDetailSettings(
+  role: string | undefined | null,
+  account: { is_owner?: boolean }
+): boolean {
+  if (isBdViewerRole(role)) return false;
+  if (isBdAgentRole(role)) return account.is_owner === true;
+  return account.is_owner === true || canManageBDAccounts(role);
+}
+
 /** Automation rules: owner, admin */
 export function canManageAutomation(role: string | undefined | null): boolean {
   const r = normalizeRole(role);
