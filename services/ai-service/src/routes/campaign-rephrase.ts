@@ -19,20 +19,6 @@ function parseOpenRouterTimeoutMs(): number {
   return Math.min(120_000, Math.max(10_000, n));
 }
 
-function parseOpenRouterMaxTokensCap(): number {
-  const n = parseInt(String(process.env.OPENROUTER_MAX_TOKENS || '512'), 10);
-  if (Number.isNaN(n)) return 512;
-  return Math.min(8192, Math.max(256, n));
-}
-
-/** Tight ceiling for short DMs: 2x rough token estimate, floor 128, capped by env. */
-export function computeRephraseMaxTokens(text: string): number {
-  const cap = parseOpenRouterMaxTokensCap();
-  const inputTokenEstimate = Math.ceil(text.length / 3);
-  const scaled = Math.max(128, inputTokenEstimate * 2);
-  return Math.min(cap, scaled);
-}
-
 function extractRephrasedText(data: {
   choices?: Array<{
     finish_reason?: string;
@@ -52,12 +38,8 @@ type OpenRouterChatCompletionData = {
   }>;
 };
 
-/**
- * Preset carries system instructions in OpenRouter; only user message = campaign text to rewrite.
- * `reasoning.effort: none` avoids free/reasoning models spending the whole budget on `message.reasoning`
- * and leaving `message.content` empty (see OpenRouter reasoning-tokens docs).
- */
-function buildOpenRouterPresetBody(model: string, userText: string, maxTokens: number): Record<string, unknown> {
+/** Preset carries system instructions in OpenRouter; only user message = campaign text to rewrite. */
+function buildOpenRouterPresetBody(model: string, userText: string): Record<string, unknown> {
   return {
     model,
     messages: [{ role: 'user', content: userText }],
@@ -88,7 +70,6 @@ export function campaignRephraseRouter({ log, rateLimiter }: Deps): Router {
     }
 
     const userText = text;
-    const maxTokens = computeRephraseMaxTokens(text);
     const openRouterTimeoutMs = parseOpenRouterTimeoutMs();
 
     const controller = new AbortController();
@@ -101,7 +82,7 @@ export function campaignRephraseRouter({ log, rateLimiter }: Deps): Router {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify(buildOpenRouterPresetBody(model, userText, maxTokens)),
+        body: JSON.stringify(buildOpenRouterPresetBody(model, userText)),
         signal: controller.signal,
       });
 

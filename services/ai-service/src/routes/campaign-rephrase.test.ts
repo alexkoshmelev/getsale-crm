@@ -65,17 +65,11 @@ describe('Campaign Rephrase Router', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const fetchOpts = fetchMock.mock.calls[0]?.[1] as { body?: string };
       const text = 'Hello, we have a special offer for you.';
-      const inputTokenEstimate = Math.ceil(text.length / 3);
-      const expectedMax = Math.min(512, Math.max(128, inputTokenEstimate * 2));
       const sent = JSON.parse(fetchOpts?.body ?? '{}') as {
-        max_tokens?: number;
         messages?: { role: string; content: string }[];
         model?: string;
-        reasoning?: { effort?: string };
       };
       expect(sent.model).toBe(DEFAULT_OPENROUTER_CAMPAIGN_PRESET);
-      expect(sent.reasoning).toEqual({ effort: 'none' });
-      expect(sent.max_tokens).toBe(expectedMax);
       expect(Array.isArray(sent.messages)).toBe(true);
       expect(sent.messages).toHaveLength(1);
       expect(sent.messages?.[0]).toEqual({ role: 'user', content: text });
