@@ -59,6 +59,10 @@ export enum EventType {
   BD_ACCOUNT_TELEGRAM_UPDATE = 'bd_account.telegram_update',
   /** Flood markers cleared after successful GramJS invoke; campaign-service may reschedule pending sends. */
   BD_ACCOUNT_FLOOD_CLEARED = 'bd_account.flood.cleared',
+  /** SpamBot check or PEER_FLOOD escalation marked account as restricted; campaign-service may auto-pause. */
+  BD_ACCOUNT_SPAM_RESTRICTED = 'bd_account.spam.restricted',
+  /** Manual clear or SpamBot reports account is OK again. */
+  BD_ACCOUNT_SPAM_CLEARED = 'bd_account.spam.cleared',
   
   // Subscription
   SUBSCRIPTION_CREATED = 'subscription.created',
@@ -223,6 +227,21 @@ export interface BDAccountConnectedEvent extends BaseEvent {
 
 export interface BDAccountFloodClearedEvent extends BaseEvent {
   type: EventType.BD_ACCOUNT_FLOOD_CLEARED;
+  data: {
+    bdAccountId: string;
+  };
+}
+
+export interface BDAccountSpamRestrictedEvent extends BaseEvent {
+  type: EventType.BD_ACCOUNT_SPAM_RESTRICTED;
+  data: {
+    bdAccountId: string;
+    source: 'spambot_check' | 'peer_flood_escalation' | 'manual';
+  };
+}
+
+export interface BDAccountSpamClearedEvent extends BaseEvent {
+  type: EventType.BD_ACCOUNT_SPAM_CLEARED;
   data: {
     bdAccountId: string;
   };
@@ -642,6 +661,8 @@ export type Event =
   | DealUpdatedEvent
   | BDAccountConnectedEvent
   | BDAccountFloodClearedEvent
+  | BDAccountSpamRestrictedEvent
+  | BDAccountSpamClearedEvent
   | BDAccountDisconnectedEvent
   | BDAccountPurchasedEvent
   | BDAccountSyncStartedEvent

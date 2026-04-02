@@ -33,13 +33,36 @@ export class ContactManager {
     }
   ): Promise<string | null> {
     if (!telegramId?.trim()) return null;
-    const existing = await this.pool.query(
-      'SELECT id, first_name, last_name, username, phone, bio, premium FROM contacts WHERE telegram_id = $1 AND organization_id = $2 LIMIT 1',
-      [telegramId, organizationId]
-    );
     const firstName = userInfo?.firstName?.trim() ?? '';
     const lastName = (userInfo?.lastName?.trim() || null) ?? null;
     const username = (userInfo?.username?.trim() || null) ?? null;
+    let existing = await this.pool.query(
+      'SELECT id, first_name, last_name, username, phone, bio, premium FROM contacts WHERE telegram_id = $1 AND organization_id = $2 LIMIT 1',
+      [telegramId, organizationId]
+    );
+
+    if (existing.rows.length === 0 && username) {
+      const uNorm = username.replace(/^@/, '').trim().toLowerCase();
+      if (uNorm) {
+        const byUsername = await this.pool.query(
+          `SELECT id, first_name, last_name, username, phone, bio, premium FROM contacts
+           WHERE organization_id = $1
+             AND LOWER(TRIM(REGEXP_REPLACE(COALESCE(username, ''), '^@', ''))) = $2
+             AND (telegram_id IS NULL OR TRIM(telegram_id) = '')
+           LIMIT 1`,
+          [organizationId, uNorm]
+        );
+        if (byUsername.rows.length > 0) {
+          const rowId = (byUsername.rows[0] as { id: string }).id;
+          await this.pool.query(
+            'UPDATE contacts SET telegram_id = $1, updated_at = NOW() WHERE id = $2 AND organization_id = $3',
+            [telegramId, rowId, organizationId]
+          );
+          existing = byUsername;
+        }
+      }
+    }
+
     const phone = userInfo?.phone != null ? (String(userInfo.phone).trim() || null) : null;
     const bio = userInfo?.bio != null ? (String(userInfo.bio).trim() || null) : null;
     const premium = userInfo?.premium ?? null;
@@ -62,22 +85,23 @@ export class ContactManager {
       }
       return id;
     }
-    try {
-      const insert = await this.pool.query(
-        `INSERT INTO contacts (organization_id, telegram_id, first_name, last_name, username, phone, bio, premium)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING id`,
-        [organizationId, telegramId, firstName || '', lastName, username, phone, bio, premium]
-      );
-      if (insert.rows.length > 0) return insert.rows[0].id;
-    } catch (err) {
-      this.log.warn({ message: 'upsertContactFromTelegramUser insert failed', organizationId, telegramId, error: getErrorMessage(err) });
-    }
-    const again = await this.pool.query(
-      'SELECT id FROM contacts WHERE telegram_id = $1 AND organization_id = $2 LIMIT 1',
-      [telegramId, organizationId]
+    const insert = await this.pool.query(
+      `INSERT INTO contacts (organization_id, telegram_id, first_name, last_name, username, phone, bio, premium)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (organization_id, telegram_id) WHERE (telegram_id IS NOT NULL AND trim(telegram_id) <> '')
+       DO UPDATE SET
+         first_name = COALESCE(NULLIF(trim(EXCLUDED.first_name), ''), contacts.first_name),
+         last_name = COALESCE(EXCLUDED.last_name, contacts.last_name),
+         username = COALESCE(EXCLUDED.username, contacts.username),
+         phone = COALESCE(EXCLUDED.phone, contacts.phone),
+         bio = COALESCE(EXCLUDED.bio, contacts.bio),
+         premium = COALESCE(EXCLUDED.premium, contacts.premium),
+         updated_at = NOW()
+       RETURNING id`,
+      [organizationId, telegramId, firstName || '', lastName, username, phone, bio, premium]
     );
-    return again.rows.length > 0 ? again.rows[0].id : null;
+    if (insert.rows.length > 0) return (insert.rows[0] as { id: string }).id;
+    return null;
   }
 
   async ensureContactForTelegramId(organizationId: string, telegramId: string): Promise<string | null> {
@@ -107,6 +131,7 @@ export class ContactManager {
       return this.ensureContactForTelegramId(organizationId, telegramId);
     }
     const skipGetFullUser = opts?.skipGetFullUser !== false;
+    let resolvedUsername: string | null = null;
     try {
       const client = clientInfo.client;
       const peer = await client.getInputEntity(userIdNum);
@@ -115,6 +140,7 @@ export class ContactManager {
       if (!isUser) return this.ensureContactForTelegramId(organizationId, telegramId);
 
       const u = entity as Api.User;
+      resolvedUsername = (u.username ?? '').trim() || null;
       let phone: string | null = (u.phone != null ? String(u.phone).trim() : null) || null;
       let bio: string | null = null;
       const premiumRaw = (u as any).premium;
@@ -148,7 +174,11 @@ export class ContactManager {
       if (msg !== 'TIMEOUT' && !msg.includes('Could not find')) {
         this.log.warn({ message: "getEntity for contact enrichment", error: msg });
       }
-      return this.ensureContactForTelegramId(organizationId, telegramId);
+      return this.upsertContactFromTelegramUser(
+        organizationId,
+        telegramId,
+        resolvedUsername ? { firstName: '', lastName: null, username: resolvedUsername } : undefined
+      );
     }
   }
 

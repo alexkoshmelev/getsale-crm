@@ -254,6 +254,16 @@ export class TelegramManager {
   async forwardMessage(accountId: string, fromChatId: string, toChatId: string, telegramMessageId: number): Promise<Api.Message> {
     return this.messageSender.forwardMessage(accountId, fromChatId, toChatId, telegramMessageId);
   }
+  async resolvePeerIdForCampaign(
+    accountId: string,
+    chatId: string,
+    usernameHint?: string | null
+  ): Promise<{ resolvedPeerId: string | null }> {
+    return this.messageSender.resolvePeerIdForCampaign(accountId, chatId, usernameHint);
+  }
+  async getLastMessagesFromPeer(accountId: string, chatId: string, limit: number) {
+    return this.messageSender.getLastMessagesFromPeer(accountId, chatId, limit);
+  }
 
   // --- Files ---
   async downloadMessageMedia(accountId: string, channelId: string, messageId: string) { return this.fileHandler.downloadMessageMedia(accountId, channelId, messageId); }

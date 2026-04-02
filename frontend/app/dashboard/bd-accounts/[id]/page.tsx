@@ -431,7 +431,15 @@ export default function BDAccountCardPage() {
       </div>
 
       <aside className="space-y-4 lg:sticky lg:top-4 lg:self-start min-w-0">
-        <BdAccountHealthCard account={account} layout="sidebar" className="mt-0" />
+        <BdAccountHealthCard
+          account={account}
+          layout="sidebar"
+          className="mt-0"
+          onSpamUpdated={() => {
+            if (!id) return;
+            void getBdAccount(id).then(setAccount);
+          }}
+        />
 
         <Card className="p-4">
           <h2 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">

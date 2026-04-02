@@ -395,4 +395,113 @@ export class MessageSender {
     if (!message) throw new Error('Forward succeeded but no message in response');
     return message;
   }
+
+  /**
+   * Resolve username or numeric chat id to a stable string id for campaigns (primes GramJS session cache).
+   * Does not send a message.
+   */
+  async resolvePeerIdForCampaign(
+    accountId: string,
+    chatId: string,
+    usernameHint?: string | null
+  ): Promise<{ resolvedPeerId: string | null }> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      return { resolvedPeerId: null };
+    }
+    const client = clientInfo.client;
+    const trimmed = (chatId ?? '').trim();
+    const hint = (usernameHint ?? '').trim().replace(/^@/, '');
+
+    const inputPeerToResolvedId = (peer: Api.TypeInputPeer): string | null => {
+      if (!peer) return null;
+      if (peer.className === 'InputPeerUser') {
+        return String((peer as Api.InputPeerUser).userId);
+      }
+      if (peer.className === 'InputPeerChannel') {
+        const cid = (peer as Api.InputPeerChannel).channelId;
+        return String(BigInt(-1000000000) - BigInt(cid));
+      }
+      return null;
+    };
+
+    const tryResolveUsername = async (u: string): Promise<string | null> => {
+      const s = (u ?? '').trim().replace(/^@/, '');
+      if (!s || !isUsernameLike(s)) return null;
+      const peer = await resolveUsernameToInputPeer(client, s, { log: this.log, accountId });
+      return peer ? inputPeerToResolvedId(peer) : null;
+    };
+
+    try {
+      if (trimmed && isUsernameLike(trimmed)) {
+        const id = await tryResolveUsername(trimmed);
+        if (id) {
+          if (SEND_DELAY_AFTER_RESOLVE_MS > 0) {
+            await new Promise((r) => setTimeout(r, SEND_DELAY_AFTER_RESOLVE_MS));
+          }
+          return { resolvedPeerId: id };
+        }
+      } else if (trimmed && /^-?\d+$/.test(trimmed)) {
+        try {
+          const num = Number(trimmed);
+          if (!Number.isNaN(num)) {
+            await client.getEntity(num);
+            if (SEND_DELAY_AFTER_RESOLVE_MS > 0) {
+              await new Promise((r) => setTimeout(r, SEND_DELAY_AFTER_RESOLVE_MS));
+            }
+            return { resolvedPeerId: trimmed };
+          }
+        } catch {
+          /* try username hint */
+        }
+      }
+      if (hint) {
+        const id = await tryResolveUsername(hint);
+        if (id) {
+          if (SEND_DELAY_AFTER_RESOLVE_MS > 0) {
+            await new Promise((r) => setTimeout(r, SEND_DELAY_AFTER_RESOLVE_MS));
+          }
+          return { resolvedPeerId: id };
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return { resolvedPeerId: null };
+  }
+
+  /** Read last messages from a peer (username, id, or t.me link resolved upstream). Used for SpamBot health checks. */
+  async getLastMessagesFromPeer(accountId: string, chatId: string, limit: number): Promise<Api.Message[]> {
+    const clientInfo = this.clients.get(accountId);
+    if (!clientInfo || !clientInfo.isConnected) {
+      throw new Error(`Account ${accountId} is not connected`);
+    }
+    const client = clientInfo.client;
+    const effective = chatId.trim();
+    let entity: unknown = effective;
+    if (isUsernameLike(effective)) {
+      const cached = this.getCachedUsernamePeer(accountId, effective);
+      if (cached) {
+        entity = await client.getEntity(cached);
+      } else {
+        const resolved = await resolveUsernameToInputPeer(client, effective, { log: this.log, accountId });
+        if (resolved) {
+          this.setCachedUsernamePeer(accountId, effective, resolved);
+          entity = await client.getEntity(resolved);
+        } else {
+          entity = await client.getEntity(effective);
+        }
+      }
+    } else {
+      entity = await client.getEntity(this.peerInput(effective));
+    }
+    const msgs = await telegramInvokeWithFloodRetry(
+      this.log,
+      accountId,
+      'GetMessages',
+      () => client.getMessages(entity as any, { limit }),
+      { pool: this.pool }
+    );
+    return Array.isArray(msgs) ? msgs : [];
+  }
 }

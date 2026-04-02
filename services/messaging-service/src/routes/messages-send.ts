@@ -4,7 +4,7 @@ import { EventType, MessageSentEvent } from '@getsale/events';
 import { MessageChannel, MessageDirection, MessageStatus } from '@getsale/types';
 import { asyncHandler, AppError, ErrorCodes, ServiceCallError, validate } from '@getsale/service-core';
 import { SYSTEM_MESSAGES } from '../system-messages';
-import { ensureConversation, MAX_FILE_SIZE_BYTES } from '../helpers';
+import { ensureConversation, mergeOrphanConversationPeerToCanonical, MAX_FILE_SIZE_BYTES } from '../helpers';
 import { MsgSendMessageSchema } from '../validation';
 import type { MessagesRouterDeps } from './messages-deps';
 
@@ -32,7 +32,19 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
 
   router.post('/send', validate(MsgSendMessageSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
-    const { contactId, channel, channelId, content, bdAccountId, fileBase64, fileName, replyToMessageId, source, idempotencyKey } = req.body;
+    const {
+      contactId,
+      channel,
+      channelId,
+      content,
+      bdAccountId,
+      fileBase64,
+      fileName,
+      replyToMessageId,
+      source,
+      idempotencyKey,
+      usernameHint: usernameHintRaw,
+    } = req.body;
 
     if (fileBase64 && typeof fileBase64 === 'string') {
       const estimatedBytes = (fileBase64.length * 3) / 4;
@@ -44,8 +56,27 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       }
     }
 
-    const contactIdOrNull = contactId ?? null;
+    let contactIdOrNull = contactId ?? null;
     let contactUsernameNorm: string | null = null;
+
+    const hintFromRequest =
+      typeof usernameHintRaw === 'string' && usernameHintRaw.trim()
+        ? usernameHintRaw.trim().replace(/^@/, '')
+        : null;
+
+    if (!contactIdOrNull && channel === MessageChannel.TELEGRAM && channelId && /^\d+$/.test(String(channelId).trim())) {
+      const byTg = await pool.query(
+        `SELECT id, username FROM contacts WHERE organization_id = $1 AND telegram_id = $2 LIMIT 1`,
+        [organizationId, String(channelId).trim()]
+      );
+      if (byTg.rows.length > 0) {
+        const row = byTg.rows[0] as { id: string; username?: string | null };
+        contactIdOrNull = row.id;
+        const u = typeof row.username === 'string' ? row.username.trim().replace(/^@/, '') : '';
+        contactUsernameNorm = u || null;
+      }
+    }
+
     if (contactIdOrNull) {
       const contactResult = await pool.query(
         'SELECT id, organization_id, telegram_id, first_name, last_name, username FROM contacts WHERE id = $1 AND organization_id = $2',
@@ -56,23 +87,16 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       }
       const contactRow = contactResult.rows[0] as { username?: string | null };
       const usernameRaw = typeof contactRow.username === 'string' ? contactRow.username.trim().replace(/^@/, '') : '';
-      contactUsernameNorm = usernameRaw || null;
+      if (!contactUsernameNorm && usernameRaw) contactUsernameNorm = usernameRaw;
     }
+
+    const effectiveUsernameHintForBd = contactUsernameNorm || hintFromRequest || null;
 
     const captionOrContent = typeof content === 'string' ? content : '';
     const contentForDb = captionOrContent || (fileName ? SYSTEM_MESSAGES.FILE_PLACEHOLDER(fileName) : SYSTEM_MESSAGES.MEDIA_PLACEHOLDER);
     const replyToTgId = replyToMessageId != null && String(replyToMessageId).trim() ? String(replyToMessageId).trim() : null;
 
-    await ensureConversation(pool, {
-      organizationId,
-      bdAccountId: bdAccountId || null,
-      channel,
-      channelId,
-      contactId: contactIdOrNull,
-    });
-
     // Telegram: send first, persist only after Telegram accepts the message.
-    // Otherwise campaign retries (and any client retries) create duplicate rows with status failed/pending.
     if (channel !== MessageChannel.TELEGRAM) {
       return res.status(400).json({ error: 'Unsupported channel or sending failed' });
     }
@@ -117,6 +141,9 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       if (typeof idempotencyKey === 'string' && idempotencyKey.trim()) {
         body.idempotencyKey = idempotencyKey.trim();
       }
+      if (effectiveUsernameHintForBd && effectiveUsernameHintForBd !== chatIdValue) {
+        body.usernameHint = effectiveUsernameHintForBd;
+      }
       return body;
     };
     let sentChannelId = channelId;
@@ -150,21 +177,59 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
       }
     }
 
-    // Campaign-only fallback for existing participants saved with numeric chatId:
-    // if entity cannot be resolved, retry once with contact username.
+    // Universal fallback: if entity cannot be resolved, retry with contact username (same as campaign path).
     if (
       resJson == null &&
-      source === 'campaign' &&
       lastError != null &&
       isEntityResolutionError(lastError) &&
       contactUsernameNorm &&
-      contactUsernameNorm !== channelId
+      contactUsernameNorm !== String(channelId).trim()
     ) {
       try {
         resJson = await doSend(contactUsernameNorm);
         sentChannelId = contactUsernameNorm;
       } catch (fallbackErr: unknown) {
         lastError = fallbackErr;
+      }
+    }
+
+    if (
+      resJson == null &&
+      lastError != null &&
+      isEntityResolutionError(lastError) &&
+      hintFromRequest &&
+      hintFromRequest !== String(channelId).trim() &&
+      hintFromRequest !== contactUsernameNorm
+    ) {
+      try {
+        resJson = await doSend(hintFromRequest);
+        sentChannelId = hintFromRequest;
+      } catch (fallbackErr: unknown) {
+        lastError = fallbackErr;
+      }
+    }
+
+    if (
+      resJson == null &&
+      lastError != null &&
+      isEntityResolutionError(lastError) &&
+      !contactUsernameNorm &&
+      channelId &&
+      /^\d+$/.test(String(channelId).trim())
+    ) {
+      const lu = await pool.query(
+        `SELECT username FROM contacts WHERE organization_id = $1 AND telegram_id = $2 AND username IS NOT NULL AND TRIM(username) <> '' LIMIT 1`,
+        [organizationId, String(channelId).trim()]
+      );
+      const un = lu.rows[0] as { username?: string } | undefined;
+      const u = un?.username ? String(un.username).trim().replace(/^@/, '') : '';
+      if (u && u !== String(channelId).trim()) {
+        try {
+          resJson = await doSend(u);
+          sentChannelId = u;
+        } catch (fallbackErr: unknown) {
+          lastError = fallbackErr;
+        }
       }
     }
 
@@ -232,6 +297,24 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
     );
     const message = insertResult.rows[0];
 
+    await ensureConversation(pool, {
+      organizationId,
+      bdAccountId: bdAccountId || null,
+      channel,
+      channelId: sentChannelId,
+      contactId: contactIdOrNull,
+    });
+
+    if (sentChannelId !== channelId) {
+      await mergeOrphanConversationPeerToCanonical(pool, {
+        organizationId,
+        bdAccountId: bdAccountId || null,
+        channel,
+        fromChannelId: channelId,
+        toChannelId: sentChannelId,
+      });
+    }
+
     if (source !== 'campaign') {
       await pool.query(
         `UPDATE conversations SET first_manager_reply_at = COALESCE(first_manager_reply_at, NOW()), updated_at = NOW()
@@ -268,7 +351,6 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
     try {
       await rabbitmq.publishEvent(event);
     } catch (publishErr) {
-      // Do not convert a successful Telegram send into an HTTP error.
       log.warn({
         message: 'Message sent, but publishEvent failed',
         messageId: message.id,

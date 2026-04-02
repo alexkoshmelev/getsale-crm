@@ -16,6 +16,7 @@ import {
   assertBdAccountsNotViewer,
 } from '../helpers';
 import { telegramSendErrorToAppError } from '../telegram-send-error-map';
+import { incrementPeerFloodAndMaybeEscalate } from '../bd-account-spam-persist';
 import { canonicalTelegramChatIdFromMessage } from '../telegram-peer-chat-id';
 import {
   BdSendMessageSchema,
@@ -26,6 +27,7 @@ import {
   BdCreateSharedChatSchema,
   BdReactionBodySchema,
   BdChatIdBodySchema,
+  BdResolvePeerSchema,
 } from '../validation';
 
 interface Deps {
@@ -50,6 +52,13 @@ async function mergeOutboundSendSyncRow(
   canonical: string | null | undefined
 ): Promise<void> {
   if (!canonical || canonical === requestChatId) return;
+
+  await pool.query(
+    `UPDATE campaign_participants
+     SET channel_id = $1, updated_at = NOW()
+     WHERE bd_account_id = $2::uuid AND channel_id = $3 AND status IN ('pending', 'sent')`,
+    [canonical, bdAccountId, requestChatId]
+  );
 
   const existingCanonical = await pool.query(
     `SELECT 1 FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1`,
@@ -124,7 +133,9 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
   router.post('/:id/send', validate(BdSendMessageSchema), asyncHandler(async (req, res) => {
     const { organizationId } = req.user;
     const { id } = req.params;
-    const { chatId, text, fileBase64, fileName, replyToMessageId } = req.body;
+    const { chatId, text, fileBase64, fileName, replyToMessageId, usernameHint } = req.body;
+    const usernameHintNorm =
+      typeof usernameHint === 'string' && usernameHint.trim() ? usernameHint.trim().replace(/^@/, '') : '';
 
     const account = await getAccountOr404<{ id: string; is_demo?: boolean }>(pool, id, organizationId, 'id, is_demo');
     if (account.is_demo) {
@@ -136,23 +147,23 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
       throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
     }
 
-    let message: { id: unknown; date?: unknown; peerId?: unknown };
-    try {
+    const sendToPeer = async (peer: string): Promise<{ id: unknown; date?: unknown; peerId?: unknown }> => {
       if (fileBase64 && typeof fileBase64 === 'string') {
         const buf = Buffer.from(fileBase64, 'base64');
         if (buf.length > MAX_FILE_SIZE_BYTES) {
           throw new AppError(413, 'Maximum file size is 2 GB', ErrorCodes.VALIDATION);
         }
-        message = await telegramManager.sendFile(id, chatId, buf, {
+        return telegramManager.sendFile(id, peer, buf, {
           caption: typeof text === 'string' ? text : '',
           filename: typeof fileName === 'string' ? fileName.trim() || 'file' : 'file',
           replyTo: replyToMessageId != null ? Number(replyToMessageId) : undefined,
         });
-      } else {
-        const replyTo = replyToMessageId != null && String(replyToMessageId).trim() ? Number(replyToMessageId) : undefined;
-        message = await telegramManager.sendMessage(id, chatId, typeof text === 'string' ? text : '', { replyTo });
       }
-    } catch (sendErr: unknown) {
+      const replyTo = replyToMessageId != null && String(replyToMessageId).trim() ? Number(replyToMessageId) : undefined;
+      return telegramManager.sendMessage(id, peer, typeof text === 'string' ? text : '', { replyTo });
+    };
+
+    const mapSendError = async (sendErr: unknown, peerForLog: string): Promise<never> => {
       const mapped = telegramSendErrorToAppError(sendErr);
       if (mapped) throw mapped;
       const errMsg = getErrorMessage(sendErr);
@@ -192,6 +203,11 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
         (typeof code === 'string' && /^PEER_FLOOD$/i.test(code)) ||
         (typeof errMsg === 'string' && errMsg.includes('PEER_FLOOD'))
       ) {
+        try {
+          await incrementPeerFloodAndMaybeEscalate(pool, id);
+        } catch {
+          /* non-fatal */
+        }
         throw new AppError(
           429,
           'Telegram rate limit (PEER_FLOOD). Send fewer messages to this user or wait before retrying.',
@@ -209,15 +225,48 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
           ErrorCodes.BAD_REQUEST
         );
       }
-      log.warn({ message: 'Telegram send failed', accountId: id, chatId, error: errMsg, code });
+      log.warn({ message: 'Telegram send failed', accountId: id, chatId: peerForLog, error: errMsg, code });
       throw new AppError(
         502,
         errMsg && errMsg.length < 256 ? errMsg : 'Telegram send failed',
         ErrorCodes.SERVICE_UNAVAILABLE
       );
+    };
+
+    let usedPeerForSync = String(chatId).trim();
+    /** Set in try/catch; all non-throwing paths assign before use below. */
+    let message!: { id: unknown; date?: unknown; peerId?: unknown };
+    try {
+      message = await sendToPeer(usedPeerForSync);
+    } catch (sendErr: unknown) {
+      const errMsg = getErrorMessage(sendErr);
+      const code = getErrorCode(sendErr);
+      const isEntityResolution =
+        (typeof errMsg === 'string' &&
+          (errMsg.includes('Could not find the input entity') ||
+            errMsg.includes('input entity') ||
+            errMsg.includes('PEER_ID_INVALID') ||
+            errMsg.includes('CHAT_ID_INVALID'))) ||
+        (typeof code === 'string' && /^(PEER_ID_INVALID|CHAT_ID_INVALID)$/i.test(code));
+      if (isEntityResolution && usernameHintNorm && usernameHintNorm !== usedPeerForSync) {
+        log.info({
+          message: 'Telegram send retry with usernameHint after entity resolution failure',
+          accountId: id,
+          chatId: usedPeerForSync,
+          usernameHint: usernameHintNorm,
+        });
+        usedPeerForSync = usernameHintNorm;
+        try {
+          message = await sendToPeer(usernameHintNorm);
+        } catch (sendErr2: unknown) {
+          await mapSendError(sendErr2, usernameHintNorm);
+        }
+      } else {
+        await mapSendError(sendErr, usedPeerForSync);
+      }
     }
 
-    const chatIdStr = String(chatId).trim();
+    const chatIdStr = usedPeerForSync;
     let resolvedChatId: string = chatIdStr;
     if (chatIdStr) {
       const peerType = peerTypeFromChatId(chatIdStr);
@@ -473,6 +522,24 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     }
 
     res.json({ success: true });
+  }));
+
+  // POST /:id/resolve-peer — resolve username or numeric id to stable peer id (primes session cache; no message send)
+  router.post('/:id/resolve-peer', validate(BdResolvePeerSchema), asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    const { chatId, usernameHint } = req.body as { chatId: string; usernameHint?: string | null };
+
+    await getAccountOr404(pool, id, organizationId, 'id');
+    await assertAccountNotReauthRequired(id, organizationId);
+    if (!telegramManager.isConnected(id)) {
+      return res.json({ resolvedPeerId: null });
+    }
+
+    const hintNorm =
+      typeof usernameHint === 'string' && usernameHint.trim() ? usernameHint.trim().replace(/^@/, '') : null;
+    const result = await telegramManager.resolvePeerIdForCampaign(id, String(chatId).trim(), hintNorm);
+    res.json({ resolvedPeerId: result.resolvedPeerId ?? null });
   }));
 
   // POST /:id/typing — send typing indicator (no-op if account not connected, so campaign human sim does not fail)

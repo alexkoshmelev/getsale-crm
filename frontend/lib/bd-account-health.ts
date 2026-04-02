@@ -11,8 +11,15 @@ export type AccountHealthLevel = 'ok' | 'attention' | 'critical';
 export type HealthTileVariant = 'ok' | 'warning' | 'error' | 'neutral';
 
 export interface AccountHealthTile {
-  id: 'connection' | 'sync' | 'proxy' | 'flood' | 'autoresponder';
+  id: 'connection' | 'sync' | 'proxy' | 'flood' | 'spam' | 'autoresponder';
   variant: HealthTileVariant;
+}
+
+/** Telegram marked this account as restricted (SpamBot check or PEER_FLOOD escalation). */
+export function isSpamRestricted(account: Pick<BDAccount, 'spam_restricted_at'>): boolean {
+  if (!account.spam_restricted_at) return false;
+  const d = new Date(account.spam_restricted_at);
+  return !Number.isNaN(d.getTime());
 }
 
 /** True when Telegram FLOOD_WAIT window is still active (PEER_FLOOD). */
@@ -56,6 +63,15 @@ function autoresponderTileVariant(account: Pick<BDAccount, 'auto_responder_enabl
   return 'neutral';
 }
 
+function spamTileVariant(
+  account: Pick<BDAccount, 'spam_restricted_at' | 'peer_flood_count_1h'>
+): HealthTileVariant {
+  if (isSpamRestricted(account)) return 'error';
+  const n = account.peer_flood_count_1h;
+  if (typeof n === 'number' && n > 0) return 'warning';
+  return 'ok';
+}
+
 /**
  * Derives overall health level and per-axis tiles for the BD account card (no API calls).
  */
@@ -68,6 +84,7 @@ export function computeAccountHealth(account: BDAccount): {
   const conn = resolveConnectionState(account);
   const proxy = resolveProxyState(account);
   const floodOn = isFloodActive(account);
+  const spamOn = isSpamRestricted(account);
   const runtimeDeferred = account.gramjs_runtime_enabled === false;
 
   const tiles: AccountHealthTile[] = [
@@ -75,12 +92,14 @@ export function computeAccountHealth(account: BDAccount): {
     { id: 'sync', variant: syncTileVariant(account) },
     { id: 'proxy', variant: proxyTileVariant(proxy) },
     { id: 'flood', variant: floodTileVariant(account) },
+    { id: 'spam', variant: spamTileVariant(account) },
     { id: 'autoresponder', variant: autoresponderTileVariant(account) },
   ];
 
   let level: AccountHealthLevel = 'ok';
 
   if (
+    spamOn ||
     floodOn ||
     conn === 'reauth_required' ||
     proxy === 'error' ||
@@ -92,6 +111,7 @@ export function computeAccountHealth(account: BDAccount): {
     (account.is_active && conn === 'disconnected') ||
     proxy === 'configured' ||
     tiles.find((tile) => tile.id === 'sync')!.variant === 'warning' ||
+    tiles.find((tile) => tile.id === 'spam')!.variant === 'warning' ||
     Boolean(account.last_error_code) ||
     Boolean(account.disconnect_reason?.trim()) ||
     Boolean(account.last_proxy_error?.trim()) ||
@@ -109,6 +129,7 @@ export function computeAccountHealth(account: BDAccount): {
 
 /** Ring color for campaign UI: yellow = flood, red = other issues, green = ok. */
 export function getAccountStatusRingVariant(account: BDAccount): 'green' | 'yellow' | 'red' {
+  if (isSpamRestricted(account)) return 'red';
   if (isFloodActive(account)) return 'yellow';
   const { level } = computeAccountHealth(account);
   if (level === 'ok') return 'green';

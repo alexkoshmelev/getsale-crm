@@ -49,7 +49,7 @@ interface ChatListProps {
   onAccountContextMenu: (e: React.MouseEvent) => void;
 }
 
-export function ChatList(props: ChatListProps) {
+export const ChatList = React.memo(function ChatList(props: ChatListProps) {
   const { t } = useTranslation();
   const {
     selectedAccountId, selectedChat, collapsed, loadingChats,
@@ -318,4 +318,4 @@ export function ChatList(props: ChatListProps) {
       </div>
     </>
   );
-}
+});

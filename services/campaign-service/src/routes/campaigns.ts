@@ -48,6 +48,9 @@ function serializeBdAccountRow(row: BdAccountRow) {
     floodWaitSeconds: row.flood_wait_seconds,
     floodReason: row.flood_reason,
     floodLastAt: row.flood_last_at != null ? new Date(row.flood_last_at).toISOString() : null,
+    spamRestrictedAt: row.spam_restricted_at != null ? new Date(row.spam_restricted_at).toISOString() : null,
+    spamRestrictionSource: row.spam_restriction_source ?? null,
+    peerFloodCount1h: row.peer_flood_count_1h != null ? Number(row.peer_flood_count_1h) : null,
     photoFileId: row.photo_file_id,
     isActive: row.is_active,
     connectionState: row.connection_state,
@@ -187,7 +190,9 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       bdAccountIds.length > 0
         ? pool.query(
             `SELECT id, created_by_user_id, display_name, first_name, last_name, username, phone_number, telegram_id,
-                    flood_wait_until, flood_wait_seconds, flood_reason, flood_last_at, photo_file_id, is_active, connection_state
+                    flood_wait_until, flood_wait_seconds, flood_reason, flood_last_at,
+                    spam_restricted_at, spam_restriction_source, peer_flood_count_1h,
+                    photo_file_id, is_active, connection_state
              FROM bd_accounts WHERE id = ANY($1::uuid[]) AND organization_id = $2`,
             [bdAccountIds, organizationId]
           )
@@ -254,7 +259,9 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     }
     const accounts = await pool.query(
       `SELECT a.id, a.created_by_user_id, a.display_name, a.first_name, a.last_name, a.username, a.phone_number, a.telegram_id,
-              a.flood_wait_until, a.flood_wait_seconds, a.flood_reason, a.flood_last_at, a.photo_file_id, a.is_active, a.connection_state
+              a.flood_wait_until, a.flood_wait_seconds, a.flood_reason, a.flood_last_at,
+              a.spam_restricted_at, a.spam_restriction_source, a.peer_flood_count_1h,
+              a.photo_file_id, a.is_active, a.connection_state
        FROM bd_accounts a
        WHERE a.organization_id = $1 AND a.is_active = true${ownerClause}
        ORDER BY a.display_name NULLS LAST, a.phone_number`,
@@ -443,7 +450,9 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     if (bdIds.length > 0) {
       const r = await pool.query(
         `SELECT id, created_by_user_id, display_name, first_name, last_name, username, phone_number, telegram_id,
-                flood_wait_until, flood_wait_seconds, flood_reason, flood_last_at, photo_file_id, is_active, connection_state
+                flood_wait_until, flood_wait_seconds, flood_reason, flood_last_at,
+                spam_restricted_at, spam_restriction_source, peer_flood_count_1h,
+                photo_file_id, is_active, connection_state
          FROM bd_accounts WHERE id = ANY($1::uuid[]) AND organization_id = $2`,
         [bdIds, organizationId]
       );

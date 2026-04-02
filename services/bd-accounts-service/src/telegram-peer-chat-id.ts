@@ -6,7 +6,10 @@ export function canonicalTelegramChatIdFromPeer(peerId: unknown): string | null 
   if (!peerId || typeof peerId !== 'object') return null;
   if (peerId instanceof Api.PeerUser) return String(peerId.userId);
   if (peerId instanceof Api.PeerChat) return String(peerId.chatId);
-  if (peerId instanceof Api.PeerChannel) return String(peerId.channelId);
+  if (peerId instanceof Api.PeerChannel) {
+    const raw = peerId.channelId;
+    return String(BigInt(-1000000000) - BigInt(raw));
+  }
   return null;
 }
 

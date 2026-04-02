@@ -21,17 +21,32 @@ export function buildMessagesListWhere(filters: MessagesListFilters): MessagesLi
   let whereClause = 'organization_id = $1';
   const params: unknown[] = [filters.organizationId];
 
-  if (filters.contactId) {
-    params.push(String(filters.contactId));
-    whereClause += ` AND contact_id = $${params.length}`;
-  }
-  if (filters.channel && filters.channelId) {
-    params.push(String(filters.channel), String(filters.channelId));
-    whereClause += ` AND channel = $${params.length - 1} AND channel_id = $${params.length}`;
-  }
-  if (filters.bdAccountId) {
-    params.push(filters.bdAccountId);
-    whereClause += ` AND bd_account_id = $${params.length}`;
+  const telegramWithContact =
+    filters.channel === 'telegram' &&
+    filters.bdAccountId &&
+    filters.channelId &&
+    filters.contactId;
+
+  if (telegramWithContact) {
+    params.push(String(filters.channel), String(filters.channelId), String(filters.contactId), filters.bdAccountId);
+    const ch = params.length - 3;
+    const cid = params.length - 2;
+    const cidContact = params.length - 1;
+    const bd = params.length;
+    whereClause += ` AND channel = $${ch} AND bd_account_id = $${bd} AND (channel_id = $${cid} OR contact_id = $${cidContact})`;
+  } else {
+    if (filters.contactId) {
+      params.push(String(filters.contactId));
+      whereClause += ` AND contact_id = $${params.length}`;
+    }
+    if (filters.channel && filters.channelId) {
+      params.push(String(filters.channel), String(filters.channelId));
+      whereClause += ` AND channel = $${params.length - 1} AND channel_id = $${params.length}`;
+    }
+    if (filters.bdAccountId) {
+      params.push(filters.bdAccountId);
+      whereClause += ` AND bd_account_id = $${params.length}`;
+    }
   }
   return { whereClause, params };
 }

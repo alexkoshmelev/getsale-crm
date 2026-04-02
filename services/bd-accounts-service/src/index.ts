@@ -9,6 +9,8 @@ import { mediaRouter } from './routes/media';
 import { internalBdAccountsRouter } from './routes/internal';
 import { messagingOrphanFallbackTotal, messageDbSqlBypassTotal } from './metrics';
 import { setBdAccountFloodPublishRabbitmq } from './bd-account-flood-persist';
+import { setBdAccountSpamPublishRabbitmq } from './bd-account-spam-persist';
+import { runSpamBotCheckAllStale } from './spambot-check';
 
 const MESSAGING_SERVICE_URL = process.env.MESSAGING_SERVICE_URL || 'http://localhost:3003';
 
@@ -25,6 +27,7 @@ async function main() {
   ctx.registry.registerMetric(messageDbSqlBypassTotal);
   const { pool, rabbitmq, log, registry } = ctx;
   setBdAccountFloodPublishRabbitmq(rabbitmq);
+  setBdAccountSpamPublishRabbitmq(rabbitmq);
 
   const redisUrl = process.env.REDIS_URL;
   const redis = redisUrl ? new RedisClient(redisUrl) : null;
@@ -75,6 +78,33 @@ async function main() {
   telegramManager.initializeActiveAccounts().catch((error: unknown) => {
     log.error({ message: 'Failed to initialize active accounts', error: String(error) });
   });
+
+  const spambotEnabled = String(process.env.SPAMBOT_CHECK_ENABLED || 'true').toLowerCase() !== 'false';
+  const spambotIntervalHours = Math.max(1, parseInt(String(process.env.SPAMBOT_CHECK_INTERVAL_HOURS || '6'), 10) || 6);
+  const spambotGapMs = parseInt(String(process.env.SPAMBOT_CHECK_GAP_MS || '8000'), 10) || 8000;
+  if (spambotEnabled) {
+    const jitter = () => Math.floor(Math.random() * 120_000);
+    const scheduleNext = (): void => {
+      setTimeout(() => {
+        runSpamBotCheckAllStale(pool, telegramManager, log, {
+          intervalHours: spambotIntervalHours,
+          gapMs: spambotGapMs,
+        }).catch((e: unknown) =>
+          log.warn({ message: 'Periodic SpamBot check failed', error: String(e) })
+        );
+        scheduleNext();
+      }, spambotIntervalHours * 3600 * 1000 + jitter());
+    };
+    setTimeout(() => {
+      runSpamBotCheckAllStale(pool, telegramManager, log, {
+        intervalHours: spambotIntervalHours,
+        gapMs: spambotGapMs,
+      }).catch((e: unknown) =>
+        log.warn({ message: 'Initial SpamBot check failed', error: String(e) })
+      );
+    }, 90_000 + jitter());
+    scheduleNext();
+  }
 
   const deps = { pool, rabbitmq, log, telegramManager, messagingClient, messagingOrphanFallbackTotal };
 

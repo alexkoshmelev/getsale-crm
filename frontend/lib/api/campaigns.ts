@@ -17,7 +17,7 @@ export interface CampaignTargetAudience {
   sendDelayMaxSeconds?: number;
   /** Rephrase message text via AI (OpenRouter) for randomization. */
   randomizeWithAI?: boolean;
-  /** Перед запуском обогащать контакты из Telegram (getEntity → first_name, last_name, username). */
+  /** Resolve username -> telegram_id via Telegram API before starting the campaign. */
   enrichContactsBeforeStart?: boolean;
   /** Dynamic campaign: auto-add leads when they enter one of these stages in the given pipeline */
   dynamicPipelineId?: string;
@@ -41,6 +41,9 @@ export interface CampaignBdAccount {
   floodWaitSeconds?: number | null;
   floodReason?: string | null;
   floodLastAt?: string | null;
+  spamRestrictedAt?: string | null;
+  spamRestrictionSource?: string | null;
+  peerFloodCount1h?: number | null;
   photoFileId?: string | null;
   isActive: boolean;
   connectionState?: string | null;
@@ -271,6 +274,27 @@ export async function deleteCampaign(id: string): Promise<void> {
 export async function duplicateCampaign(id: string): Promise<Campaign> {
   const { data } = await apiClient.post<Campaign>(`/api/campaigns/${id}/duplicate`);
   return data;
+}
+
+export async function pauseCampaignAccount(
+  campaignId: string,
+  accountId: string
+): Promise<{ ok: boolean; sendBlockedUntil?: string }> {
+  const { data } = await apiClient.post(`/api/campaigns/${campaignId}/accounts/${accountId}/pause`);
+  return data as { ok: boolean; sendBlockedUntil?: string };
+}
+
+export async function resumeCampaignAccount(campaignId: string, accountId: string): Promise<{ ok: boolean }> {
+  const { data } = await apiClient.post(`/api/campaigns/${campaignId}/accounts/${accountId}/resume`);
+  return data as { ok: boolean };
+}
+
+export async function removeCampaignAccount(
+  campaignId: string,
+  accountId: string
+): Promise<{ ok: boolean; reassignedParticipants: number; remainingBdAccountIds: string[] }> {
+  const { data } = await apiClient.delete(`/api/campaigns/${campaignId}/accounts/${accountId}`);
+  return data as { ok: boolean; reassignedParticipants: number; remainingBdAccountIds: string[] };
 }
 
 export interface AudienceConflictRow {

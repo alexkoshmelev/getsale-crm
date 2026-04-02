@@ -4,10 +4,11 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useTranslation } from 'react-i18next';
 import { clsx } from 'clsx';
-import { HeartPulse, Link2, RefreshCw, ShieldAlert, Wifi, ChevronDown, Bot } from 'lucide-react';
+import { HeartPulse, Link2, RefreshCw, ShieldAlert, Wifi, ChevronDown, Bot, Ban } from 'lucide-react';
 import type { BDAccount } from '@/lib/types/bd-account';
 import { computeAccountHealth, type AccountHealthTile } from '@/lib/bd-account-health';
 import { FloodStatusPanel } from '@/components/bd-accounts/FloodStatusPanel';
+import { SpamStatusPanel } from '@/components/bd-accounts/SpamStatusPanel';
 
 export type BdAccountHealthCardLayout = 'default' | 'sidebar';
 
@@ -15,6 +16,7 @@ type Props = {
   account: BDAccount;
   onRuntimeActivate?: () => void;
   runtimeActivating?: boolean;
+  onSpamUpdated?: () => void;
   className?: string;
   layout?: BdAccountHealthCardLayout;
 };
@@ -29,6 +31,8 @@ function tileIcon(id: AccountHealthTile['id']) {
       return Link2;
     case 'flood':
       return ShieldAlert;
+    case 'spam':
+      return Ban;
     case 'autoresponder':
       return Bot;
     default:
@@ -53,6 +57,7 @@ export function BdAccountHealthCard({
   account,
   onRuntimeActivate,
   runtimeActivating,
+  onSpamUpdated,
   className,
   layout = 'default',
 }: Props) {
@@ -93,7 +98,7 @@ export function BdAccountHealthCard({
         <div
           className={clsx(
             'grid gap-3',
-            layout === 'sidebar' ? 'grid-cols-1' : 'grid-cols-2 sm:grid-cols-3 xl:grid-cols-5'
+            layout === 'sidebar' ? 'grid-cols-1' : 'grid-cols-2 sm:grid-cols-3 xl:grid-cols-6'
           )}
         >
           {tiles.map((tile) => {
@@ -145,6 +150,8 @@ export function BdAccountHealthCard({
           flood_reason={account.flood_reason}
           flood_last_at={account.flood_last_at}
         />
+
+        <SpamStatusPanel account={account} accountId={account.id} onUpdated={onSpamUpdated} />
 
         {hasErrorDetails && (
           <div className="rounded-lg border border-gray-200 dark:border-gray-600 bg-gray-50/50 dark:bg-gray-900/20">

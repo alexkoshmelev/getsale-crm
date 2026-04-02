@@ -146,11 +146,15 @@ describe('Contacts Router', () => {
       const appWithClient = createTestApp(router, { prefix: '/api/crm/contacts', log });
 
       pool.query.mockImplementationOnce(async () => ({ rows: [{ id: TEST_BD_ACCOUNT_ID }], rowCount: 1 }));
-      for (let i = 0; i < 2; i++) {
-        pool.query.mockImplementationOnce(async () => ({ rows: [], rowCount: 0 }));
-        pool.query.mockImplementationOnce(async () => ({ rows: [], rowCount: 0 }));
-        pool.query.mockImplementationOnce(async () => ({ rows: [], rowCount: 0 }));
-      }
+      pool.query.mockImplementationOnce(async () => ({ rows: [], rowCount: 0 }));
+      pool.query.mockImplementationOnce(async () => ({
+        rows: [
+          { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa1111', telegram_id: '111' },
+          { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbb2222', telegram_id: '222' },
+        ],
+        rowCount: 2,
+      }));
+      pool.query.mockImplementationOnce(async () => ({ rows: [], rowCount: 0 }));
 
       const res = await request(appWithClient)
         .post('/api/crm/contacts/import-from-telegram-group')
@@ -187,7 +191,10 @@ describe('Contacts Router', () => {
 
       pool.query.mockImplementationOnce(async () => ({ rows: [{ id: TEST_BD_ACCOUNT_ID }], rowCount: 1 }));
       pool.query.mockImplementationOnce(async () => ({ rows: [], rowCount: 0 }));
-      pool.query.mockImplementationOnce(async () => ({ rows: [], rowCount: 0 }));
+      pool.query.mockImplementationOnce(async () => ({
+        rows: [{ id: 'cccccccc-cccc-cccc-cccc-cccccccc1111', telegram_id: '111' }],
+        rowCount: 1,
+      }));
       pool.query.mockImplementationOnce(async () => ({ rows: [], rowCount: 0 }));
 
       const res = await request(appWithClient)

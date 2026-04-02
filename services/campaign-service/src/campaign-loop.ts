@@ -129,7 +129,9 @@ async function fetchDueParticipant(client: PoolClient): Promise<DueParticipantRo
     `SELECT cp.id as participant_id, cp.campaign_id, cp.contact_id, cp.bd_account_id, cp.channel_id, cp.current_step, cp.status as status, c.organization_id, COALESCE(cp.enqueue_order, 0) AS enqueue_order, ba.max_dm_per_day
      FROM campaign_participants cp
      JOIN campaigns c ON c.id = cp.campaign_id
-     JOIN bd_accounts ba ON ba.id = cp.bd_account_id AND (ba.send_blocked_until IS NULL OR ba.send_blocked_until <= NOW())
+     JOIN bd_accounts ba ON ba.id = cp.bd_account_id
+       AND (ba.send_blocked_until IS NULL OR ba.send_blocked_until <= NOW())
+       AND ba.spam_restricted_at IS NULL
      WHERE c.status = $1 AND cp.status IN ('pending', 'sent') AND cp.next_send_at IS NOT NULL AND cp.next_send_at <= NOW()
      ORDER BY cp.next_send_at ASC, cp.enqueue_order ASC
      LIMIT 1
@@ -285,16 +287,6 @@ function isNonRetryableCampaignSendError(err: unknown): boolean {
     'maximum file size',
   ];
   return needles.some((n) => msg.includes(n));
-}
-
-function isEntityResolutionSendError(err: unknown): boolean {
-  const msg = campaignSendDownstreamReason(err).toLowerCase();
-  return (
-    msg.includes('user or chat not found') ||
-    msg.includes('could not find the input entity') ||
-    msg.includes('peer_id_invalid') ||
-    msg.includes('chat_id_invalid')
-  );
 }
 
 async function sendMessageWithRetry(
@@ -484,8 +476,6 @@ async function processParticipant(
   let msgJson: { id?: string; channel_id?: string };
   let deliveredChannelId = row.channel_id;
   const idempotencyKey = `campaign:${row.campaign_id}:participant:${row.participant_id}:step:${row.current_step}`;
-  const usernameRaw = typeof contact.username === 'string' ? contact.username.trim().replace(/^@/, '') : '';
-  const usernameForFallback = usernameRaw || null;
   try {
     msgJson = await sendMessageWithRetry(
       messagingClient,
@@ -496,36 +486,6 @@ async function processParticipant(
     );
     if (msgJson.channel_id) deliveredChannelId = msgJson.channel_id;
   } catch (sendErr) {
-    if (
-      isEntityResolutionSendError(sendErr) &&
-      usernameForFallback &&
-      usernameForFallback !== row.channel_id
-    ) {
-      try {
-        log.info({
-          message: 'Campaign send: retrying by username fallback after entity resolution error',
-          participantId: row.participant_id,
-          originalChannelId: row.channel_id,
-          fallbackChannelId: usernameForFallback,
-        });
-        msgJson = await sendMessageWithRetry(
-          messagingClient,
-          {
-            contactId: row.contact_id,
-            channelId: usernameForFallback,
-            content,
-            bdAccountId: row.bd_account_id,
-            idempotencyKey,
-          },
-          { userId: systemUserId, organizationId: row.organization_id },
-          SEND_MAX_RETRIES,
-          log
-        );
-        deliveredChannelId = msgJson.channel_id ?? usernameForFallback;
-      } catch (fallbackErr) {
-        sendErr = fallbackErr;
-      }
-    }
     const reasonMessage =
       sendErr instanceof ServiceCallError && sendErr.body != null && typeof sendErr.body === 'object'
         ? (sendErr.body as { message?: string }).message ?? (sendErr.body as { error?: string }).error ?? (sendErr instanceof Error ? sendErr.message : String(sendErr))
@@ -538,6 +498,8 @@ async function processParticipant(
       const retryAfterSeconds =
         body?.details?.retryAfterSeconds ?? CAMPAIGN_429_RETRY_AFTER_MINUTES * 60;
       const retryAt = new Date(Date.now() + retryAfterSeconds * 1000);
+      const isPeerFlood =
+        typeof reasonMessage === 'string' && reasonMessage.toUpperCase().includes('PEER_FLOOD');
       await client.query(
         `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status, metadata)
          VALUES ($1, $2, NULL, NOW(), 'deferred', $3::jsonb)`,
@@ -545,7 +507,7 @@ async function processParticipant(
           row.participant_id,
           row.current_step,
           JSON.stringify({
-            event: 'rate_limit_429',
+            event: isPeerFlood ? 'peer_flood' : 'rate_limit_429',
             retryAfterSeconds,
             retryAt: retryAt.toISOString(),
             message: reasonMessage,

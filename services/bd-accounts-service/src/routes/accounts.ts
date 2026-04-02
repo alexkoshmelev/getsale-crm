@@ -12,6 +12,8 @@ import {
   bdAccountsListScope,
   assertBdAccountsNotViewer,
 } from '../helpers';
+import { clearBdAccountSpamRestriction } from '../bd-account-spam-persist';
+import { performSpamBotCheck, runSpamBotCheckAllStale } from '../spambot-check';
 import { decryptIfNeeded } from '../crypto';
 import {
   BdAccountPurchaseSchema,
@@ -22,7 +24,7 @@ import {
 
 /** Columns returned by GET /:id and PATCH /:id (keep in sync with list when adding fields). */
 const BD_ACCOUNT_DETAIL_SELECT =
-  'id, organization_id, telegram_id, phone_number, is_active, is_demo, connected_at, last_activity, created_at, sync_status, sync_progress_done, sync_progress_total, sync_error, created_by_user_id AS owner_id, first_name, last_name, username, bio, photo_file_id, display_name, proxy_config, connection_state, disconnect_reason, last_error_code, last_error_at, flood_wait_until, flood_wait_seconds, flood_reason, flood_last_at, timezone, working_hours_start, working_hours_end, working_days, auto_responder_enabled, auto_responder_system_prompt, auto_responder_history_count';
+  'id, organization_id, telegram_id, phone_number, is_active, is_demo, connected_at, last_activity, created_at, sync_status, sync_progress_done, sync_progress_total, sync_error, created_by_user_id AS owner_id, first_name, last_name, username, bio, photo_file_id, display_name, proxy_config, connection_state, disconnect_reason, last_error_code, last_error_at, flood_wait_until, flood_wait_seconds, flood_reason, flood_last_at, spam_restricted_at, spam_restriction_source, peer_flood_count_1h, peer_flood_first_at, last_spambot_check_at, last_spambot_result, send_blocked_until, timezone, working_hours_start, working_hours_end, working_days, auto_responder_enabled, auto_responder_system_prompt, auto_responder_history_count';
 
 interface Deps {
   pool: Pool;
@@ -89,6 +91,26 @@ export function accountsRouter({
     res.json(result);
   }));
 
+  /** Run SpamBot check for all org accounts that are due (admin/owner). */
+  router.post('/spambot-check-all', asyncHandler(async (req, res) => {
+    assertBdAccountsNotViewer(req.user);
+    const { organizationId, role } = req.user;
+    const r = (role || '').toLowerCase();
+    if (r !== 'owner' && r !== 'admin') {
+      throw new AppError(403, 'Only organization admins can run bulk SpamBot checks', ErrorCodes.FORBIDDEN);
+    }
+    if (!organizationId) {
+      throw new AppError(401, 'Unauthorized', ErrorCodes.UNAUTHORIZED);
+    }
+    const hours = parseInt(String(process.env.SPAMBOT_CHECK_INTERVAL_HOURS || '6'), 10) || 6;
+    await runSpamBotCheckAllStale(pool, telegramManager, log, {
+      intervalHours: hours,
+      gapMs: parseInt(String(process.env.SPAMBOT_CHECK_GAP_MS || '8000'), 10) || 8000,
+      organizationId,
+    });
+    res.json({ ok: true });
+  }));
+
   // GET / — list BD accounts with unread counts
   router.get('/', asyncHandler(async (req, res) => {
     const { id: userId, organizationId, role } = req.user;
@@ -115,7 +137,9 @@ export function accountsRouter({
               a.created_by_user_id AS owner_id,
               a.first_name, a.last_name, a.username, a.bio, a.photo_file_id, a.display_name, a.proxy_config,
               a.connection_state, a.disconnect_reason, a.last_error_code, a.last_error_at,
-              a.flood_wait_until, a.flood_wait_seconds, a.flood_reason, a.flood_last_at, a.timezone, a.working_hours_start, a.working_hours_end, a.working_days,
+              a.flood_wait_until, a.flood_wait_seconds, a.flood_reason, a.flood_last_at,
+              a.spam_restricted_at, a.spam_restriction_source, a.peer_flood_count_1h, a.peer_flood_first_at, a.last_spambot_check_at, a.last_spambot_result, a.send_blocked_until,
+              a.timezone, a.working_hours_start, a.working_hours_end, a.working_days,
               a.auto_responder_enabled, a.auto_responder_system_prompt, a.auto_responder_history_count,
               s.status AS last_status, s.message AS last_status_message, s.recorded_at AS last_status_at
        FROM bd_accounts a
@@ -173,6 +197,7 @@ export function accountsRouter({
       res.json({
         generatedAt: new Date().toISOString(),
         floodActiveCount: 0,
+        spamRestrictedCount: 0,
         limitsConfiguredCount: 0,
         warmingRunningGroups: 0,
         campaigns: { active: 0, paused: 0, draft: 0, completed: 0 },
@@ -181,10 +206,15 @@ export function accountsRouter({
       return;
     }
 
-    const [floodR, limitsR, campR, riskR] = await Promise.all([
+    const [floodR, spamR, limitsR, campR, riskR] = await Promise.all([
       pool.query(
         `SELECT COUNT(*)::int AS c FROM bd_accounts
          WHERE organization_id = $1 AND flood_wait_until IS NOT NULL AND flood_wait_until > NOW()`,
+        [organizationId]
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS c FROM bd_accounts
+         WHERE organization_id = $1 AND spam_restricted_at IS NOT NULL`,
         [organizationId]
       ),
       pool.query(
@@ -198,7 +228,7 @@ export function accountsRouter({
       ),
       pool.query(
         `SELECT a.id, a.telegram_id, a.display_name, a.first_name, a.last_name, a.username,
-                a.flood_wait_until, a.connection_state, a.sync_error,
+                a.flood_wait_until, a.spam_restricted_at, a.peer_flood_count_1h, a.connection_state, a.sync_error,
                 s.message AS last_status_message, s.status AS last_status
          FROM bd_accounts a
          LEFT JOIN LATERAL (
@@ -207,6 +237,7 @@ export function accountsRouter({
          WHERE a.organization_id = $1
            AND (
              (a.flood_wait_until IS NOT NULL AND a.flood_wait_until > NOW())
+             OR (a.spam_restricted_at IS NOT NULL)
              OR (a.connection_state IS NOT NULL AND a.connection_state <> 'connected')
              OR (a.sync_error IS NOT NULL AND TRIM(COALESCE(a.sync_error, '')) <> '')
              OR EXISTS (
@@ -241,6 +272,7 @@ export function accountsRouter({
     res.json({
       generatedAt: new Date().toISOString(),
       floodActiveCount: Number((floodR.rows[0] as { c?: number })?.c ?? 0),
+      spamRestrictedCount: Number((spamR.rows[0] as { c?: number })?.c ?? 0),
       limitsConfiguredCount: Number((limitsR.rows[0] as { c?: number })?.c ?? 0),
       warmingRunningGroups,
       campaigns: {
@@ -426,6 +458,41 @@ export function accountsRouter({
       isConnected,
       lastActivity: clientInfo?.lastActivity,
       reconnectAttempts: clientInfo?.reconnectAttempts || 0,
+    });
+  }));
+
+  // POST /:id/spambot-check — trigger @SpamBot /start and classify reply
+  router.post('/:id/spambot-check', asyncHandler(async (req, res) => {
+    assertBdAccountsNotViewer(req.user);
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    await getAccountOr404(pool, id, organizationId, 'id');
+    await requireBidiOwnAccount(pool, id, req.user);
+    if (!telegramManager.isConnected(id)) {
+      throw new AppError(400, 'BD account is not connected', ErrorCodes.BAD_REQUEST);
+    }
+    const result = await performSpamBotCheck(pool, telegramManager, id, organizationId);
+    res.json(result);
+  }));
+
+  // POST /:id/spam-clear — manual clear after user fixed account in Telegram
+  router.post('/:id/spam-clear', asyncHandler(async (req, res) => {
+    assertBdAccountsNotViewer(req.user);
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    await getAccountOr404(pool, id, organizationId, 'id');
+    await requireBidiOwnAccount(pool, id, req.user);
+    await clearBdAccountSpamRestriction(pool, id);
+    const row = await getAccountOr404<Record<string, unknown> & { owner_id?: string }>(
+      pool,
+      id,
+      organizationId,
+      BD_ACCOUNT_DETAIL_SELECT
+    );
+    const isConnected = telegramManager.isConnected(id);
+    res.json({
+      ...withProxyStatus(row as Record<string, unknown>, isConnected),
+      is_owner: row.owner_id != null && row.owner_id === req.user.id,
     });
   }));
 

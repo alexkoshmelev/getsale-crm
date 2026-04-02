@@ -183,7 +183,7 @@ export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
       }
 
       if (toInsert.length > 0) {
-        const values: any[] = [];
+        const values: unknown[] = [];
         const placeholders = toInsert.map((c, idx) => {
           const off = idx * 7 + 1;
           values.push(organizationId, c.firstName, c.lastName, c.email, c.phone, c.telegramId, defaultConsent);
@@ -191,7 +191,16 @@ export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
         });
         await pool.query(
           `INSERT INTO contacts (organization_id, first_name, last_name, email, phone, telegram_id, consent_flags)
-           VALUES ${placeholders.join(', ')}`,
+           VALUES ${placeholders.join(', ')}
+           ON CONFLICT (organization_id, telegram_id) WHERE telegram_id IS NOT NULL AND trim(telegram_id) <> ''
+           DO UPDATE SET
+             first_name = COALESCE(NULLIF(trim(EXCLUDED.first_name), ''), contacts.first_name),
+             last_name = COALESCE(EXCLUDED.last_name, contacts.last_name),
+             email = COALESCE(EXCLUDED.email, contacts.email),
+             phone = COALESCE(EXCLUDED.phone, contacts.phone),
+             telegram_id = COALESCE(EXCLUDED.telegram_id, contacts.telegram_id),
+             consent_flags = COALESCE(EXCLUDED.consent_flags, contacts.consent_flags),
+             updated_at = NOW()`,
           values
         );
         created += toInsert.length;
@@ -249,33 +258,45 @@ export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
         }
 
         const newContacts: { id: string; telegramId: string; firstName: string; lastName: string | null; username: string | null }[] = [];
-        const pageContactIds: string[] = [];
-
         for (const u of validUsers) {
           const existingId = existingMap.get(u.telegramId);
           if (existingId) {
-            pageContactIds.push(existingId);
             matched++;
           } else {
-            const newId = randomUUID();
-            pageContactIds.push(newId);
-            newContacts.push({ id: newId, ...u });
+            newContacts.push({ id: randomUUID(), ...u });
             created++;
           }
         }
 
         if (newContacts.length > 0) {
-          const values: any[] = [];
+          const values: unknown[] = [];
           const placeholders = newContacts.map((c, idx) => {
             const off = idx * 7 + 1;
             values.push(c.id, organizationId, c.firstName, c.lastName, c.username, c.telegramId, defaultConsent);
             return `($${off}, $${off + 1}, $${off + 2}, $${off + 3}, $${off + 4}, $${off + 5}, $${off + 6})`;
           });
-          await pool.query(
+          const insRes = await pool.query(
             `INSERT INTO contacts (id, organization_id, first_name, last_name, username, telegram_id, consent_flags)
-             VALUES ${placeholders.join(', ')}`,
+             VALUES ${placeholders.join(', ')}
+             ON CONFLICT (organization_id, telegram_id) WHERE telegram_id IS NOT NULL AND trim(telegram_id) <> ''
+             DO UPDATE SET
+               first_name = COALESCE(NULLIF(trim(EXCLUDED.first_name), ''), contacts.first_name),
+               last_name = COALESCE(EXCLUDED.last_name, contacts.last_name),
+               username = COALESCE(EXCLUDED.username, contacts.username),
+               consent_flags = COALESCE(EXCLUDED.consent_flags, contacts.consent_flags),
+               updated_at = NOW()
+             RETURNING id, telegram_id`,
             values
           );
+          for (const r of insRes.rows as { id: string; telegram_id: string }[]) {
+            existingMap.set(r.telegram_id, r.id);
+          }
+        }
+
+        const pageContactIds: string[] = [];
+        for (const u of validUsers) {
+          const id = existingMap.get(u.telegramId);
+          if (id) pageContactIds.push(id);
         }
 
         contactIds.push(...pageContactIds);
@@ -313,22 +334,44 @@ export function contactsRouter({ pool, rabbitmq, log, bdAccountsClient }: Deps):
     const { id: userId, organizationId } = req.user;
     const { firstName, lastName, displayName, username, email, phone, telegramId, companyId, consentFlags } = req.body;
 
-    const row = await withOrgContext(pool, organizationId, async (client) => {
+      const row = await withOrgContext(pool, organizationId, async (client) => {
       if (companyId) {
         const check = await client.query('SELECT 1 FROM companies WHERE id = $1 AND organization_id = $2', [companyId, organizationId]);
         if (check.rows.length === 0) {
           throw new AppError(400, 'Company not found or access denied', ErrorCodes.VALIDATION);
         }
       }
-      const result = await client.query(
-        `INSERT INTO contacts (organization_id, company_id, first_name, last_name, display_name, username, email, phone, telegram_id, consent_flags)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [organizationId, companyId ?? null,
-         (firstName ?? '').trim() || null, (lastName ?? '').trim() || null,
-         (displayName ?? '').trim() || null, (username ?? '').trim() || null,
-         email || null, phone ?? null, telegramId ?? null,
-         JSON.stringify(consentFlags ?? { email: false, sms: false, telegram: false, marketing: false })]
-      );
+      const consentJson = JSON.stringify(consentFlags ?? { email: false, sms: false, telegram: false, marketing: false });
+      const tg = telegramId != null && String(telegramId).trim() !== '' ? String(telegramId).trim() : null;
+      const result = tg
+        ? await client.query(
+            `INSERT INTO contacts (organization_id, company_id, first_name, last_name, display_name, username, email, phone, telegram_id, consent_flags)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (organization_id, telegram_id) WHERE telegram_id IS NOT NULL AND trim(telegram_id) <> ''
+             DO UPDATE SET
+               first_name = COALESCE(NULLIF(trim(EXCLUDED.first_name), ''), contacts.first_name),
+               last_name = COALESCE(EXCLUDED.last_name, contacts.last_name),
+               display_name = COALESCE(EXCLUDED.display_name, contacts.display_name),
+               username = COALESCE(EXCLUDED.username, contacts.username),
+               email = COALESCE(EXCLUDED.email, contacts.email),
+               phone = COALESCE(EXCLUDED.phone, contacts.phone),
+               company_id = COALESCE(EXCLUDED.company_id, contacts.company_id),
+               consent_flags = COALESCE(EXCLUDED.consent_flags, contacts.consent_flags),
+               updated_at = NOW()
+             RETURNING *`,
+            [organizationId, companyId ?? null,
+             (firstName ?? '').trim() || null, (lastName ?? '').trim() || null,
+             (displayName ?? '').trim() || null, (username ?? '').trim() || null,
+             email || null, phone ?? null, tg, consentJson]
+          )
+        : await client.query(
+            `INSERT INTO contacts (organization_id, company_id, first_name, last_name, display_name, username, email, phone, telegram_id, consent_flags)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+            [organizationId, companyId ?? null,
+             (firstName ?? '').trim() || null, (lastName ?? '').trim() || null,
+             (displayName ?? '').trim() || null, (username ?? '').trim() || null,
+             email || null, phone ?? null, telegramId ?? null, consentJson]
+          );
       return result.rows[0] as Record<string, unknown>;
     });
 

@@ -32,6 +32,8 @@ export type BdHealthRiskRow = {
   last_name?: string | null;
   username?: string | null;
   flood_wait_until?: string | null;
+  spam_restricted_at?: string | null;
+  peer_flood_count_1h?: number | null;
   connection_state?: string | null;
   sync_error?: string | null;
   last_status_message?: string | null;
@@ -41,6 +43,7 @@ export type BdHealthRiskRow = {
 export type BdAccountHealthSummary = {
   generatedAt: string;
   floodActiveCount: number;
+  spamRestrictedCount: number;
   limitsConfiguredCount: number;
   warmingRunningGroups: number;
   campaigns: { active: number; paused: number; draft: number; completed: number };
@@ -88,6 +91,26 @@ export async function deleteBdAccount(accountId: string): Promise<void> {
 
 export async function patchBdAccount(accountId: string, body: Record<string, unknown>): Promise<BDAccount> {
   const { data } = await apiClient.patch<BDAccount>(`/api/bd-accounts/${accountId}`, body);
+  return data;
+}
+
+export async function postSpamBotCheck(accountId: string): Promise<{
+  restricted: boolean;
+  classification: string;
+  summary: string;
+  rawSnippet: string;
+}> {
+  const { data } = await apiClient.post(`/api/bd-accounts/${accountId}/spambot-check`);
+  return data as {
+    restricted: boolean;
+    classification: string;
+    summary: string;
+    rawSnippet: string;
+  };
+}
+
+export async function postSpamClear(accountId: string): Promise<BDAccount> {
+  const { data } = await apiClient.post<BDAccount>(`/api/bd-accounts/${accountId}/spam-clear`);
   return data;
 }
 

@@ -81,6 +81,9 @@ export interface BdAccountRow {
   flood_wait_seconds: number | null;
   flood_reason: string | null;
   flood_last_at: Date | string | null;
+  spam_restricted_at?: Date | string | null;
+  spam_restriction_source?: string | null;
+  peer_flood_count_1h?: number | null;
   photo_file_id: string | null;
   is_active: boolean;
   connection_state: string | null;

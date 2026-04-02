@@ -61,6 +61,7 @@ export class MessageHandler {
 
       if (!chatId) return;
 
+      let resolvedUsernameFromEntity: string | null = null;
       let allowed = await this.messageDb.isChatAllowedForAccount(accountId, chatId);
       if (!allowed && /^[0-9]+$/.test(chatId)) {
         const clientInfo = this.clients.get(accountId);
@@ -68,6 +69,7 @@ export class MessageHandler {
           try {
             const ent = await clientInfo.client.getEntity(parseInt(chatId, 10));
             if (ent && (ent as { className?: string }).className === 'User') {
+              resolvedUsernameFromEntity = ((ent as Api.User).username ?? '').trim() || null;
               await this.messageDb.tryMigrateSyncChatUsernameAliases(
                 accountId,
                 chatId,
@@ -86,7 +88,13 @@ export class MessageHandler {
       }
 
       const contactTelegramId = senderId || chatId;
-      const contactId = await this.contactManager.ensureContactEnrichedFromTelegram(organizationId, accountId, contactTelegramId);
+      const contactId = resolvedUsernameFromEntity
+        ? await this.contactManager.upsertContactFromTelegramUser(organizationId, contactTelegramId, {
+            firstName: '',
+            lastName: null,
+            username: resolvedUsernameFromEntity,
+          })
+        : await this.contactManager.ensureContactEnrichedFromTelegram(organizationId, accountId, contactTelegramId);
       const direction = isOut ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
       const telegramDate = date ? (typeof date === 'number' ? new Date(date * 1000) : new Date(date)) : null;
       const serialized: SerializedTelegramMessage = {
@@ -221,7 +229,19 @@ export class MessageHandler {
         }
       }
       if (contactId == null) {
-        contactId = await this.contactManager.upsertContactFromTelegramUser(organizationId, tid);
+        const sender = (message as any)._sender;
+        const senderUsername = sender?.username ? String(sender.username).trim() || null : null;
+        contactId = await this.contactManager.upsertContactFromTelegramUser(
+          organizationId,
+          tid,
+          senderUsername
+            ? {
+                firstName: (sender?.firstName ?? '').trim(),
+                lastName: (sender?.lastName ?? '').trim() || null,
+                username: senderUsername,
+              }
+            : undefined
+        );
       }
       const direction = isOut ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
 

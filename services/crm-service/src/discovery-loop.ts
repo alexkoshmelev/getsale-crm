@@ -575,11 +575,19 @@ async function processParseTask(client: PoolClient, task: DiscoveryTaskRow, deps
              contactId = existing.rows[0].id;
           } else {
              contactId = randomUUID();
-             await client.query(
+             const ins = await client.query(
                `INSERT INTO contacts (id, organization_id, first_name, last_name, username, telegram_id, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+                VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+                ON CONFLICT (organization_id, telegram_id) WHERE telegram_id IS NOT NULL AND trim(telegram_id) <> ''
+                DO UPDATE SET
+                  first_name = COALESCE(NULLIF(trim(EXCLUDED.first_name), ''), contacts.first_name),
+                  last_name = COALESCE(EXCLUDED.last_name, contacts.last_name),
+                  username = COALESCE(EXCLUDED.username, contacts.username),
+                  updated_at = NOW()
+                RETURNING id`,
                [contactId, task.organization_id, (typeof firstName === 'string' ? firstName : 'Contact') || 'Contact', lastName, username, telegramId]
              );
+             contactId = (ins.rows[0] as { id: string }).id;
           }
           contactIds.push(contactId);
 

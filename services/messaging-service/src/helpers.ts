@@ -23,6 +23,34 @@ export async function ensureConversation(
   }
 }
 
+/**
+ * When a send resolves to a different channel_id than the request (e.g. username -> numeric id),
+ * repoint orphan conversation rows keyed by the old peer string so we do not duplicate threads.
+ */
+export async function mergeOrphanConversationPeerToCanonical(
+  db: Pool | PoolClient,
+  params: {
+    organizationId: string;
+    bdAccountId: string | null;
+    channel: string;
+    fromChannelId: string;
+    toChannelId: string;
+  }
+): Promise<void> {
+  if (params.fromChannelId === params.toChannelId) return;
+  await db.query(
+    `UPDATE conversations SET channel_id = $1, updated_at = NOW()
+     WHERE organization_id = $2 AND bd_account_id IS NOT DISTINCT FROM $3
+       AND channel = $4 AND channel_id = $5
+       AND NOT EXISTS (
+         SELECT 1 FROM conversations c2
+         WHERE c2.organization_id = $2 AND c2.bd_account_id IS NOT DISTINCT FROM $3
+           AND c2.channel = $4 AND c2.channel_id = $1
+       )`,
+    [params.toChannelId, params.organizationId, params.bdAccountId, params.channel, params.fromChannelId]
+  );
+}
+
 /** Attach lead to conversation (idempotent by conversationId + leadId). Triggered by LEAD_CREATED_FROM_CAMPAIGN.
  *  Scoped by organizationId; runs inside RLS context for defense-in-depth. On duplicate event delivery — safe no-op. */
 export async function attachLead(

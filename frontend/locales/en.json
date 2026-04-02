@@ -656,9 +656,9 @@
     "dailySendLimitHint": "Max messages one account sends per day in this campaign. Lower values reduce flood risk.",
     "delaySeconds": "{{count}}s",
     "delayMinutes": "{{count}}m",
-    "enrichContactsBeforeStart": "Enrich contacts from Telegram (name, username) before start",
-    "enrichContactsBeforeStartHint": "Runs when you click Start. Resolves Telegram user id via API when missing: uses numeric ID if already on the contact, otherwise looks up by @username (requires a connected BD account). Improves reply matching.",
     "randomizeWithAI": "Randomize message text via AI service",
+    "enrichContactsBeforeStart": "Resolve contacts via Telegram before start",
+    "enrichContactsBeforeStartHint": "Resolves Telegram user id via API when missing: uses numeric ID if already on the contact, otherwise looks up by @username (requires a connected BD account). Optional — replies are tracked automatically even without this.",
     "schedule": "Schedule",
     "workingHours": "Working hours",
     "workStart": "Start",
@@ -766,7 +766,18 @@
     "accountDisconnected": "Account disconnected",
     "totalSent": "Total Sent",
     "totalReplied": "Total Replied",
-    "totalWon": "Total Won"
+    "totalWon": "Total Won",
+    "accountSpamRestricted": "SpamBot / restriction active",
+    "accountPeerFloodWarning": "PEER_FLOOD signals (1h): {{count}}",
+    "pauseAccount": "Pause 2h (account)",
+    "resumeAccount": "Resume account",
+    "removeAccount": "Remove from campaign",
+    "removeAccountConfirm": "Remove {{name}} from this campaign? Pending participants will be reassigned to other sending accounts.",
+    "removeAccountNeedTwo": "Add another sending account before removing this one.",
+    "spamBotBanner": "One or more sending accounts are restricted (SpamBot / limits). Outbound campaign messages from those accounts are paused until you fix the account or clear the status.",
+    "spamBotRecheckAction": "SpamBot check",
+    "spamBotRecheckNamed": "Recheck {{name}}",
+    "spamBotGoToAccount": "Open BD account"
   },
   "analytics": {
     "title": "Analytics",
@@ -1012,6 +1023,14 @@
     "floodAfterBody": "If sends still fail, space out outreach and review account health.",
     "floodAfterLinkHealth": "Team health dashboard",
     "floodAfterLinkCampaigns": "Campaigns",
+    "spamPanelTitleRestricted": "Messaging restriction detected",
+    "spamPanelBodyRestricted": "Telegram may block outreach to new contacts until you resolve this in the Telegram app (often via @SpamBot).",
+    "spamPanelSource": "Source",
+    "spamPanelPeerFloodHint": "Recent PEER_FLOOD signals in the last hour: {{count}}. Slow down or review account health.",
+    "spamPanelLastCheck": "Last SpamBot check",
+    "spamCheckAction": "Run SpamBot check",
+    "spamClearAction": "Mark restriction cleared",
+    "spamPanelDocHint": "Open Telegram, chat with @SpamBot, and follow the prompts if your account was limited.",
     "runtimeDeferredTitle": "Runtime not activated",
     "runtimeDeferredBody": "Activate Telegram runtime when your workspace uses this option.",
     "runtimeDeferredCta": "Activate",
@@ -1080,6 +1099,15 @@
           "neutral": "No flood data."
         }
       },
+      "spam": {
+        "label": "Spam / outreach limits",
+        "hint": {
+          "ok": "No SpamBot restriction on file.",
+          "warning": "PEER_FLOOD signals recently — review pace.",
+          "error": "Account marked restricted; outreach may be blocked.",
+          "neutral": "No spam signals."
+        }
+      },
       "autoresponder": {
         "label": "Auto-responder",
         "hint": {
@@ -1098,6 +1126,7 @@
     "retry": "Retry",
     "serverNote": "Snapshot from server: {{time}}",
     "cardFlood": "Accounts in FLOOD_WAIT",
+    "cardSpam": "Accounts with SpamBot / restriction",
     "cardLimits": "Accounts with daily limits set",
     "cardWarming": "Warming groups running",
     "cardCampaignsActive": "Active campaigns",
@@ -1113,7 +1142,8 @@
       "proxy": "Proxy error",
       "connection_reconnecting": "Reconnecting",
       "connection_disconnected": "Disconnected",
-      "connection_reauth_required": "Re-login required"
+      "connection_reauth_required": "Re-login required",
+      "spam_restricted": "Spam / restriction"
     }
   },
   "messaging": {

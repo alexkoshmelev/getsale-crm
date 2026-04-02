@@ -230,6 +230,22 @@ export class MessageDb {
        WHERE bd_account_id = $1 AND telegram_chat_id = ANY($2::text[])`,
       [accountId, aliases, numericChatId]
     );
+    await this.pool.query(
+      `UPDATE messages SET channel_id = $3, updated_at = NOW()
+       WHERE bd_account_id = $1 AND channel = 'telegram' AND channel_id = ANY($2::text[])`,
+      [accountId, aliases, numericChatId]
+    );
+    await this.pool.query(
+      `UPDATE conversations SET channel_id = $3, updated_at = NOW()
+       WHERE bd_account_id IS NOT DISTINCT FROM $1::uuid AND channel = 'telegram' AND channel_id = ANY($2::text[])
+         AND NOT EXISTS (
+           SELECT 1 FROM conversations c2
+           WHERE c2.organization_id = conversations.organization_id
+             AND c2.bd_account_id IS NOT DISTINCT FROM $1::uuid
+             AND c2.channel = 'telegram' AND c2.channel_id = $3
+         )`,
+      [accountId, aliases, numericChatId]
+    );
   }
 
   async isChatInNonAllChatsFolder(accountId: string, telegramChatId: string): Promise<boolean> {

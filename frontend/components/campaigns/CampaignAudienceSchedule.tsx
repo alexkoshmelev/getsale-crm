@@ -142,11 +142,11 @@ export function CampaignAudienceSchedule({
   const [leadStageId, setLeadStageId] = useState<string>(() => lcs?.default_stage_id ?? '');
   const [leadResponsibleId, setLeadResponsibleId] = useState<string>(() => (lcs as { default_responsible_id?: string })?.default_responsible_id ?? '');
   const leadCreationEnabled = leadTrigger === 'on_first_send' || leadTrigger === 'on_reply';
-  const [enrichContactsBeforeStart, setEnrichContactsBeforeStart] = useState<boolean>(() =>
-    !!(campaign.target_audience as { enrichContactsBeforeStart?: boolean } | undefined)?.enrichContactsBeforeStart
-  );
   const [randomizeWithAI, setRandomizeWithAI] = useState<boolean>(() =>
     !!(campaign.target_audience as { randomizeWithAI?: boolean } | undefined)?.randomizeWithAI
+  );
+  const [enrichBeforeStart, setEnrichBeforeStart] = useState<boolean>(() =>
+    !!(campaign.target_audience as { enrichContactsBeforeStart?: boolean } | undefined)?.enrichContactsBeforeStart
   );
   const [dailySendTarget, setDailySendTarget] = useState<string>(() => {
     const raw = campaign.target_audience?.dailySendTarget;
@@ -178,11 +178,6 @@ export function CampaignAudienceSchedule({
   }, [campaign.id, campaign.pipeline_id, campaign.lead_creation_settings]);
 
   useEffect(() => {
-    const next = !!(campaign.target_audience as { enrichContactsBeforeStart?: boolean } | undefined)?.enrichContactsBeforeStart;
-    setEnrichContactsBeforeStart(next);
-  }, [campaign.id, campaign.target_audience]);
-
-  useEffect(() => {
     const raw = campaign.target_audience?.dailySendTarget;
     if (typeof raw === 'number' && Number.isFinite(raw)) {
       setDailySendTarget(String(Math.min(DAILY_SEND_MAX, Math.max(DAILY_SEND_MIN, Math.floor(raw)))));
@@ -190,6 +185,10 @@ export function CampaignAudienceSchedule({
       setDailySendTarget('');
     }
   }, [campaign.id, campaign.target_audience?.dailySendTarget]);
+
+  useEffect(() => {
+    setEnrichBeforeStart(!!campaign.target_audience?.enrichContactsBeforeStart);
+  }, [campaign.id, campaign.target_audience?.enrichContactsBeforeStart]);
 
   useEffect(() => {
     Promise.all([
@@ -221,8 +220,8 @@ export function CampaignAudienceSchedule({
     audienceSource?: AudienceSource;
     bdAccountId?: string;
     bdAccountIds?: string[];
-    enrichContactsBeforeStart?: boolean;
     randomizeWithAI?: boolean;
+    enrichContactsBeforeStart?: boolean;
     sendDelaySeconds?: number;
     sendDelayMinSeconds?: number;
     sendDelayMaxSeconds?: number;
@@ -232,8 +231,8 @@ export function CampaignAudienceSchedule({
     const ids = overrides?.contactIds ?? contactIds;
     const src = overrides?.audienceSource ?? audienceSource;
     const accIds = overrides?.bdAccountIds ?? (overrides?.bdAccountId !== undefined ? [overrides.bdAccountId!] : bdAccountIds);
-    const enrich = overrides?.enrichContactsBeforeStart ?? enrichContactsBeforeStart;
     const randomizeAI = overrides?.randomizeWithAI ?? randomizeWithAI;
+    const enrich = overrides?.enrichContactsBeforeStart ?? enrichBeforeStart;
     const delayMin = Math.max(DELAY_MIN_SECONDS, Math.min(DELAY_MAX_SECONDS, Math.floor(overrides?.sendDelayMinSeconds ?? sendDelayMinSeconds)));
     const delayMax = Math.max(delayMin, Math.min(DELAY_MAX_SECONDS, Math.floor(overrides?.sendDelayMaxSeconds ?? sendDelayMaxSeconds)));
     const dailyParsed: number | undefined = (() => {
@@ -279,8 +278,8 @@ export function CampaignAudienceSchedule({
           sendDelaySeconds: delayMin, // legacy compatibility for old workers/reads
           sendDelayMinSeconds: delayMin,
           sendDelayMaxSeconds: delayMax,
-          enrichContactsBeforeStart: enrich,
           randomizeWithAI: randomizeAI,
+          enrichContactsBeforeStart: enrich,
           ...(dailyParsed !== undefined ? { dailySendTarget: dailyParsed } : {}),
         },
         schedule: null,
@@ -301,7 +300,7 @@ export function CampaignAudienceSchedule({
     } finally {
       setSaving(false);
     }
-  }, [campaignId, contactIds, audienceSource, bdAccountIds, companyId, pipelineId, sendDelayMinSeconds, sendDelayMaxSeconds, dailySendTarget, enrichContactsBeforeStart, randomizeWithAI, leadTrigger, leadPipelineId, leadStageId, leadResponsibleId, onUpdate, t]);
+  }, [campaignId, contactIds, audienceSource, bdAccountIds, companyId, pipelineId, sendDelayMinSeconds, sendDelayMaxSeconds, dailySendTarget, randomizeWithAI, leadTrigger, leadPipelineId, leadStageId, leadResponsibleId, onUpdate, t]);
 
   const percentFromSeconds = (seconds: number): number =>
     ((seconds - DELAY_MIN_SECONDS) / (DELAY_MAX_SECONDS - DELAY_MIN_SECONDS)) * 100;
@@ -684,15 +683,15 @@ export function CampaignAudienceSchedule({
         />
       </section>
 
-      {/* 4. Обогащение контактов перед запуском */}
+      {/* 4. AI и опции */}
       <section className="rounded-xl border border-border bg-card p-6">
         <label className="flex items-center gap-3 cursor-pointer">
           <input
             type="checkbox"
-            checked={enrichContactsBeforeStart}
+            checked={enrichBeforeStart}
             onChange={(e) => {
               const checked = e.target.checked;
-              setEnrichContactsBeforeStart(checked);
+              setEnrichBeforeStart(checked);
               saveAudience({ enrichContactsBeforeStart: checked });
             }}
             disabled={!isDraft}

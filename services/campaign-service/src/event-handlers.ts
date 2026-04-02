@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import { RabbitMQClient } from '@getsale/utils';
 import { EventType, type MessageReceivedEvent } from '@getsale/events';
+import { handleBdAccountSpamRestricted } from './campaign-spam-events';
 import { recalculatePendingForCampaignsUsingBdAccount } from './campaign-pending-reschedule';
 import { CampaignStatus } from '@getsale/types';
 import { Logger } from '@getsale/logger';
@@ -39,7 +40,14 @@ export interface EventHandlerDeps {
 export async function subscribeToEvents(deps: EventHandlerDeps): Promise<void> {
   const { rabbitmq } = deps;
   await rabbitmq.subscribeToEvents(
-    [EventType.MESSAGE_RECEIVED, EventType.LEAD_CREATED, EventType.LEAD_STAGE_CHANGED, EventType.BD_ACCOUNT_FLOOD_CLEARED],
+    [
+      EventType.MESSAGE_RECEIVED,
+      EventType.LEAD_CREATED,
+      EventType.LEAD_STAGE_CHANGED,
+      EventType.BD_ACCOUNT_FLOOD_CLEARED,
+      EventType.BD_ACCOUNT_SPAM_RESTRICTED,
+      EventType.BD_ACCOUNT_SPAM_CLEARED,
+    ],
     (event: any) => processEvent(deps, event),
     'events',
     'campaign-service'
@@ -53,6 +61,23 @@ async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
     const bdAccountId = event.data?.bdAccountId;
     if (typeof bdAccountId === 'string' && bdAccountId.trim()) {
       await recalculatePendingForCampaignsUsingBdAccount(pool, bdAccountId, log);
+    }
+    return;
+  }
+
+  if (event.type === EventType.BD_ACCOUNT_SPAM_RESTRICTED) {
+    const bdAccountId = event.data?.bdAccountId;
+    const orgId = event.organizationId as string | undefined;
+    if (typeof bdAccountId === 'string' && bdAccountId.trim() && orgId) {
+      await handleBdAccountSpamRestricted(pool, rabbitmq, log, bdAccountId.trim(), orgId);
+    }
+    return;
+  }
+
+  if (event.type === EventType.BD_ACCOUNT_SPAM_CLEARED) {
+    const bdAccountId = event.data?.bdAccountId;
+    if (typeof bdAccountId === 'string' && bdAccountId.trim()) {
+      await recalculatePendingForCampaignsUsingBdAccount(pool, bdAccountId.trim(), log);
     }
     return;
   }

@@ -128,7 +128,7 @@ export async function matchOrCreateContactsFromRows(
     }
 
     const toInsert: CsvContactRow[] = [];
-    const insertIds: string[] = [];
+    const pendingInsertIndices: number[] = [];
 
     for (const row of batch) {
       const uKey = row.username ? row.username.toLowerCase() : '';
@@ -139,12 +139,18 @@ export async function matchOrCreateContactsFromRows(
         null;
       if (existingId) {
         matched++;
+        if (row.telegramId?.trim() && !matchByTg.has(row.telegramId)) {
+          await pool.query(
+            `UPDATE contacts SET telegram_id = $1, updated_at = NOW()
+             WHERE id = $2 AND organization_id = $3 AND (telegram_id IS NULL OR TRIM(telegram_id) = '')`,
+            [row.telegramId.trim(), existingId, orgId]
+          );
+        }
         contactIds.push(existingId);
       } else {
-        const newId = randomUUID();
-        insertIds.push(newId);
+        pendingInsertIndices.push(contactIds.length);
+        contactIds.push('');
         toInsert.push(row);
-        contactIds.push(newId);
       }
     }
 
@@ -152,14 +158,26 @@ export async function matchOrCreateContactsFromRows(
       const values: QueryParam[] = [];
       const placeholders = toInsert.map((c, idx) => {
         const off = idx * 8 + 1;
-        values.push(insertIds[idx], orgId, c.firstName, c.lastName, c.email, c.phone, c.telegramId, c.username);
+        values.push(randomUUID(), orgId, c.firstName, c.lastName, c.email, c.phone, c.telegramId, c.username);
         return `($${off}, $${off + 1}, $${off + 2}, $${off + 3}, $${off + 4}, $${off + 5}, $${off + 6}, $${off + 7}, NOW(), NOW())`;
       });
-      await pool.query(
+      const insRes = await pool.query(
         `INSERT INTO contacts (id, organization_id, first_name, last_name, email, phone, telegram_id, username, created_at, updated_at)
-         VALUES ${placeholders.join(', ')}`,
+         VALUES ${placeholders.join(', ')}
+         ON CONFLICT (organization_id, telegram_id) WHERE telegram_id IS NOT NULL AND trim(telegram_id) <> ''
+         DO UPDATE SET
+           first_name = COALESCE(NULLIF(trim(EXCLUDED.first_name), ''), contacts.first_name),
+           last_name = COALESCE(EXCLUDED.last_name, contacts.last_name),
+           email = COALESCE(EXCLUDED.email, contacts.email),
+           phone = COALESCE(EXCLUDED.phone, contacts.phone),
+           username = COALESCE(EXCLUDED.username, contacts.username),
+           updated_at = NOW()
+         RETURNING id`,
         values
       );
+      for (let i = 0; i < insRes.rows.length; i++) {
+        contactIds[pendingInsertIndices[i]] = (insRes.rows[i] as { id: string }).id;
+      }
       created += toInsert.length;
     }
   }

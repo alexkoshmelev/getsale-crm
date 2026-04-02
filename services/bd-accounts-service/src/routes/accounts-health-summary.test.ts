@@ -41,6 +41,9 @@ describe('GET /api/bd-accounts/health-summary', () => {
       if (sql.includes('COUNT(*)::int AS c FROM bd_accounts') && sql.includes('flood_wait_until')) {
         return { rows: [{ c: 0 }], rowCount: 1 };
       }
+      if (sql.includes('COUNT(*)::int AS c FROM bd_accounts') && sql.includes('spam_restricted_at')) {
+        return { rows: [{ c: 0 }], rowCount: 1 };
+      }
       if (sql.includes('max_dm_per_day')) {
         return { rows: [{ c: 3 }], rowCount: 1 };
       }
@@ -66,6 +69,7 @@ describe('GET /api/bd-accounts/health-summary', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
       floodActiveCount: 0,
+      spamRestrictedCount: 0,
       limitsConfiguredCount: 3,
       warmingRunningGroups: 0,
       campaigns: {

@@ -56,6 +56,13 @@ export interface BDAccount {
   flood_reason?: string | null;
   /** When flood was last recorded. */
   flood_last_at?: string | null;
+  /** Telegram SpamBot / escalation marked account as restricted. */
+  spam_restricted_at?: string | null;
+  spam_restriction_source?: string | null;
+  peer_flood_count_1h?: number | null;
+  last_spambot_check_at?: string | null;
+  last_spambot_result?: string | null;
+  send_blocked_until?: string | null;
   /** When false, optional runtime activation (future gateway feature). */
   gramjs_runtime_enabled?: boolean;
   timezone?: string | null;

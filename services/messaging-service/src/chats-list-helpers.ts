@@ -202,6 +202,88 @@ export function normalizeChatRows<T extends ChatListRow>(rows: T[]): T[] {
   return rows;
 }
 
+function parseLastMessageAtMs(r: ChatListRow): number {
+  const t = r.last_message_at;
+  if (t == null || String(t).trim() === '') return 0;
+  const ms = new Date(String(t)).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+/**
+ * True for DM user rows we can collapse by contacts.telegram_id / contact_id.
+ * Excludes Telegram groups/channels (negative numeric peer ids).
+ */
+export function shouldDedupeTelegramDmRow(r: ChatListRow): boolean {
+  if (r.peer_type !== 'user') return false;
+  const cid = r.channel_id != null ? String(r.channel_id).trim() : '';
+  if (!cid) return false;
+  if (/^-?\d+$/.test(cid) && parseInt(cid, 10) < 0) return false;
+  return true;
+}
+
+function dedupeIdentityKey(r: ChatListRow): string | null {
+  const tg = r.telegram_id != null ? String(r.telegram_id).trim() : '';
+  if (tg !== '') return `tg:${tg}`;
+  const contactId = r.contact_id != null ? String(r.contact_id).trim() : '';
+  if (contactId !== '') return `c:${contactId}`;
+  return null;
+}
+
+/**
+ * Merge list rows that refer to the same Telegram user (username vs numeric id, sync duplicates).
+ * Groups/channels (negative channel_id) are left untouched.
+ */
+export function dedupeTelegramUserChats<T extends ChatListRow>(rows: T[]): T[] {
+  const passthrough: T[] = [];
+  const groups = new Map<string, T[]>();
+
+  for (const r of rows) {
+    if (!shouldDedupeTelegramDmRow(r)) {
+      passthrough.push(r);
+      continue;
+    }
+    const key = dedupeIdentityKey(r);
+    if (!key) {
+      passthrough.push(r);
+      continue;
+    }
+    const list = groups.get(key) ?? [];
+    list.push(r);
+    groups.set(key, list);
+  }
+
+  const merged: T[] = [];
+  for (const [, group] of groups) {
+    if (group.length === 1) {
+      merged.push(group[0]!);
+      continue;
+    }
+    let winner = group[0]!;
+    let winnerMs = parseLastMessageAtMs(winner);
+    for (let i = 1; i < group.length; i++) {
+      const g = group[i]!;
+      const ms = parseLastMessageAtMs(g);
+      if (ms > winnerMs) {
+        winner = g;
+        winnerMs = ms;
+      } else if (ms === winnerMs) {
+        const wNum = /^\d+$/.test(String(winner.channel_id ?? '').trim());
+        const gNum = /^\d+$/.test(String(g.channel_id ?? '').trim());
+        if (gNum && !wNum) winner = g;
+      }
+    }
+    const sumUnread = group.reduce((acc, x) => acc + (Number(x.unread_count) || 0), 0);
+    const out = { ...winner, unread_count: sumUnread } as T;
+    merged.push(out);
+  }
+
+  return [...passthrough, ...merged];
+}
+
+function sortChatsByLastMessageAtDesc<T extends ChatListRow>(rows: T[]): T[] {
+  return [...rows].sort((a, b) => parseLastMessageAtMs(b) - parseLastMessageAtMs(a));
+}
+
 /** Run sync-list query (bdAccountId branch) and return normalized rows. */
 export async function runSyncListQuery(
   client: PoolClient,
@@ -211,7 +293,7 @@ export async function runSyncListQuery(
 ): Promise<ChatListRow[]> {
   const result = await client.query(getSyncListQuery(), [orgId, bdId, syncListJson]);
   const rows = result.rows as ChatListRow[];
-  return normalizeChatRows(rows);
+  return sortChatsByLastMessageAtDesc(dedupeTelegramUserChats(normalizeChatRows(rows)));
 }
 
 /** Run default chats query and return normalized rows. */
@@ -222,5 +304,5 @@ export async function runDefaultChatsQuery(
 ): Promise<ChatListRow[]> {
   const result = await client.query(getDefaultChatsQuery(hasChannelFilter), params);
   const rows = result.rows as ChatListRow[];
-  return normalizeChatRows(rows);
+  return sortChatsByLastMessageAtDesc(dedupeTelegramUserChats(normalizeChatRows(rows)));
 }

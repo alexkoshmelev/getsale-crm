@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { getBdAccountHealthSummary, type BdAccountHealthSummary, type BdHealthRiskRow } from '@/lib/api/bd-accounts';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { Loader2, AlertTriangle, Flame, Send, Gauge, ExternalLink } from 'lucide-react';
+import { Loader2, AlertTriangle, Flame, Send, Gauge, ExternalLink, Ban } from 'lucide-react';
 import { reportError } from '@/lib/error-reporter';
 import { clsx } from 'clsx';
 
@@ -30,6 +30,7 @@ function serverRiskFlags(r: BdHealthRiskRow): string[] {
   if (r.sync_error?.trim()) keys.push('sync');
   const lm = (r.last_status_message || '').toLowerCase();
   if (r.last_status === 'error' && /proxy|socks|connection refused/.test(lm)) keys.push('proxy');
+  if (r.spam_restricted_at) keys.push('spam_restricted');
   return keys;
 }
 
@@ -86,6 +87,14 @@ export function AccountHealthDashboard() {
       tone: summary.floodActiveCount > 0 ? 'warn' : 'muted',
     },
     {
+      key: 'spam',
+      icon: Ban,
+      value: summary.spamRestrictedCount ?? 0,
+      label: t('bdAccountHealth.cardSpam'),
+      href: '/dashboard/bd-accounts' as string | null,
+      tone: (summary.spamRestrictedCount ?? 0) > 0 ? 'warn' : 'muted',
+    },
+    {
       key: 'limits',
       icon: Gauge,
       value: summary.limitsConfiguredCount,
@@ -123,7 +132,7 @@ export function AccountHealthDashboard() {
         {t('bdAccountHealth.serverNote', { time: new Date(summary.generatedAt).toLocaleString() })}
       </p>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
         {statCards.map((c) => {
           const Icon = c.icon;
           const inner = (

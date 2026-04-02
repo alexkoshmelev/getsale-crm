@@ -84,7 +84,12 @@ export function registerSyncChatsSyncRoutes(router: Router, deps: SyncRouteDeps)
         const primaryFolder = folderIds[0] ?? folderId ?? null;
         await client.query(
           `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id, sync_list_origin)
-           VALUES ($1, $2, $3, $4, false, $5, 'sync_selection')`,
+           VALUES ($1, $2, $3, $4, false, $5, 'sync_selection')
+           ON CONFLICT (bd_account_id, telegram_chat_id) DO UPDATE SET
+             title = EXCLUDED.title,
+             peer_type = EXCLUDED.peer_type,
+             folder_id = EXCLUDED.folder_id,
+             sync_list_origin = 'sync_selection'`,
           [id, chatId, title, peerType, primaryFolder]
         );
         for (const fid of folderIds) {

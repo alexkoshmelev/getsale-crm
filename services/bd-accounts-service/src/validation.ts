@@ -174,6 +174,8 @@ export const BdSendMessageSchema = z
     fileName: z.string().max(512).optional(),
     replyToMessageId: z.union([z.string(), z.number()]).optional(),
     idempotencyKey: z.string().max(256).optional(),
+    /** Retry send with this peer string if chatId fails with entity-not-found (e.g. numeric id vs username) */
+    usernameHint: z.string().min(1).max(256).optional().nullable(),
   })
   .refine((d) => (d.text != null && d.text !== '') || (d.fileBase64 != null && d.fileBase64 !== ''), { message: 'text or fileBase64 is required' });
 
@@ -215,4 +217,10 @@ export const BdChatIdBodySchema = z.object({
   chatId: z.string().min(1).max(256),
   /** Last read inbound message id (Telegram). Omit to use 0 (client default). */
   maxId: z.number().int().nonnegative().optional(),
+});
+
+/** Lazy resolve for campaigns: username or numeric id → stable string peer id (primes GramJS cache). */
+export const BdResolvePeerSchema = z.object({
+  chatId: z.string().min(1).max(256),
+  usernameHint: z.string().max(128).trim().optional().nullable(),
 });

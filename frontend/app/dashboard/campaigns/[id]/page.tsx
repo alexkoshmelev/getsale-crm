@@ -34,17 +34,18 @@ import {
   startCampaign,
   pauseCampaign,
   updateCampaign,
-  enrichContactsFromTelegram,
   addCampaignParticipants,
   fetchCampaignSends,
   deleteCampaign,
   duplicateCampaign,
   checkCampaignAudienceConflicts,
+  enrichContactsFromTelegram,
   type CampaignWithDetails,
   type CampaignStats,
   type CampaignAnalytics,
   type CampaignSendsPage,
 } from '@/lib/api/campaigns';
+import { postSpamBotCheck } from '@/lib/api/bd-accounts';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import { canManageCampaignLifecycle } from '@/lib/permissions';
 import { SequenceBuilderCanvas } from '@/components/campaigns/SequenceBuilderCanvas';
@@ -630,8 +631,40 @@ export default function CampaignDetailPage() {
             </button>
           </div>
 
+          {campaign?.bd_accounts &&
+            campaign.bd_accounts.some((a) => a.spamRestrictedAt) && (
+              <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-900 dark:text-red-100">
+                <p className="font-medium">{t('campaigns.spamBotBanner')}</p>
+                <div className="mt-2 flex flex-wrap gap-2 items-center">
+                  {campaign.bd_accounts
+                    .filter((a) => a.spamRestrictedAt)
+                    .map((a) => (
+                      <Button
+                        key={a.id}
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => void postSpamBotCheck(a.id).then(() => load())}
+                      >
+                        {t('campaigns.spamBotRecheckNamed', { name: a.displayName })}
+                      </Button>
+                    ))}
+                  <Link
+                    href={`/dashboard/bd-accounts/${campaign.bd_accounts.find((a) => a.spamRestrictedAt)?.id ?? ''}`}
+                    className="text-sm font-medium text-primary hover:underline"
+                  >
+                    {t('campaigns.spamBotGoToAccount')}
+                  </Link>
+                </div>
+              </div>
+            )}
+
           {campaign?.bd_accounts && campaign.bd_accounts.length > 0 && (
-            <CampaignSendingAccountsOverview accounts={campaign.bd_accounts} />
+            <CampaignSendingAccountsOverview
+              accounts={campaign.bd_accounts}
+              campaignId={id}
+              onChanged={() => void load()}
+            />
           )}
 
           {stats && (

@@ -19,6 +19,8 @@ export const MsgSendMessageSchema = z
     replyToMessageId: z.string().max(128).optional().nullable(),
     source: z.string().max(64).optional(),
     idempotencyKey: z.string().max(256).optional(),
+    /** Optional Telegram @username for GramJS entity resolution when channel_id is numeric but not in session cache */
+    usernameHint: z.string().min(1).max(256).optional().nullable(),
   })
   .refine((data) => (data.content != null && data.content !== '') || (data.fileBase64 != null && data.fileBase64 !== ''), {
     message: 'Either content or fileBase64 is required',

@@ -124,6 +124,7 @@ export function useMessagingActions(
         contactId: s.selectedChat.contact_id ?? '', channel: s.selectedChat.channel,
         channelId: s.selectedChat.channel_id, content: messageText, bdAccountId: s.selectedAccountId,
       };
+      if (s.selectedChat.username?.trim()) body.usernameHint = s.selectedChat.username.trim().replace(/^@/, '');
       if (fileToSend) { body.fileBase64 = await fileToBase64(fileToSend); body.fileName = fileToSend.name; }
       if (replyTo?.telegram_message_id) body.replyToMessageId = replyTo.telegram_message_id;
       const response = await apiClient.post('/api/messaging/send', body);
@@ -148,7 +149,18 @@ export function useMessagingActions(
         reportWarning('Clear draft after send failed', { error: err, component: 'useMessagingActions', action: 'sendMessage' });
       });
       if (s.selectedChat.conversation_id) s.setNewLeads((prev) => prev.filter((c) => c.conversation_id !== s.selectedChat!.conversation_id));
-      await fetchChats();
+      const sentChannelId = s.selectedChat.channel_id;
+      const sentAt = merged.created_at;
+      const preview = displayContent.length > 120 ? displayContent.slice(0, 120) + '…' : displayContent;
+      s.setChats((prev) => {
+        const idx = prev.findIndex((c) => c.channel_id === sentChannelId);
+        if (idx < 0) return prev;
+        const updated = { ...prev[idx], last_message: preview, last_message_at: sentAt };
+        const next = [...prev];
+        next.splice(idx, 1);
+        next.unshift(updated);
+        return next;
+      });
     } catch (error: unknown) {
       reportError(error, { component: 'useMessagingActions', action: 'sendMessage' });
       s.setMessages((prev) => prev.filter((m) => m.id !== tempMessage.id));
@@ -157,7 +169,7 @@ export function useMessagingActions(
       else { toast.error(err.response?.data?.message || err.response?.data?.error || 'Ошибка отправки сообщения'); }
       if (fileToSend) s.setPendingFile(fileToSend);
     } finally { s.setSendingMessage(false); }
-  }, [s.newMessage, s.pendingFile, s.selectedChat, s.selectedAccountId, isSelectedAccountMine, s.replyToMessage, scrollToBottom, fetchChats, toast]);
+  }, [s.newMessage, s.pendingFile, s.selectedChat, s.selectedAccountId, isSelectedAccountMine, s.replyToMessage, scrollToBottom, toast]);
 
   // ─── Reactions & Delete ──────────────────────────────────────────
   const handleReaction = useCallback(async (messageId: string, emoji: string) => {

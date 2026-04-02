@@ -8,7 +8,17 @@ import { Logger } from '@getsale/logger';
 import { asyncHandler, AppError, ErrorCodes, withOrgContext } from '@getsale/service-core';
 import { type Schedule } from '../helpers';
 import { bulkInsertCampaignParticipants } from '../campaign-participant-bulk';
-import { recalculatePendingNextSendAtForCampaign } from '../campaign-pending-reschedule';
+import { recalculatePendingNextSendAtForCampaign, recalculatePendingForCampaignsUsingBdAccount } from '../campaign-pending-reschedule';
+
+function getBdAccountIdsFromTargetAudience(aud: unknown): string[] {
+  if (!aud || typeof aud !== 'object') return [];
+  const a = aud as { bdAccountIds?: unknown; bdAccountId?: unknown };
+  if (Array.isArray(a.bdAccountIds) && a.bdAccountIds.length > 0) {
+    return a.bdAccountIds.filter((id): id is string => typeof id === 'string');
+  }
+  if (typeof a.bdAccountId === 'string' && a.bdAccountId) return [a.bdAccountId];
+  return [];
+}
 
 interface Deps {
   pool: Pool;
@@ -18,6 +28,144 @@ interface Deps {
 
 export function executionRouter({ pool, rabbitmq, log }: Deps): Router {
   const router = Router();
+
+  /** Pause sends from this BD account (global 2h block) and bump this campaign's participants on that account. */
+  router.post('/:id/accounts/:accountId/pause', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id: campaignId, accountId } = req.params;
+    const camp = await pool.query(
+      'SELECT id, target_audience FROM campaigns WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL',
+      [campaignId, organizationId]
+    );
+    if (camp.rows.length === 0) {
+      throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+    }
+    const aud = camp.rows[0].target_audience;
+    const bdIds = getBdAccountIdsFromTargetAudience(aud);
+    if (!bdIds.includes(accountId)) {
+      throw new AppError(400, 'BD account is not part of this campaign audience', ErrorCodes.BAD_REQUEST);
+    }
+    const acc = await pool.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [accountId, organizationId]
+    );
+    if (acc.rows.length === 0) {
+      throw new AppError(404, 'BD account not found', ErrorCodes.NOT_FOUND);
+    }
+    const until = new Date(Date.now() + 2 * 3600 * 1000);
+    await pool.query(
+      `UPDATE bd_accounts SET send_blocked_until = $1, updated_at = NOW() WHERE id = $2 AND organization_id = $3`,
+      [until.toISOString(), accountId, organizationId]
+    );
+    await pool.query(
+      `UPDATE campaign_participants
+       SET next_send_at = CASE
+         WHEN next_send_at IS NULL THEN NULL
+         ELSE GREATEST(next_send_at::timestamptz, $3::timestamptz)
+       END,
+       metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('campaignAccountPausedUntil', $3::text),
+       updated_at = NOW()
+       WHERE campaign_id = $1 AND bd_account_id = $2 AND status IN ('pending', 'sent')`,
+      [campaignId, accountId, until.toISOString()]
+    );
+    res.json({ ok: true, sendBlockedUntil: until.toISOString() });
+  }));
+
+  /** Clear global send block and reschedule pending first sends for this BD account. */
+  router.post('/:id/accounts/:accountId/resume', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id: campaignId, accountId } = req.params;
+    const camp = await pool.query(
+      'SELECT id FROM campaigns WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL',
+      [campaignId, organizationId]
+    );
+    if (camp.rows.length === 0) {
+      throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+    }
+    const audRow = await pool.query(
+      'SELECT target_audience FROM campaigns WHERE id = $1 AND organization_id = $2',
+      [campaignId, organizationId]
+    );
+    const aud = audRow.rows[0]?.target_audience;
+    const bdIds = getBdAccountIdsFromTargetAudience(aud);
+    if (!bdIds.includes(accountId)) {
+      throw new AppError(400, 'BD account is not part of this campaign audience', ErrorCodes.BAD_REQUEST);
+    }
+    await pool.query(
+      `UPDATE bd_accounts SET send_blocked_until = NULL, updated_at = NOW() WHERE id = $1 AND organization_id = $2`,
+      [accountId, organizationId]
+    );
+    await recalculatePendingForCampaignsUsingBdAccount(pool, accountId, log);
+    res.json({ ok: true });
+  }));
+
+  /** Remove a BD account from campaign audience and reassign its participants to remaining accounts. */
+  router.delete('/:id/accounts/:accountId', asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id: campaignId, accountId } = req.params;
+    const camp = await pool.query(
+      'SELECT id, target_audience, schedule FROM campaigns WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL',
+      [campaignId, organizationId]
+    );
+    if (camp.rows.length === 0) {
+      throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+    }
+    const row = camp.rows[0] as { target_audience: Record<string, unknown>; schedule: unknown };
+    const bdIds = getBdAccountIdsFromTargetAudience(row.target_audience);
+    if (!bdIds.includes(accountId)) {
+      throw new AppError(400, 'BD account is not part of this campaign audience', ErrorCodes.BAD_REQUEST);
+    }
+    if (bdIds.length <= 1) {
+      throw new AppError(
+        400,
+        'Cannot remove the only sending account. Add another account first or pause the campaign.',
+        ErrorCodes.BAD_REQUEST
+      );
+    }
+    const remaining = bdIds.filter((x) => x !== accountId);
+    const nextAudience = { ...row.target_audience } as Record<string, unknown>;
+    if (remaining.length === 1) {
+      nextAudience.bdAccountId = remaining[0];
+      delete nextAudience.bdAccountIds;
+    } else {
+      nextAudience.bdAccountIds = remaining;
+      delete nextAudience.bdAccountId;
+    }
+    await pool.query(
+      `UPDATE campaigns SET target_audience = $1::jsonb, updated_at = NOW() WHERE id = $2 AND organization_id = $3`,
+      [JSON.stringify(nextAudience), campaignId, organizationId]
+    );
+    const parts = await pool.query(
+      `SELECT id FROM campaign_participants WHERE campaign_id = $1 AND bd_account_id = $2`,
+      [campaignId, accountId]
+    );
+    let reassign = 0;
+    for (let i = 0; i < parts.rows.length; i++) {
+      const pid = (parts.rows[i] as { id: string }).id;
+      const newBd = remaining[i % remaining.length];
+      const r = await pool.query(
+        `UPDATE campaign_participants SET bd_account_id = $1, updated_at = NOW() WHERE id = $2 AND campaign_id = $3`,
+        [newBd, pid, campaignId]
+      );
+      reassign += r.rowCount ?? 0;
+    }
+    const audience = nextAudience as {
+      bdAccountId?: string;
+      bdAccountIds?: string[];
+      sendDelaySeconds?: number;
+      sendDelayMinSeconds?: number;
+      sendDelayMaxSeconds?: number;
+      dailySendTarget?: number;
+    };
+    const campaignSchedule = (row.schedule ?? {}) as Schedule;
+    await recalculatePendingNextSendAtForCampaign(pool, {
+      campaignId,
+      organizationId,
+      audience,
+      campaignSchedule,
+    });
+    res.json({ ok: true, reassignedParticipants: reassign, remainingBdAccountIds: remaining });
+  }));
 
   router.post('/:id/start', asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;

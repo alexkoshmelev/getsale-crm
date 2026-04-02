@@ -656,9 +656,9 @@
     "dailySendLimitHint": "Максимум сообщений от одного аккаунта в день в этой кампании. Меньшие значения снижают риск блокировки.",
     "delaySeconds": "{{count}} сек",
     "delayMinutes": "{{count}} мин",
-    "enrichContactsBeforeStart": "Перед запуском обогащать контакты из Telegram (имя, username)",
-    "enrichContactsBeforeStartHint": "Выполняется при нажатии «Запустить». Если нет числового Telegram ID, подставляет его через API по @username (нужен подключённый BD-аккаунт). Улучшает сопоставление ответов.",
     "randomizeWithAI": "Рандомизировать текст сообщений через AI-сервис",
+    "enrichContactsBeforeStart": "Резолвить контакты через Telegram перед запуском",
+    "enrichContactsBeforeStartHint": "Подставляет числовой Telegram ID через API, если отсутствует: по существующему ID или по @username (нужен подключённый BD-аккаунт). Необязательно — ответы отслеживаются автоматически и без этого.",
     "schedule": "Расписание",
     "workingHours": "Рабочие часы",
     "workStart": "Начало",
@@ -766,7 +766,18 @@
     "accountDisconnected": "Аккаунт отключён",
     "totalSent": "Всего отправлено",
     "totalReplied": "Всего ответов",
-    "totalWon": "Всего выиграно"
+    "totalWon": "Всего выиграно",
+    "accountSpamRestricted": "Ограничение SpamBot",
+    "accountPeerFloodWarning": "Сигналы PEER_FLOOD (1 ч): {{count}}",
+    "pauseAccount": "Пауза 2 ч (аккаунт)",
+    "resumeAccount": "Возобновить аккаунт",
+    "removeAccount": "Убрать из кампании",
+    "removeAccountConfirm": "Убрать {{name}} из кампании? Участники будут переназначены на другие аккаунты.",
+    "removeAccountNeedTwo": "Сначала добавьте ещё один аккаунт отправки.",
+    "spamBotBanner": "Один или несколько аккаунтов отправки ограничены (SpamBot / лимиты). Рассылки с них приостановлены, пока не исправите ситуацию.",
+    "spamBotRecheckAction": "Проверка SpamBot",
+    "spamBotRecheckNamed": "Перепроверить {{name}}",
+    "spamBotGoToAccount": "Открыть BD-аккаунт"
   },
   "analytics": {
     "title": "Аналитика",
@@ -1012,6 +1023,14 @@
     "floodAfterBody": "Если отправки всё ещё падают, снизьте темп и проверьте здоровье аккаунта.",
     "floodAfterLinkHealth": "Сводка по команде",
     "floodAfterLinkCampaigns": "Кампании",
+    "spamPanelTitleRestricted": "Обнаружено ограничение рассылки",
+    "spamPanelBodyRestricted": "Telegram может блокировать первые сообщения незнакомым контактам, пока вы не разберётесь в приложении (часто через @SpamBot).",
+    "spamPanelSource": "Источник",
+    "spamPanelPeerFloodHint": "Сигналы PEER_FLOOD за последний час: {{count}}. Снизьте темп или проверьте здоровье аккаунта.",
+    "spamPanelLastCheck": "Последняя проверка SpamBot",
+    "spamCheckAction": "Проверить через SpamBot",
+    "spamClearAction": "Снять ограничение вручную",
+    "spamPanelDocHint": "Откройте Telegram, чат с @SpamBot, и следуйте подсказкам, если аккаунт ограничен.",
     "runtimeDeferredTitle": "Рантайм не активирован",
     "runtimeDeferredBody": "Активируйте рантайм Telegram, если это доступно в вашем workspace.",
     "runtimeDeferredCta": "Активировать",
@@ -1080,6 +1099,15 @@
           "neutral": "Нет данных."
         }
       },
+      "spam": {
+        "label": "Спам / лимиты рассылки",
+        "hint": {
+          "ok": "Ограничений SpamBot не видно.",
+          "warning": "Недавно были PEER_FLOOD — снизьте темп.",
+          "error": "Аккаунт помечен как ограниченный.",
+          "neutral": "Нет сигналов."
+        }
+      },
       "autoresponder": {
         "label": "Автоответчик",
         "hint": {
@@ -1098,6 +1126,7 @@
     "retry": "Повторить",
     "serverNote": "Снимок сервера: {{time}}",
     "cardFlood": "Аккаунты в FLOOD_WAIT",
+    "cardSpam": "Аккаунты с ограничением SpamBot",
     "cardLimits": "Аккаунты с дневными лимитами",
     "cardWarming": "Группы прогрева (running)",
     "cardCampaignsActive": "Активные кампании",
@@ -1113,7 +1142,8 @@
       "proxy": "Ошибка прокси",
       "connection_reconnecting": "Переподключение",
       "connection_disconnected": "Отключён",
-      "connection_reauth_required": "Нужен повторный вход"
+      "connection_reauth_required": "Нужен повторный вход",
+      "spam_restricted": "Спам / ограничение"
     }
   },
   "messaging": {
