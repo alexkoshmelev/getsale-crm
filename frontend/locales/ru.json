@@ -633,6 +633,7 @@
     "renameCampaign": "Переименовать",
     "renameCampaignSave": "Сохранить название",
     "sendHistoryChronological": "Сначала старые",
+    "sendHistoryTotalAudit": "{{count}} событий ({{sent}} доставлено)",
     "sendHistoryMeta": "Подробности",
     "audienceConflictsTitle": "Ранние рассылки",
     "audienceConflictsHint": "Эти контакты уже участвуют в кампании или получали отправки. Можно продолжить.",

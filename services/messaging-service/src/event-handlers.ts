@@ -23,7 +23,13 @@ async function handleReadOutbox(
     const result = await pool.query(
       `UPDATE messages
        SET unread = false, status = 'read', updated_at = NOW()
-       WHERE organization_id = $1 AND bd_account_id = $2 AND channel_id = $3
+       WHERE organization_id = $1 AND bd_account_id = $2
+         AND (
+           channel_id = $3
+           OR contact_id IN (
+             SELECT id FROM contacts WHERE organization_id = $1 AND telegram_id = $3
+           )
+         )
          AND direction = 'outbound' AND telegram_message_id IS NOT NULL
          AND (telegram_message_id ~ '^[0-9]+$' AND telegram_message_id::bigint <= $4)`,
       [organizationId, bdAccountId, channelId, maxId]
@@ -73,8 +79,14 @@ export async function subscribeToEvents(deps: EventHandlerDeps): Promise<void> {
       const organizationId = event.organizationId ?? data.organizationId;
       const bdAccountId = data.bdAccountId;
       const channelId = data.channelId;
-      const maxId = data.maxId;
-      if (!organizationId || !bdAccountId || !channelId || typeof maxId !== 'number') return;
+      const maxIdRaw = data.maxId;
+      const maxId =
+        typeof maxIdRaw === 'number'
+          ? maxIdRaw
+          : typeof maxIdRaw === 'string'
+            ? parseInt(maxIdRaw, 10)
+            : NaN;
+      if (!organizationId || !bdAccountId || !channelId || !Number.isFinite(maxId)) return;
       await handleReadOutbox(pool, organizationId, bdAccountId, channelId, maxId, log);
     },
     'events',

@@ -102,6 +102,7 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
            JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
            JOIN campaigns c ON c.id = cp.campaign_id
            ${whereClause}
+           AND cs.status = 'sent'
            GROUP BY cp.campaign_id
          ) t`,
         paramsBase
@@ -165,7 +166,7 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       pool.query(
         `SELECT cp.campaign_id, COUNT(DISTINCT cp.id)::int AS cnt
          FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
-         WHERE cp.campaign_id = ANY($1::uuid[]) GROUP BY cp.campaign_id`,
+         WHERE cp.campaign_id = ANY($1::uuid[]) AND cs.status = 'sent' GROUP BY cp.campaign_id`,
         [ids]
       ),
       pool.query(
@@ -181,7 +182,7 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
          FROM campaign_sends cs
          JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
          JOIN messages m ON m.id = cs.message_id AND m.status = 'read'
-         WHERE cp.campaign_id = ANY($1::uuid[])
+         WHERE cp.campaign_id = ANY($1::uuid[]) AND cs.status = 'sent'
          GROUP BY cp.campaign_id`,
         [ids]
       ),
@@ -744,7 +745,7 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
               c.id::text AS campaign_id,
               c.name AS campaign_name,
               cp.status AS participant_status,
-              (SELECT MAX(cs.sent_at) FROM campaign_sends cs WHERE cs.campaign_participant_id = cp.id) AS last_sent_at,
+              (SELECT MAX(cs.sent_at) FROM campaign_sends cs WHERE cs.campaign_participant_id = cp.id AND cs.status = 'sent') AS last_sent_at,
               (c.id = $3::uuid) AS is_current_campaign
        FROM campaign_participants cp
        JOIN campaigns c ON c.id = cp.campaign_id

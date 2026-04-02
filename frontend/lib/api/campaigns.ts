@@ -644,7 +644,8 @@ export interface CampaignSendHistoryRow {
 
 export interface CampaignSendsPage {
   data: CampaignSendHistoryRow[];
-  pagination: { page: number; limit: number; total: number; totalPages: number };
+  /** total = all rows (sent, deferred, failed); sentTotal = delivered messages only */
+  pagination: { page: number; limit: number; total: number; sentTotal: number; totalPages: number };
 }
 
 export async function fetchCampaignSends(

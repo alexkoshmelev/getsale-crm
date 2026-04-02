@@ -996,7 +996,11 @@ export default function CampaignDetailPage() {
             </div>
             {sendsData && (
               <span className="text-xs text-muted-foreground">
-                {t('campaigns.sendHistoryTotal', { defaultValue: '{{count}} sends', count: sendsData.pagination.total })}
+                {t('campaigns.sendHistoryTotalAudit', {
+                  count: sendsData.pagination.total,
+                  sent: sendsData.pagination.sentTotal ?? sendsData.pagination.total,
+                  defaultValue: '{{count}} events ({{sent}} delivered)',
+                })}
               </span>
             )}
           </div>

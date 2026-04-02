@@ -32,21 +32,21 @@ export function participantsRouter({ pool, log }: Deps): Router {
       [id]
     );
     const totalSendsRes = await pool.query(
-      `SELECT COUNT(*)::int AS cnt FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id WHERE cp.campaign_id = $1`,
+      `SELECT COUNT(*)::int AS cnt FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id WHERE cp.campaign_id = $1 AND cs.status = 'sent'`,
       [id]
     );
     const contactsSentRes = await pool.query(
       `SELECT COUNT(DISTINCT cp.id)::int AS cnt
        FROM campaign_sends cs
        JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
-       WHERE cp.campaign_id = $1`,
+       WHERE cp.campaign_id = $1 AND cs.status = 'sent'`,
       [id]
     );
     const dateRangeRes = await pool.query(
       `SELECT MIN(cs.sent_at) AS first_send_at, MAX(cs.sent_at) AS last_send_at
        FROM campaign_sends cs
        JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
-       WHERE cp.campaign_id = $1`,
+       WHERE cp.campaign_id = $1 AND cs.status = 'sent'`,
       [id]
     );
     const totalReadRes = await pool.query(
@@ -54,7 +54,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
        FROM campaign_participants cp
        INNER JOIN campaign_sends cs ON cs.campaign_participant_id = cp.id
        INNER JOIN messages m ON m.id = cs.message_id AND m.status = 'read'
-       WHERE cp.campaign_id = $1`,
+       WHERE cp.campaign_id = $1 AND cs.status = 'sent'`,
       [id]
     );
     const totalSharedRes = await pool.query(
@@ -68,7 +68,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
          SELECT MIN(cs.sent_at) AS first_sent_at
          FROM campaign_sends cs
          JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
-         WHERE cp.campaign_id = c.campaign_id AND cp.bd_account_id = c.bd_account_id AND cp.channel_id = c.channel_id
+         WHERE cp.campaign_id = c.campaign_id AND cp.bd_account_id = c.bd_account_id AND cp.channel_id = c.channel_id AND cs.status = 'sent'
        ) fs ON fs.first_sent_at IS NOT NULL
        WHERE c.campaign_id = $1 AND c.shared_chat_created_at IS NOT NULL`,
       [id]
@@ -84,7 +84,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
            SELECT MIN(cs.sent_at) AS first_sent_at
            FROM campaign_sends cs
            JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
-           WHERE cp.campaign_id = c.campaign_id AND cp.bd_account_id = c.bd_account_id AND cp.channel_id = c.channel_id
+           WHERE cp.campaign_id = c.campaign_id AND cp.bd_account_id = c.bd_account_id AND cp.channel_id = c.channel_id AND cs.status = 'sent'
          ) fs ON fs.first_sent_at IS NOT NULL
          WHERE c.campaign_id = $1 AND c.won_at IS NOT NULL`,
         [id]
@@ -200,7 +200,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
         `SELECT cs.sent_at::date AS day, COUNT(DISTINCT cp.id)::int AS sends
          FROM campaign_sends cs
          JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
-         WHERE cp.campaign_id = $1 AND cs.sent_at >= NOW() - ($2::int || ' days')::interval
+         WHERE cp.campaign_id = $1 AND cs.status = 'sent' AND cs.sent_at >= NOW() - ($2::int || ' days')::interval
          GROUP BY cs.sent_at::date
          ORDER BY day`,
         [id, daysNum]
@@ -233,7 +233,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
          FROM campaign_sends cs
          JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
          LEFT JOIN bd_accounts ba ON ba.id = cp.bd_account_id
-         WHERE cp.campaign_id = $1 AND cs.sent_at >= NOW() - ($2::int || ' days')::interval
+         WHERE cp.campaign_id = $1 AND cs.status = 'sent' AND cs.sent_at >= NOW() - ($2::int || ' days')::interval
          GROUP BY cs.sent_at::date, cp.bd_account_id
          ORDER BY date, cp.bd_account_id`,
         [id, daysNum]
@@ -325,7 +325,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
        LEFT JOIN bd_accounts ba ON ba.id = cp.bd_account_id
        LEFT JOIN LATERAL (
          SELECT cs.sent_at AS first_sent_at, cs.message_id AS first_message_id
-         FROM campaign_sends cs WHERE cs.campaign_participant_id = cp.id ORDER BY cs.sent_at LIMIT 1
+         FROM campaign_sends cs WHERE cs.campaign_participant_id = cp.id AND cs.status = 'sent' ORDER BY cs.sent_at LIMIT 1
        ) fs ON true
        LEFT JOIN messages m_first ON m_first.id = fs.first_message_id
        LEFT JOIN conversations conv ON conv.campaign_id = cp.campaign_id AND conv.bd_account_id = cp.bd_account_id AND conv.channel = 'telegram' AND conv.channel_id = cp.channel_id
@@ -401,14 +401,24 @@ export function participantsRouter({ pool, log }: Deps): Router {
       50,
       100
     );
-    const countRes = await pool.query(
-      `SELECT COUNT(*)::int AS c
-       FROM campaign_sends cs
-       JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
-       WHERE cp.campaign_id = $1`,
-      [id]
-    );
+    const [countRes, sentCountRes] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*)::int AS c
+         FROM campaign_sends cs
+         JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+         WHERE cp.campaign_id = $1`,
+        [id]
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS c
+         FROM campaign_sends cs
+         JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
+         WHERE cp.campaign_id = $1 AND cs.status = 'sent'`,
+        [id]
+      ),
+    ]);
     const total = Number((countRes.rows[0] as { c?: number })?.c ?? 0);
+    const sentTotal = Number((sentCountRes.rows[0] as { c?: number })?.c ?? 0);
     const listRes = await pool.query(
       `SELECT cs.id AS send_id,
               cs.sent_at,
@@ -449,6 +459,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
         page: pageNum,
         limit: limitNum,
         total,
+        sentTotal,
         totalPages: Math.max(1, Math.ceil(total / limitNum)),
       },
     });

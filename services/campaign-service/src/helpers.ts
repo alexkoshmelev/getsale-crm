@@ -328,13 +328,13 @@ export async function getSentTodayByAccount(pool: Pool, orgId?: string): Promise
        FROM campaign_sends cs
        JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
        JOIN campaigns c ON c.id = cp.campaign_id
-       WHERE c.organization_id = $1 AND cs.sent_at::date = $2::date
+       WHERE c.organization_id = $1 AND cs.sent_at::date = $2::date AND cs.status = 'sent'
        GROUP BY cp.bd_account_id`
     : `SELECT cp.bd_account_id, COUNT(*)::int AS cnt
        FROM campaign_sends cs
        JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
        JOIN campaigns c ON c.id = cp.campaign_id
-       WHERE cs.sent_at::date = $1::date
+       WHERE cs.sent_at::date = $1::date AND cs.status = 'sent'
        GROUP BY cp.bd_account_id`;
   const today = new Date().toISOString().slice(0, 10);
   const params = orgId ? [orgId, today] : [today];

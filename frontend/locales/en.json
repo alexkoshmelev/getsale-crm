@@ -633,6 +633,7 @@
     "renameCampaign": "Rename",
     "renameCampaignSave": "Save name",
     "sendHistoryChronological": "Oldest first",
+    "sendHistoryTotalAudit": "{{count}} events ({{sent}} delivered)",
     "sendHistoryMeta": "Details",
     "audienceConflictsTitle": "Prior outreach",
     "audienceConflictsHint": "These contacts are already participants in a campaign or have sends. You can continue anyway.",

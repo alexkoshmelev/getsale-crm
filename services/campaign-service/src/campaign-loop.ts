@@ -589,7 +589,7 @@ async function processParticipant(
   lastCampaignSendAtMsByBdAccount?.set(row.bd_account_id, Date.now());
 
   const sendCountRes = await pool.query(
-    `SELECT COUNT(*)::int AS c FROM campaign_sends WHERE campaign_participant_id = $1`,
+    `SELECT COUNT(*)::int AS c FROM campaign_sends WHERE campaign_participant_id = $1 AND status = 'sent'`,
     [row.participant_id]
   );
   const isFirstSend = Number(sendCountRes.rows[0]?.c ?? 0) === 1;
