@@ -27,6 +27,25 @@ import {
   reconcileParticipantChannelIds,
 } from './participant-inbound-match';
 
+/** Telegram @SpamBot numeric user id — do not tie to campaign replies. */
+const TELEGRAM_SPAMBOT_USER_ID = '178220800';
+
+/** Known Telegram system bot usernames (lowercase, no @). Inbound from these must not affect campaigns. */
+const IGNORED_BOT_USERNAMES = new Set([
+  'spambot',
+  'botfather',
+  'gif',
+  'pic',
+  'bing',
+  'wiki',
+  'imdb',
+  'bold',
+  'vote',
+  'like',
+  'gamee',
+  'sticker',
+]);
+
 export interface EventHandlerDeps {
   pool: Pool;
   rabbitmq: RabbitMQClient;
@@ -104,6 +123,31 @@ async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
     return;
   }
 
+  const organizationId = event.organizationId as string | undefined;
+  if (!organizationId) {
+    log.info({ message: 'MESSAGE_RECEIVED skipped: no organizationId', eventId: event.id });
+    return;
+  }
+
+  if (event.data?.direction === 'inbound') {
+    const contactRow = await pool.query<{ username: string | null; telegram_id: string | null }>(
+      'SELECT username, telegram_id FROM contacts WHERE id = $1::uuid',
+      [contactId]
+    );
+    const row = contactRow.rows[0];
+    const uname = (row?.username ?? '').replace(/^@/, '').toLowerCase().trim();
+    const tid = (row?.telegram_id ?? '').trim();
+    if (IGNORED_BOT_USERNAMES.has(uname) || tid === TELEGRAM_SPAMBOT_USER_ID) {
+      log.info({
+        message: 'MESSAGE_RECEIVED skipped: known system bot (campaign logic)',
+        contactId,
+        username: uname || undefined,
+        eventId: event.id,
+      });
+      return;
+    }
+  }
+
   if (event.data?.direction === 'inbound') {
     void runAutoResponderIfEligible(
       {
@@ -124,12 +168,6 @@ async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
 
   const bdAccountId = event.data?.bdAccountId ?? null;
   const channelId = event.data?.channelId ?? null;
-  const organizationId = event.organizationId as string | undefined;
-  if (!organizationId) {
-    log.info({ message: 'MESSAGE_RECEIVED skipped: no organizationId', eventId: event.id });
-    return;
-  }
-
   const { rows: participantRows, matchedViaIdentityAlias } = await findCampaignParticipantsForInboundMessage(pool, {
     organizationId,
     eventContactId: contactId,
@@ -175,6 +213,21 @@ async function processEvent(deps: EventHandlerDeps, event: any): Promise<void> {
   }
 
   for (const p of participantsRes.rows) {
+    const sentCheck = await pool.query(
+      `SELECT 1 FROM campaign_sends WHERE campaign_participant_id = $1 AND status = 'sent' LIMIT 1`,
+      [p.id]
+    );
+    if (sentCheck.rows.length === 0) {
+      log.info({
+        message: 'MESSAGE_RECEIVED: skipping campaign reply handling — no successful send for this participant',
+        participantId: p.id,
+        campaignId: p.campaign_id,
+        contactId,
+        eventId: event.id,
+      });
+      continue;
+    }
+
     const stepsRes = await pool.query(
       `SELECT order_index, trigger_type, delay_hours, delay_minutes FROM campaign_sequences WHERE campaign_id = $1 ORDER BY order_index`,
       [p.campaign_id]

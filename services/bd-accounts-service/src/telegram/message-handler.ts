@@ -14,6 +14,9 @@ import type { MessageDb } from './message-db';
 import type { Pool } from 'pg';
 import type { RabbitMQClient } from '@getsale/utils';
 
+/** @SpamBot — do not publish MESSAGE_RECEIVED for this peer (avoids false campaign "replied"). */
+const TELEGRAM_SPAMBOT_USER_ID = '178220800';
+
 /**
  * Handles incoming and outgoing Telegram messages (short + full).
  */
@@ -84,6 +87,11 @@ export class MessageHandler {
       }
       if (!allowed) {
         this.log.info({ message: `Short: chat not in sync list, skipping, accountId=${accountId}, chatId=${chatId}` });
+        return;
+      }
+
+      if (chatId === TELEGRAM_SPAMBOT_USER_ID) {
+        this.log.info({ message: `Short: skip @SpamBot peer (no MESSAGE_RECEIVED), accountId=${accountId}` });
         return;
       }
 
@@ -201,6 +209,11 @@ export class MessageHandler {
       }
       if (!allowed) {
         this.log.info({ message: `Chat not in sync list, skipping message, accountId=${accountId}, chatId=${chatId}` });
+        return;
+      }
+
+      if (chatId === TELEGRAM_SPAMBOT_USER_ID) {
+        this.log.info({ message: `Skip @SpamBot peer (no MESSAGE_RECEIVED), accountId=${accountId}` });
         return;
       }
 

@@ -228,6 +228,7 @@ services:
       - WEBSOCKET_SERVICE_URL=http://websocket-service:3004
       - BD_ACCOUNTS_SERVICE_URL=http://bd-accounts-service:3007
       - AI_SERVICE_URL=http://ai-service:3005
+      - MESSAGING_BD_ACCOUNTS_HTTP_TIMEOUT_MS=${MESSAGING_BD_ACCOUNTS_HTTP_TIMEOUT_MS:-90000}
     depends_on:
       postgres:
         condition: service_healthy
@@ -602,6 +603,7 @@ services:
       - PIPELINE_SERVICE_URL=http://pipeline-service:3008
       - BD_ACCOUNTS_SERVICE_URL=http://bd-accounts-service:3007
       - AI_SERVICE_URL=http://ai-service:3005
+      - CAMPAIGN_MESSAGING_HTTP_TIMEOUT_MS=${CAMPAIGN_MESSAGING_HTTP_TIMEOUT_MS:-90000}
     depends_on:
       postgres:
         condition: service_healthy
