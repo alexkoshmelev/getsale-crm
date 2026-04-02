@@ -14,6 +14,7 @@ import {
   fetchGroupSourceContacts,
   fetchTelegramSourceKeywords,
   fetchTelegramSourceGroups,
+  checkCampaignAudienceConflicts,
   type Campaign,
   type CampaignAgent,
   type ContactForPicker,
@@ -253,6 +254,17 @@ export function CampaignAudienceSchedule({
     const responsible = overrides?.leadResponsibleId ?? leadResponsibleId;
     setSaving(true);
     try {
+      if (overrides && 'contactIds' in overrides && Array.isArray(overrides.contactIds) && overrides.contactIds.length > 0) {
+        const { conflicts } = await checkCampaignAudienceConflicts(campaignId, overrides.contactIds);
+        const risky = conflicts.filter((c) => !c.is_current_campaign || c.last_sent_at != null);
+        if (risky.length > 0) {
+          const ok = window.confirm(t('campaigns.audienceConflictsHint'));
+          if (!ok) {
+            setSaving(false);
+            return;
+          }
+        }
+      }
       await updateCampaign(campaignId, {
         targetAudience: {
           filters: {
@@ -289,7 +301,7 @@ export function CampaignAudienceSchedule({
     } finally {
       setSaving(false);
     }
-  }, [campaignId, contactIds, audienceSource, bdAccountIds, companyId, pipelineId, sendDelayMinSeconds, sendDelayMaxSeconds, dailySendTarget, enrichContactsBeforeStart, randomizeWithAI, leadTrigger, leadPipelineId, leadStageId, leadResponsibleId, onUpdate]);
+  }, [campaignId, contactIds, audienceSource, bdAccountIds, companyId, pipelineId, sendDelayMinSeconds, sendDelayMaxSeconds, dailySendTarget, enrichContactsBeforeStart, randomizeWithAI, leadTrigger, leadPipelineId, leadStageId, leadResponsibleId, onUpdate, t]);
 
   const percentFromSeconds = (seconds: number): number =>
     ((seconds - DELAY_MIN_SECONDS) / (DELAY_MAX_SECONDS - DELAY_MIN_SECONDS)) * 100;

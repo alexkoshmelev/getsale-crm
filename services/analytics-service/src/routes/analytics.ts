@@ -274,49 +274,50 @@ export function analyticsRouter({ pool, log }: Deps): Router {
 
     const params: unknown[] = [organizationId, startDate, endDate];
     let accountFilter = '';
-    let folderFilter = '';
     if (bdAccountIdParam) {
       params.push(bdAccountIdParam);
-      accountFilter = `AND fo.bd_account_id = $${params.length}`;
+      accountFilter = `AND m.bd_account_id = $${params.length}`;
     }
     if (folderIdParam !== undefined) {
       params.push(folderIdParam);
-      folderFilter = `AND wf.folder_id = $${params.length}`;
+      accountFilter += ` AND EXISTS (
+        SELECT 1 FROM bd_account_sync_chats s
+        WHERE s.bd_account_id = m.bd_account_id AND s.telegram_chat_id::text = m.channel_id
+          AND s.folder_id = $${params.length}
+      )`;
     }
 
+    /** Cohort matches contact-metrics: distinct (bd, channel) with ≥1 outbound in [start,end]. */
     const newChatsQuery = `
-      WITH first_outbound AS (
-        SELECT
-          m.bd_account_id,
-          m.channel_id,
-          (MIN(COALESCE(m.telegram_date, m.created_at)) AT TIME ZONE 'UTC')::date AS first_date
+      WITH cohort AS (
+        SELECT DISTINCT m.bd_account_id, m.channel_id
         FROM messages m
         WHERE m.organization_id = $1 AND m.channel = 'telegram' AND m.direction = 'outbound'
           AND m.bd_account_id IS NOT NULL
           AND m.bd_account_id IN (SELECT id FROM bd_accounts WHERE organization_id = $1)
-          AND (COALESCE(m.telegram_date, m.created_at) >= $2 AND COALESCE(m.telegram_date, m.created_at) <= $3)
-        GROUP BY m.bd_account_id, m.channel_id
+          AND COALESCE(m.telegram_date, m.created_at) >= $2
+          AND COALESCE(m.telegram_date, m.created_at) <= $3
+          ${accountFilter}
       ),
-      chat_folders AS (
-        SELECT DISTINCT bd_account_id, telegram_chat_id AS channel_id, folder_id
-        FROM bd_account_sync_chat_folders
-        UNION
-        SELECT bd_account_id, telegram_chat_id, folder_id FROM bd_account_sync_chats WHERE folder_id IS NOT NULL
-      ),
-      with_folder AS (
-        SELECT fo.bd_account_id, fo.first_date, cf.folder_id
-        FROM first_outbound fo
-        INNER JOIN chat_folders cf ON cf.bd_account_id = fo.bd_account_id AND cf.channel_id = fo.channel_id
-        WHERE 1=1 ${accountFilter}
+      first_day AS (
+        SELECT
+          c.bd_account_id,
+          c.channel_id,
+          (MIN(COALESCE(m.telegram_date, m.created_at)) AT TIME ZONE 'UTC')::date AS first_date
+        FROM cohort c
+        JOIN messages m ON m.organization_id = $1 AND m.bd_account_id = c.bd_account_id AND m.channel_id = c.channel_id
+          AND m.channel = 'telegram' AND m.direction = 'outbound'
+          AND COALESCE(m.telegram_date, m.created_at) >= $2
+          AND COALESCE(m.telegram_date, m.created_at) <= $3
+        GROUP BY c.bd_account_id, c.channel_id
       )
-      SELECT wf.bd_account_id, wf.folder_id, wf.first_date, COUNT(*)::int AS new_chats
-      FROM with_folder wf
-      WHERE 1=1 ${folderFilter}
-      GROUP BY wf.bd_account_id, wf.folder_id, wf.first_date
-      ORDER BY wf.bd_account_id, wf.first_date
+      SELECT bd_account_id, first_date, COUNT(*)::int AS new_chats
+      FROM first_day
+      GROUP BY bd_account_id, first_date
+      ORDER BY bd_account_id, first_date
     `;
     const newChatsRes = await pool.query(newChatsQuery, params);
-    const rows = newChatsRes.rows as { bd_account_id: string; folder_id: number; first_date: string; new_chats: number }[];
+    const rows = newChatsRes.rows as { bd_account_id: string; first_date: string; new_chats: number }[];
 
     const byAccount = new Map<string, { new_chats: number; by_day: Map<string, number> }>();
     for (const r of rows) {
@@ -383,21 +384,21 @@ export function analyticsRouter({ pool, log }: Deps): Router {
           (EXISTS (
             SELECT 1 FROM messages m2
             WHERE m2.bd_account_id = c.bd_account_id AND m2.channel_id = c.channel_id
-              AND m2.organization_id = $1 AND m2.direction = 'outbound'
-              AND (m2.unread = false OR m2.status = 'read')
-          )) AS has_read,
+              AND m2.organization_id = $1 AND m2.direction = 'inbound'
+          )) AS has_replied,
           (EXISTS (
             SELECT 1 FROM messages m2
             WHERE m2.bd_account_id = c.bd_account_id AND m2.channel_id = c.channel_id
-              AND m2.organization_id = $1 AND m2.direction = 'inbound'
-          )) AS has_replied
+              AND m2.organization_id = $1 AND m2.direction = 'outbound'
+              AND LOWER(COALESCE(m2.status, '')) IN ('read', 'delivered')
+          )) AS has_read_receipt
         FROM cohort c
       )
       SELECT
         bd_account_id,
         COUNT(*)::int AS total_contacts,
-        COUNT(*) FILTER (WHERE NOT has_read)::int AS not_read,
-        COUNT(*) FILTER (WHERE has_read AND NOT has_replied)::int AS read_no_reply,
+        COUNT(*) FILTER (WHERE NOT has_replied AND NOT has_read_receipt)::int AS not_read,
+        COUNT(*) FILTER (WHERE NOT has_replied AND has_read_receipt)::int AS read_no_reply,
         COUNT(*) FILTER (WHERE has_replied)::int AS replied
       FROM per_chat
       GROUP BY bd_account_id
@@ -477,22 +478,22 @@ export function analyticsRouter({ pool, log }: Deps): Router {
           (EXISTS (
             SELECT 1 FROM messages m2
             WHERE m2.bd_account_id = wc.bd_account_id AND m2.channel_id = wc.channel_id
-              AND m2.organization_id = $1 AND m2.direction = 'outbound'
-              AND (m2.unread = false OR m2.status = 'read')
-          )) AS has_read,
+              AND m2.organization_id = $1 AND m2.direction = 'inbound'
+          )) AS has_replied,
           (EXISTS (
             SELECT 1 FROM messages m2
             WHERE m2.bd_account_id = wc.bd_account_id AND m2.channel_id = wc.channel_id
-              AND m2.organization_id = $1 AND m2.direction = 'inbound'
-          )) AS has_replied
+              AND m2.organization_id = $1 AND m2.direction = 'outbound'
+              AND LOWER(COALESCE(m2.status, '')) IN ('read', 'delivered')
+          )) AS has_read_receipt
         FROM week_cohort wc
       )
       SELECT
         bd_account_id,
         first_date,
         COUNT(*)::int AS new_chats,
-        COUNT(*) FILTER (WHERE NOT has_read)::int AS not_read,
-        COUNT(*) FILTER (WHERE has_read AND NOT has_replied)::int AS read_no_reply,
+        COUNT(*) FILTER (WHERE NOT has_replied AND NOT has_read_receipt)::int AS not_read,
+        COUNT(*) FILTER (WHERE NOT has_replied AND has_read_receipt)::int AS read_no_reply,
         COUNT(*) FILTER (WHERE has_replied)::int AS replied
       FROM per_chat
       GROUP BY bd_account_id, first_date

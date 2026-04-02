@@ -271,6 +271,13 @@ export function workspacesRouter({ pool, rabbitmq, log }: Deps): Router {
        LIMIT 1`,
       [decoded.userId, organizationId]
     );
+    if (nextRes.rows.length === 0) {
+      throw new AppError(
+        400,
+        'No other workspace found to switch to. Try refreshing the page or contact support if this persists.',
+        ErrorCodes.BAD_REQUEST
+      );
+    }
     const nextOrgId = nextRes.rows[0].id as string;
     const nextRole = nextRes.rows[0].role as string;
 
@@ -292,7 +299,16 @@ export function workspacesRouter({ pool, rabbitmq, log }: Deps): Router {
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
-      throw err;
+      if (err instanceof AppError) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error({ message: 'Workspace delete failed', organizationId, error: msg });
+      const pg = err as { code?: string; detail?: string };
+      throw new AppError(
+        500,
+        'Could not delete workspace due to a server error. Try again later or contact support.',
+        ErrorCodes.INTERNAL_ERROR,
+        pg?.detail ? { detail: pg.detail } : undefined
+      );
     } finally {
       client.release();
     }

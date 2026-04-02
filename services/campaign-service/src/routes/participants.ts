@@ -332,7 +332,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
        LEFT JOIN leads l ON l.id = conv.lead_id
        LEFT JOIN stages st ON st.id = l.stage_id
        WHERE cp.campaign_id = $1 ${whereStatus} ${whereFilter}
-       ORDER BY fs.first_sent_at DESC NULLS LAST, cp.created_at
+       ORDER BY fs.first_sent_at DESC NULLS LAST, cp.enqueue_order ASC NULLS LAST, cp.created_at ASC
        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       params
     );
@@ -415,6 +415,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
               cs.sequence_step,
               cs.status AS delivery_status,
               cs.message_id,
+              cs.metadata AS send_metadata,
               cp.id AS participant_id,
               cp.contact_id,
               COALESCE(NULLIF(TRIM(c.display_name), ''), NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), ''), c.username, c.telegram_id::text, cp.contact_id::text) AS contact_name,
@@ -425,7 +426,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
        JOIN contacts c ON c.id = cp.contact_id
        LEFT JOIN messages m ON m.id = cs.message_id
        WHERE cp.campaign_id = $1
-       ORDER BY cs.sent_at DESC
+       ORDER BY cs.sent_at ASC, cs.id ASC
        LIMIT $2 OFFSET $3`,
       [id, limitNum, offset]
     );
@@ -435,6 +436,7 @@ export function participantsRouter({ pool, log }: Deps): Router {
       sequenceStep: r.sequence_step,
       status: r.delivery_status,
       messageId: r.message_id,
+      metadata: r.send_metadata && typeof r.send_metadata === 'object' ? r.send_metadata : null,
       participantId: r.participant_id,
       contactId: r.contact_id,
       contactName: r.contact_name ?? '',

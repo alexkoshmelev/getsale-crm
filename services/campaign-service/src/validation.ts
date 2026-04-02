@@ -96,6 +96,11 @@ export const ParticipantsBulkSchema = z.object({
   bdAccountId: z.string().uuid().optional(),
 });
 
+/** Contacts that may already have outreach in this org (preview before saving audience). */
+export const AudienceConflictsBodySchema = z.object({
+  contactIds: z.array(z.string().uuid()).min(1).max(5000),
+});
+
 export const PresetCreateSchema = z.object({
   name: z.string().min(1, 'Name is required').max(500).trim(),
   channel: z.string().max(64).optional().default('telegram'),
@@ -107,4 +112,5 @@ export type CampaignPatchInput = z.infer<typeof CampaignPatchSchema>;
 export type FromCsvBodyInput = z.infer<typeof FromCsvBodySchema>;
 export type FromUsernameListBodyInput = z.infer<typeof FromUsernameListBodySchema>;
 export type ParticipantsBulkInput = z.infer<typeof ParticipantsBulkSchema>;
+export type AudienceConflictsBodyInput = z.infer<typeof AudienceConflictsBodySchema>;
 export type PresetCreateInput = z.infer<typeof PresetCreateSchema>;

@@ -14,6 +14,7 @@ import {
   FromUsernameListBodySchema,
   ParticipantsBulkSchema,
   PresetCreateSchema,
+  AudienceConflictsBodySchema,
 } from '../validation';
 import { matchOrCreateContactsFromRows, parseUsernameListToRows, type CsvContactRow } from '../audience-contact-import';
 import type { QueryParam, CampaignRow, CampaignCountRow, CampaignRevenueRow, BdAccountRow } from '../types';
@@ -26,6 +27,17 @@ function getBdAccountIdsFromTargetAudience(aud: unknown): string[] {
   }
   if (typeof a.bdAccountId === 'string' && a.bdAccountId) return [a.bdAccountId];
   return [];
+}
+
+/** Delete / duplicate / rename (incl. active name-only): owner, admin, or campaign author. */
+function canManageCampaignLifecycle(
+  role: string | undefined,
+  userId: string | undefined,
+  createdByUserId: string | null
+): boolean {
+  const r = (role || '').toLowerCase();
+  if (r === 'owner' || r === 'admin') return true;
+  return createdByUserId != null && userId != null && createdByUserId === userId;
 }
 
 function serializeBdAccountRow(row: BdAccountRow) {
@@ -452,6 +464,101 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     });
   }));
 
+  router.post('/:id/duplicate', asyncHandler(async (req, res) => {
+    const { organizationId, id: userId, role } = req.user;
+    const { id: sourceId } = req.params;
+    const srcRes = await pool.query(
+      'SELECT * FROM campaigns WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL',
+      [sourceId, organizationId]
+    );
+    if (srcRes.rows.length === 0) {
+      throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+    }
+    const src = srcRes.rows[0] as {
+      company_id: string | null;
+      pipeline_id: string | null;
+      name: string;
+      target_audience: unknown;
+      schedule: unknown;
+      lead_creation_settings: unknown;
+      created_by_user_id: string | null;
+    };
+    if (!canManageCampaignLifecycle(role, userId, src.created_by_user_id)) {
+      throw new AppError(403, 'Insufficient permissions', ErrorCodes.FORBIDDEN);
+    }
+    const newId = randomUUID();
+    const rawName = `Copy of ${src.name}`;
+    const newName = rawName.length > 255 ? `${rawName.slice(0, 252)}...` : rawName;
+
+    await withOrgContext(pool, organizationId, async (client) => {
+      await client.query(
+        `INSERT INTO campaigns (id, organization_id, company_id, pipeline_id, name, status, target_audience, schedule, lead_creation_settings, created_by_user_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          newId,
+          organizationId,
+          src.company_id,
+          src.pipeline_id,
+          newName,
+          CampaignStatus.DRAFT,
+          src.target_audience,
+          src.schedule,
+          src.lead_creation_settings,
+          userId ?? null,
+        ]
+      );
+
+      const tmpls = await client.query(
+        'SELECT * FROM campaign_templates WHERE campaign_id = $1 ORDER BY created_at ASC',
+        [sourceId]
+      );
+      const idMap = new Map<string, string>();
+      for (const t of tmpls.rows as Record<string, unknown>[]) {
+        const nid = randomUUID();
+        idMap.set(String(t.id), nid);
+        await client.query(
+          `INSERT INTO campaign_templates (id, organization_id, campaign_id, name, channel, content, conditions, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())`,
+          [nid, organizationId, newId, t.name, t.channel, t.content, t.conditions ?? {}]
+        );
+      }
+
+      const seqs = await client.query(
+        'SELECT * FROM campaign_sequences WHERE campaign_id = $1 ORDER BY order_index ASC',
+        [sourceId]
+      );
+      for (const s of seqs.rows as Record<string, unknown>[]) {
+        const tid = idMap.get(String(s.template_id));
+        if (!tid) continue;
+        await client.query(
+          `INSERT INTO campaign_sequences (id, campaign_id, order_index, template_id, delay_hours, delay_minutes, conditions, trigger_type, is_hidden, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())`,
+          [
+            randomUUID(),
+            newId,
+            s.order_index,
+            tid,
+            s.delay_hours,
+            s.delay_minutes ?? 0,
+            s.conditions ?? {},
+            s.trigger_type ?? 'delay',
+            s.is_hidden ?? false,
+          ]
+        );
+      }
+
+      await client.query(
+        `INSERT INTO campaign_participants (id, campaign_id, contact_id, bd_account_id, channel_id, status, current_step, next_send_at, metadata, enqueue_order, created_at, updated_at)
+         SELECT gen_random_uuid(), $1, contact_id, bd_account_id, channel_id, 'pending', 0, NULL, COALESCE(metadata, '{}'::jsonb), COALESCE(enqueue_order, 0), NOW(), NOW()
+         FROM campaign_participants WHERE campaign_id = $2`,
+        [newId, sourceId]
+      );
+    });
+
+    const out = await pool.query('SELECT * FROM campaigns WHERE id = $1', [newId]);
+    res.status(201).json(out.rows[0]);
+  }));
+
   router.post('/', validate(CampaignCreateSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
     const { name, companyId, pipelineId, targetAudience, schedule } = req.body;
@@ -492,7 +599,7 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
   }));
 
   router.patch('/:id', validate(CampaignPatchSchema), asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const { organizationId, id: userId, role } = req.user;
     const { id } = req.params;
     const { name, companyId, pipelineId, targetAudience, schedule, status, leadCreationSettings } = req.body;
 
@@ -503,7 +610,27 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     if (existing.rows.length === 0) {
       throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
     }
-    const cur = existing.rows[0];
+    const cur = existing.rows[0] as { status: string; created_by_user_id: string | null };
+    const bodyKeys = Object.keys(req.body || {}).filter(
+      (k) => (req.body as Record<string, unknown>)[k] !== undefined
+    );
+    const nameOnlyRename =
+      bodyKeys.length === 1 && bodyKeys[0] === 'name' && typeof name === 'string';
+    if (nameOnlyRename) {
+      const nm = name.trim();
+      if (!nm) {
+        throw new AppError(400, 'Name is required', ErrorCodes.BAD_REQUEST);
+      }
+      if (!canManageCampaignLifecycle(role, userId, cur.created_by_user_id)) {
+        throw new AppError(403, 'Insufficient permissions', ErrorCodes.FORBIDDEN);
+      }
+      const renamed = await pool.query(
+        'UPDATE campaigns SET name = $1, updated_at = NOW() WHERE id = $2 AND organization_id = $3 RETURNING *',
+        [nm, id, organizationId]
+      );
+      return res.json(renamed.rows[0]);
+    }
+
     const onlyStop = status === CampaignStatus.COMPLETED && cur.status === CampaignStatus.ACTIVE;
     if (!onlyStop && cur.status !== CampaignStatus.DRAFT && cur.status !== CampaignStatus.PAUSED) {
       throw new AppError(400, 'Only draft or paused campaigns can be updated', ErrorCodes.BAD_REQUEST);
@@ -566,16 +693,20 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
   }));
 
   router.delete('/:id', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
+    const { organizationId, id: userId, role } = req.user;
     const { id } = req.params;
     const existing = await pool.query(
-      'SELECT status FROM campaigns WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL',
+      'SELECT status, created_by_user_id FROM campaigns WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL',
       [id, organizationId]
     );
     if (existing.rows.length === 0) {
       throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
     }
-    const status = existing.rows[0].status;
+    const row = existing.rows[0] as { status: string; created_by_user_id: string | null };
+    if (!canManageCampaignLifecycle(role, userId, row.created_by_user_id)) {
+      throw new AppError(403, 'Insufficient permissions', ErrorCodes.FORBIDDEN);
+    }
+    const status = row.status;
     if (status === CampaignStatus.ACTIVE) {
       throw new AppError(400, 'Cannot delete active campaign; pause it first', ErrorCodes.BAD_REQUEST);
     }
@@ -586,6 +717,35 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       )
     );
     res.status(204).send();
+  }));
+
+  router.post('/:id/audience/conflicts', validate(AudienceConflictsBodySchema), asyncHandler(async (req, res) => {
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    const { contactIds } = req.body as { contactIds: string[] };
+    const camp = await pool.query(
+      'SELECT id FROM campaigns WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL',
+      [id, organizationId]
+    );
+    if (camp.rows.length === 0) {
+      throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+    }
+    const result = await pool.query(
+      `SELECT cp.contact_id::text AS contact_id,
+              c.id::text AS campaign_id,
+              c.name AS campaign_name,
+              cp.status AS participant_status,
+              (SELECT MAX(cs.sent_at) FROM campaign_sends cs WHERE cs.campaign_participant_id = cp.id) AS last_sent_at,
+              (c.id = $3::uuid) AS is_current_campaign
+       FROM campaign_participants cp
+       JOIN campaigns c ON c.id = cp.campaign_id
+       WHERE cp.contact_id = ANY($1::uuid[])
+         AND c.organization_id = $2
+         AND c.deleted_at IS NULL
+       ORDER BY cp.contact_id, c.name`,
+      [contactIds, organizationId, id]
+    );
+    res.json({ conflicts: result.rows });
   }));
 
   router.post('/:id/audience/from-csv', validate(FromCsvBodySchema), asyncHandler(async (req, res) => {
@@ -675,6 +835,12 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
 
     let added = 0;
     const batchSize = 1000;
+    const maxRes = await pool.query(
+      `SELECT COALESCE(MAX(enqueue_order), -1)::int AS m FROM campaign_participants WHERE campaign_id = $1`,
+      [id]
+    );
+    let enqueueBase = Number((maxRes.rows[0] as { m?: number })?.m ?? -1);
+
     for (let i = 0; i < contactIds.length; i += batchSize) {
       const batch = contactIds.slice(i, i + batchSize);
       
@@ -683,13 +849,14 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       let pIdx = 2;
 
       for (const cid of batch) {
-         values.push(`($1, $${pIdx}, $${pIdx + 1}, 'pending', NOW(), NOW())`);
-         params.push(cid, assignedBdAccountId || null);
-         pIdx += 2;
+        enqueueBase += 1;
+        values.push(`($1, $${pIdx}, $${pIdx + 1}, 'pending', $${pIdx + 2}, NOW(), NOW())`);
+        params.push(cid, assignedBdAccountId || null, enqueueBase);
+        pIdx += 3;
       }
       
       const insertQuery = `
-        INSERT INTO campaign_participants (campaign_id, contact_id, bd_account_id, status, created_at, updated_at)
+        INSERT INTO campaign_participants (campaign_id, contact_id, bd_account_id, status, enqueue_order, created_at, updated_at)
         VALUES ${values.join(', ')}
         ON CONFLICT (campaign_id, contact_id) DO NOTHING
       `;

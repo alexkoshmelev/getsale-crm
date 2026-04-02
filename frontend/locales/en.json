@@ -129,7 +129,9 @@
     "cannotLeaveOnly": "You cannot leave your only workspace.",
     "cannotDeleteOnly": "You cannot delete your only workspace.",
     "dangerZone": "Danger zone",
-    "deleteOwnerOnlyHint": "Only the workspace owner can delete this workspace. Admins and other roles cannot."
+    "deleteOwnerOnlyHint": "Only the workspace owner can delete this workspace. Admins and other roles cannot.",
+    "deleteOtherMembersFirst": "To delete this workspace, remove other team members first or use the Team page.",
+    "deleteGoToTeam": "Open Team"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -625,6 +627,17 @@
     "saving": "Saving...",
     "deleteCampaign": "Delete campaign",
     "deleteCampaignConfirm": "Delete campaign \"{{name}}\"? This cannot be undone.",
+    "createdAt": "Created",
+    "duplicateCampaign": "Duplicate",
+    "duplicateCampaignConfirm": "Create a draft copy of this campaign with the same sequence and participants?",
+    "renameCampaign": "Rename",
+    "renameCampaignSave": "Save name",
+    "sendHistoryChronological": "Oldest first",
+    "sendHistoryMeta": "Details",
+    "audienceConflictsTitle": "Prior outreach",
+    "audienceConflictsHint": "These contacts are already participants in a campaign or have sends. You can continue anyway.",
+    "audienceConflictsContinue": "Continue",
+    "audienceConflictsCancel": "Cancel",
     "audienceSource": "Contact source",
     "sourceDatabase": "CRM database",
     "sourceFile": "File (CSV)",
@@ -858,7 +871,10 @@
     "revokeLink": "Revoke",
     "pendingInvitations": "Pending invitations",
     "pendingInvitationsHint": "Invitations sent by email that have not been accepted yet.",
-    "revokeInvitation": "Revoke invitation"
+    "revokeInvitation": "Revoke invitation",
+    "removeMember": "Remove",
+    "removeMemberConfirm": "Remove this member from the workspace?",
+    "removeMemberError": "Could not remove member"
   },
   "settings": {
     "title": "Settings",

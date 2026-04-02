@@ -129,7 +129,9 @@
     "cannotLeaveOnly": "Нельзя покинуть единственный воркспейс.",
     "cannotDeleteOnly": "Нельзя удалить единственный воркспейс.",
     "dangerZone": "Опасная зона",
-    "deleteOwnerOnlyHint": "Удалить воркспейс может только владелец. Администраторы и другие роли не могут."
+    "deleteOwnerOnlyHint": "Удалить воркспейс может только владелец. Администраторы и другие роли не могут.",
+    "deleteOtherMembersFirst": "Чтобы удалить воркспейс, сначала удалите других участников команды или откройте раздел «Команда».",
+    "deleteGoToTeam": "Открыть команду"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -625,6 +627,17 @@
     "saving": "Сохранение...",
     "deleteCampaign": "Удалить кампанию",
     "deleteCampaignConfirm": "Удалить кампанию «{{name}}»? Это действие нельзя отменить.",
+    "createdAt": "Создана",
+    "duplicateCampaign": "Дублировать",
+    "duplicateCampaignConfirm": "Создать черновик-копию с той же последовательностью и участниками?",
+    "renameCampaign": "Переименовать",
+    "renameCampaignSave": "Сохранить название",
+    "sendHistoryChronological": "Сначала старые",
+    "sendHistoryMeta": "Подробности",
+    "audienceConflictsTitle": "Ранние рассылки",
+    "audienceConflictsHint": "Эти контакты уже участвуют в кампании или получали отправки. Можно продолжить.",
+    "audienceConflictsContinue": "Продолжить",
+    "audienceConflictsCancel": "Отмена",
     "audienceSource": "Откуда брать контакты",
     "sourceDatabase": "База CRM",
     "sourceFile": "Файл (CSV)",
@@ -858,7 +871,10 @@
     "revokeLink": "Отозвать",
     "pendingInvitations": "Ожидающие приглашения",
     "pendingInvitationsHint": "Приглашения по email, которые ещё не приняты.",
-    "revokeInvitation": "Отозвать приглашение"
+    "revokeInvitation": "Отозвать приглашение",
+    "removeMember": "Удалить",
+    "removeMemberConfirm": "Удалить этого участника из воркспейса?",
+    "removeMemberError": "Не удалось удалить участника"
   },
   "settings": {
     "title": "Настройки",

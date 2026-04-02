@@ -27,7 +27,11 @@ import type { CampaignStep, DueParticipantRow } from './types';
 
 const CAMPAIGN_SEND_INTERVAL_MS = parseInt(String(process.env.CAMPAIGN_SEND_INTERVAL_MS || 60000), 10);
 /** Min milliseconds between two campaign-initiated sends for the same bd_account_id within one worker batch (0 = off). Reduces TG flood risk when many participants share an account. */
-const CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT = parseInt(String(process.env.CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT || '0'), 10);
+/** Default 6 minutes (5–7 min range) between campaign sends per BD account unless overridden by env. */
+const CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT = parseInt(
+  String(process.env.CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT || '360000'),
+  10
+);
 const SEND_MAX_RETRIES = 3;
 const CAMPAIGN_BATCH_SIZE = 20;
 const CAMPAIGN_429_RETRY_AFTER_MINUTES = parseInt(String(process.env.CAMPAIGN_429_RETRY_AFTER_MINUTES || '30'), 10);
@@ -535,6 +539,20 @@ async function processParticipant(
         body?.details?.retryAfterSeconds ?? CAMPAIGN_429_RETRY_AFTER_MINUTES * 60;
       const retryAt = new Date(Date.now() + retryAfterSeconds * 1000);
       await client.query(
+        `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status, metadata)
+         VALUES ($1, $2, NULL, NOW(), 'deferred', $3::jsonb)`,
+        [
+          row.participant_id,
+          row.current_step,
+          JSON.stringify({
+            event: 'rate_limit_429',
+            retryAfterSeconds,
+            retryAt: retryAt.toISOString(),
+            message: reasonMessage,
+          }),
+        ]
+      );
+      await client.query(
         `UPDATE campaign_participants SET next_send_at = $1, metadata = $2, updated_at = NOW() WHERE id = $3`,
         [
           retryAt.toISOString(),
@@ -562,6 +580,19 @@ async function processParticipant(
     }
 
     await client.query(
+      `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status, metadata)
+       VALUES ($1, $2, NULL, NOW(), 'failed', $3::jsonb)`,
+      [
+        row.participant_id,
+        row.current_step,
+        JSON.stringify({
+          event: 'send_failed',
+          message: reasonMessage,
+          attempts: SEND_MAX_RETRIES,
+        }),
+      ]
+    );
+    await client.query(
       `UPDATE campaign_participants SET status = 'failed', metadata = $1, updated_at = NOW() WHERE id = $2`,
       [JSON.stringify({ lastError: reasonMessage, attempts: SEND_MAX_RETRIES }), row.participant_id]
     );
@@ -587,7 +618,8 @@ async function processParticipant(
     sendDelayRange: meta?.sendDelayRange ?? { minSeconds: 0, maxSeconds: 0 },
   });
   await client.query(
-    `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status) VALUES ($1, $2, $3, NOW(), 'sent')`,
+    `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status, metadata)
+     VALUES ($1, $2, $3, NOW(), 'sent', '{}'::jsonb)`,
     [row.participant_id, row.current_step, msgJson?.id || randomUUID()]
   );
   await client.query('COMMIT');
@@ -663,6 +695,19 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
               `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
               [retryAt.toISOString(), row.participant_id]
             );
+            await client.query(
+              `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status, metadata)
+               VALUES ($1, $2, NULL, NOW(), 'deferred', $3::jsonb)`,
+              [
+                row.participant_id,
+                row.current_step,
+                JSON.stringify({
+                  event: 'min_gap',
+                  deferMs,
+                  bdAccountId: row.bd_account_id,
+                }),
+              ]
+            );
             await client.query('COMMIT');
             log.info({
               message: 'Campaign send deferred: min gap per BD account',
@@ -689,9 +734,19 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
         const effectiveScheduleLoop = getEffectiveSchedule(meta?.schedule ?? null, accSchedLoop);
 
         if (!isWithinSchedule(effectiveScheduleLoop)) {
+          const nextAt = nextSlotRetry(effectiveScheduleLoop);
           await client.query(
             `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
-            [nextSlotRetry(effectiveScheduleLoop), row.participant_id]
+            [nextAt, row.participant_id]
+          );
+          await client.query(
+            `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status, metadata)
+             VALUES ($1, $2, NULL, NOW(), 'deferred', $3::jsonb)`,
+            [
+              row.participant_id,
+              row.current_step,
+              JSON.stringify({ event: 'outside_schedule', nextSendAt: nextAt }),
+            ]
           );
           await client.query('COMMIT');
           continue;
@@ -705,9 +760,23 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
         if (!checkDailyLimits(sentMap, row.bd_account_id, accountDailyLimit)) {
           const tomorrowStart = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z');
           tomorrowStart.setUTCDate(tomorrowStart.getUTCDate() + 1);
+          const nextDaily = nextSendAtWithSchedule(tomorrowStart, 0, effectiveScheduleLoop);
           await client.query(
             `UPDATE campaign_participants SET next_send_at = $1, updated_at = NOW() WHERE id = $2`,
-            [nextSendAtWithSchedule(tomorrowStart, 0, effectiveScheduleLoop), row.participant_id]
+            [nextDaily, row.participant_id]
+          );
+          await client.query(
+            `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status, metadata)
+             VALUES ($1, $2, NULL, NOW(), 'deferred', $3::jsonb)`,
+            [
+              row.participant_id,
+              row.current_step,
+              JSON.stringify({
+                event: 'daily_cap',
+                accountDailyLimit,
+                nextSendAt: nextDaily,
+              }),
+            ]
           );
           await client.query('COMMIT');
           continue;
@@ -716,6 +785,11 @@ async function processCampaignSends(deps: CampaignLoopDeps): Promise<void> {
         const step = steps[row.current_step];
         if (!step) {
           const reason = { no_sequence_step: true, current_step: row.current_step };
+          await client.query(
+            `INSERT INTO campaign_sends (campaign_participant_id, sequence_step, message_id, sent_at, status, metadata)
+             VALUES ($1, $2, NULL, NOW(), 'failed', $3::jsonb)`,
+            [row.participant_id, row.current_step, JSON.stringify({ event: 'no_sequence_step', ...reason })]
+          );
           await client.query(
             `UPDATE campaign_participants SET status = 'failed', next_send_at = NULL, metadata = $1, updated_at = NOW() WHERE id = $2`,
             [JSON.stringify(reason), row.participant_id]

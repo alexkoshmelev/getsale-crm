@@ -10,6 +10,7 @@ import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { clsx } from 'clsx';
+import Link from 'next/link';
 import { reportError } from '@/lib/error-reporter';
 
 type SettingsTab = 'profile' | 'workspace' | 'subscription' | 'security' | 'notifications' | 'audit';
@@ -388,6 +389,12 @@ export default function SettingsPage() {
                         {showDelete && (
                           <div className="space-y-2">
                             <p className="text-sm text-muted-foreground">{t('workspaces.deleteHint')}</p>
+                            {orgMembers.length > 1 && (
+                              <p className="text-sm text-amber-700 dark:text-amber-400">
+                                {t('workspaces.deleteOtherMembersFirst')}{' '}
+                                <Link href="/dashboard/team" className="underline font-medium">{t('workspaces.deleteGoToTeam')}</Link>
+                              </p>
+                            )}
                             <Input
                               label={t('workspaces.deleteTypeName')}
                               type="text"

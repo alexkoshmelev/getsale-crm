@@ -268,6 +268,31 @@ export async function deleteCampaign(id: string): Promise<void> {
   await apiClient.delete(`/api/campaigns/${id}`);
 }
 
+export async function duplicateCampaign(id: string): Promise<Campaign> {
+  const { data } = await apiClient.post<Campaign>(`/api/campaigns/${id}/duplicate`);
+  return data;
+}
+
+export interface AudienceConflictRow {
+  contact_id: string;
+  campaign_id: string;
+  campaign_name: string;
+  participant_status: string;
+  last_sent_at: string | null;
+  is_current_campaign: boolean;
+}
+
+export async function checkCampaignAudienceConflicts(
+  campaignId: string,
+  contactIds: string[]
+): Promise<{ conflicts: AudienceConflictRow[] }> {
+  const { data } = await apiClient.post<{ conflicts: AudienceConflictRow[] }>(
+    `/api/campaigns/${campaignId}/audience/conflicts`,
+    { contactIds }
+  );
+  return data;
+}
+
 export async function startCampaign(id: string): Promise<Campaign> {
   const { data } = await apiClient.post<Campaign>(`/api/campaigns/${id}/start`);
   return data;
@@ -584,6 +609,8 @@ export interface CampaignSendHistoryRow {
   sequenceStep: number;
   status: string;
   messageId: string | null;
+  /** Delivery / deferral details (e.g. event: min_gap, rate_limit_429). */
+  metadata?: Record<string, unknown> | null;
   participantId: string;
   contactId: string;
   contactName: string;

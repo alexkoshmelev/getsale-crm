@@ -55,6 +55,7 @@ export default function TeamPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
   const [updatingRoleId, setUpdatingRoleId] = useState<string | null>(null);
+  const [removingUserId, setRemovingUserId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchMembers();
@@ -156,6 +157,21 @@ export default function TeamPage() {
     }
   };
 
+  const handleRemoveMember = async (member: TeamMember) => {
+    const id = member.user_id ?? member.userId;
+    if (!id) return;
+    if (!window.confirm(t('team.removeMemberConfirm', { email: member.email || id }))) return;
+    setRemovingUserId(id);
+    try {
+      await apiClient.delete(`/api/team/members/${id}`);
+      await fetchMembers();
+    } catch (error) {
+      reportError(error, { component: 'TeamPage', action: 'removeMember' });
+    } finally {
+      setRemovingUserId(null);
+    }
+  };
+
   const handleMemberRoleChange = async (member: TeamMember, newRole: string) => {
     const id = member.user_id ?? member.userId;
     if (!id) return;
@@ -236,6 +252,31 @@ export default function TeamPage() {
                     )}
                   </div>
                 </div>
+                {canChangeRoles &&
+                  member.user_id &&
+                  user?.id &&
+                  member.user_id !== user.id &&
+                  String(member.role).toLowerCase() !== 'owner' && (
+                    <div className="pt-2 border-t border-border">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="text-destructive border-destructive/40 hover:bg-destructive/10"
+                        disabled={removingUserId === member.user_id}
+                        onClick={() => handleRemoveMember(member)}
+                      >
+                        {removingUserId === member.user_id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <>
+                            <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                            {t('team.removeMember')}
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  )}
               </div>
             ))}
           </div>

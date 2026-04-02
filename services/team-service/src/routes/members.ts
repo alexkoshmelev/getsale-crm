@@ -126,6 +126,107 @@ export function membersRouter({ pool, rabbitmq }: Deps): Router {
     }
   }));
 
+  router.delete('/:id', asyncHandler(async (req, res) => {
+    const user = req.user;
+    const roleLower = (user.role || '').toLowerCase();
+    if (roleLower !== 'owner' && roleLower !== 'admin') {
+      throw new AppError(403, 'Only owner or admin can remove members', ErrorCodes.FORBIDDEN);
+    }
+
+    const targetUserId = req.params.id;
+    if (!targetUserId || !/^[0-9a-f-]{36}$/i.test(targetUserId)) {
+      throw new AppError(400, 'Invalid user id', ErrorCodes.VALIDATION);
+    }
+    if (targetUserId === user.id) {
+      throw new AppError(400, 'Use leave workspace in settings to remove yourself from this workspace', ErrorCodes.BAD_REQUEST);
+    }
+
+    const mem = await pool.query(
+      `SELECT role FROM organization_members WHERE user_id = $1 AND organization_id = $2`,
+      [targetUserId, user.organizationId]
+    );
+    if (mem.rows.length === 0) {
+      throw new AppError(404, 'Member not found in this workspace', ErrorCodes.NOT_FOUND);
+    }
+    if (String(mem.rows[0].role).toLowerCase() === 'owner') {
+      throw new AppError(403, 'Cannot remove workspace owner; transfer ownership first', ErrorCodes.FORBIDDEN);
+    }
+
+    const membershipCount = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM organization_members WHERE user_id = $1`,
+      [targetUserId]
+    );
+    if ((membershipCount.rows[0] as { c: number }).c <= 1) {
+      throw new AppError(
+        400,
+        'Cannot remove a user who belongs only to this workspace',
+        ErrorCodes.BAD_REQUEST
+      );
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`DELETE FROM organization_members WHERE user_id = $1 AND organization_id = $2`, [
+        targetUserId,
+        user.organizationId,
+      ]);
+
+      const uRow = await client.query(`SELECT organization_id FROM users WHERE id = $1`, [targetUserId]);
+      const userCurrentOrg = uRow.rows[0]?.organization_id as string | undefined;
+      if (userCurrentOrg === user.organizationId) {
+        const nextRes = await client.query(
+          `SELECT om.organization_id AS id, om.role
+           FROM organization_members om
+           JOIN organizations o ON o.id = om.organization_id
+           WHERE om.user_id = $1
+           ORDER BY o.name
+           LIMIT 1`,
+          [targetUserId]
+        );
+        if (nextRes.rows.length === 0) {
+          throw new Error('Invariant: user has no workspace after removal');
+        }
+        const nextOrgId = nextRes.rows[0].id as string;
+        const nextRole = nextRes.rows[0].role as string;
+        await client.query(`UPDATE users SET organization_id = $1, role = $2 WHERE id = $3`, [
+          nextOrgId,
+          nextRole,
+          targetUserId,
+        ]);
+        await client.query(
+          `UPDATE user_profiles SET organization_id = $1 WHERE user_id = $2 AND organization_id = $3`,
+          [nextOrgId, targetUserId, user.organizationId]
+        );
+        await client.query(`UPDATE subscriptions SET organization_id = $1 WHERE user_id = $2 AND organization_id = $3`, [
+          nextOrgId,
+          targetUserId,
+          user.organizationId,
+        ]);
+      }
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    await auditLog(pool, {
+      organizationId: user.organizationId,
+      userId: user.id,
+      action: 'workspace.member_removed',
+      resourceType: 'organization_member',
+      resourceId: targetUserId,
+      oldValue: {},
+      newValue: { removedUserId: targetUserId },
+      ip: getClientIp(req),
+    });
+
+    res.status(204).send();
+  }));
+
   router.put('/:id/role', validate(TmUpdateMemberRoleSchema), asyncHandler(async (req, res) => {
     const user = req.user;
     const roleLower = (user.role || '').toLowerCase();

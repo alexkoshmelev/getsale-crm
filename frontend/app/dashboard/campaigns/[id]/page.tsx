@@ -21,6 +21,9 @@ import {
   Percent,
   UserPlus,
   History,
+  Pencil,
+  Trash2,
+  Copy,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { reportError, reportWarning } from '@/lib/error-reporter';
@@ -34,11 +37,16 @@ import {
   enrichContactsFromTelegram,
   addCampaignParticipants,
   fetchCampaignSends,
+  deleteCampaign,
+  duplicateCampaign,
+  checkCampaignAudienceConflicts,
   type CampaignWithDetails,
   type CampaignStats,
   type CampaignAnalytics,
   type CampaignSendsPage,
 } from '@/lib/api/campaigns';
+import { useAuthStore } from '@/lib/stores/auth-store';
+import { canManageCampaignLifecycle } from '@/lib/permissions';
 import { SequenceBuilderCanvas } from '@/components/campaigns/SequenceBuilderCanvas';
 import { CampaignAudienceSchedule } from '@/components/campaigns/CampaignAudienceSchedule';
 import { CampaignSendingAccountsOverview } from '@/components/campaigns/CampaignSendingAccountsOverview';
@@ -169,8 +177,14 @@ export default function CampaignDetailPage() {
   const [sendsPage, setSendsPage] = useState(1);
   const [sendsData, setSendsData] = useState<CampaignSendsPage | null>(null);
   const [sendsLoading, setSendsLoading] = useState(false);
+  const user = useAuthStore((s) => s.user);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
   const campaignRef = useRef<CampaignWithDetails | null>(null);
   campaignRef.current = campaign ?? null;
+
+  const canLifecycle =
+    campaign != null && canManageCampaignLifecycle(user?.role, user?.id, campaign.created_by_user_id);
 
   const load = async () => {
     if (!id) return;
@@ -314,6 +328,53 @@ export default function CampaignDetailPage() {
     }
   };
 
+  const handleSaveName = async () => {
+    if (!id || !campaign) return;
+    const nm = nameDraft.trim();
+    if (!nm) return;
+    if (nm === campaign.name) {
+      setEditingName(false);
+      return;
+    }
+    setActionLoading(true);
+    try {
+      await updateCampaign(id, { name: nm });
+      setEditingName(false);
+      await load();
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'renameCampaign' });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDuplicateCampaign = async () => {
+    if (!id || !confirm(t('campaigns.duplicateCampaignConfirm'))) return;
+    setActionLoading(true);
+    try {
+      const created = await duplicateCampaign(id);
+      window.location.href = `/dashboard/campaigns/${created.id}`;
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'duplicateCampaign' });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDeleteCampaign = async () => {
+    if (!id || !campaign) return;
+    if (!confirm(t('campaigns.deleteCampaignConfirm', { name: campaign.name }))) return;
+    setActionLoading(true);
+    try {
+      await deleteCampaign(id);
+      window.location.href = '/dashboard/campaigns';
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'deleteCampaign' });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   if (loading && !campaign) {
     return (
       <div className="flex items-center justify-center min-h-[320px]">
@@ -353,6 +414,15 @@ export default function CampaignDetailPage() {
     if (ids.length === 0) return;
     setAddParticipantsLoading(true);
     try {
+      const { conflicts } = await checkCampaignAudienceConflicts(id, ids);
+      const risky = conflicts.filter((c) => !c.is_current_campaign || c.last_sent_at != null);
+      if (risky.length > 0) {
+        const ok = window.confirm(t('campaigns.audienceConflictsHint'));
+        if (!ok) {
+          setAddParticipantsLoading(false);
+          return;
+        }
+      }
       await addCampaignParticipants(id, ids);
       setShowAddParticipantsModal(false);
       setAddParticipantIdsText('');
@@ -379,10 +449,48 @@ export default function CampaignDetailPage() {
             <div className="rounded-xl bg-primary/10 p-3">
               <Send className="w-8 h-8 text-primary" />
             </div>
-            <div>
-              <h1 className="font-heading text-2xl font-bold text-foreground tracking-tight">
-                {campaign.name}
-              </h1>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                {editingName ? (
+                  <>
+                    <input
+                      value={nameDraft}
+                      onChange={(e) => setNameDraft(e.target.value)}
+                      className="font-heading text-2xl font-bold text-foreground tracking-tight max-w-full min-w-[200px] px-2 py-1 rounded-lg border border-border bg-background"
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void handleSaveName();
+                        if (e.key === 'Escape') setEditingName(false);
+                      }}
+                    />
+                    <Button size="sm" onClick={() => void handleSaveName()} disabled={actionLoading || !nameDraft.trim()}>
+                      {t('campaigns.renameCampaignSave')}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setEditingName(false)} disabled={actionLoading}>
+                      {t('common.cancel')}
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <h1 className="font-heading text-2xl font-bold text-foreground tracking-tight truncate">
+                      {campaign.name}
+                    </h1>
+                    {canLifecycle && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNameDraft(campaign.name);
+                          setEditingName(true);
+                        }}
+                        className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted"
+                        aria-label={t('campaigns.renameCampaign')}
+                      >
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
               <span
                 className={clsx(
                   'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium',
@@ -397,6 +505,25 @@ export default function CampaignDetailPage() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {canLifecycle && (
+              <>
+                <Button variant="outline" onClick={() => void handleDuplicateCampaign()} disabled={actionLoading}>
+                  <Copy className="w-4 h-4 mr-2" />
+                  {t('campaigns.duplicateCampaign')}
+                </Button>
+                {campaign.status !== 'active' && (
+                  <Button
+                    variant="outline"
+                    className="text-destructive border-destructive/30 hover:bg-destructive/10"
+                    onClick={() => void handleDeleteCampaign()}
+                    disabled={actionLoading}
+                  >
+                    <Trash2 className="w-4 h-4 mr-2" />
+                    {t('campaigns.deleteCampaign')}
+                  </Button>
+                )}
+              </>
+            )}
             {canAddParticipants && (
               <Button variant="outline" onClick={() => setShowAddParticipantsModal(true)} disabled={actionLoading}>
                 <UserPlus className="w-4 h-4 mr-2" />
@@ -830,7 +957,10 @@ export default function CampaignDetailPage() {
       {tab === 'sends' && (
         <div className="rounded-xl border border-border bg-card overflow-hidden">
           <div className="p-4 border-b border-border flex flex-wrap items-center justify-between gap-2">
-            <h3 className="font-medium text-foreground">{t('campaigns.sendHistory', { defaultValue: 'Send history' })}</h3>
+            <div>
+              <h3 className="font-medium text-foreground">{t('campaigns.sendHistory', { defaultValue: 'Send history' })}</h3>
+              <p className="text-xs text-muted-foreground mt-0.5">{t('campaigns.sendHistoryChronological')}</p>
+            </div>
             {sendsData && (
               <span className="text-xs text-muted-foreground">
                 {t('campaigns.sendHistoryTotal', { defaultValue: '{{count}} sends', count: sendsData.pagination.total })}
@@ -853,6 +983,7 @@ export default function CampaignDetailPage() {
                     <th className="p-3 font-medium">{t('campaigns.step', { defaultValue: 'Step' })}</th>
                     <th className="p-3 font-medium">{t('campaigns.status', { defaultValue: 'Status' })}</th>
                     <th className="p-3 font-medium">{t('campaigns.message', { defaultValue: 'Message' })}</th>
+                    <th className="p-3 font-medium hidden lg:table-cell">{t('campaigns.sendHistoryMeta')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -871,6 +1002,13 @@ export default function CampaignDetailPage() {
                       </td>
                       <td className="p-3 max-w-md truncate text-muted-foreground" title={row.messageContent ?? ''}>
                         {row.messageContent ?? '—'}
+                      </td>
+                      <td className="p-3 max-w-[200px] text-xs text-muted-foreground hidden lg:table-cell truncate" title={row.metadata ? JSON.stringify(row.metadata) : ''}>
+                        {row.metadata && typeof row.metadata === 'object' && row.metadata !== null && 'event' in row.metadata
+                          ? String((row.metadata as { event?: string }).event ?? '')
+                          : row.metadata
+                            ? JSON.stringify(row.metadata).slice(0, 80)
+                            : '—'}
                       </td>
                     </tr>
                   ))}

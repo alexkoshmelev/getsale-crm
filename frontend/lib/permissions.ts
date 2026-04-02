@@ -58,6 +58,21 @@ export function canManageCampaigns(role: string | undefined | null): boolean {
   return r === 'owner' || r === 'admin' || r === 'supervisor';
 }
 
+/**
+ * Delete / duplicate / rename (any status): owner, admin, or author of the campaign.
+ * Matches campaign-service ACL for destructive or ownership-sensitive actions.
+ */
+export function canManageCampaignLifecycle(
+  role: string | undefined | null,
+  userId: string | undefined | null,
+  createdByUserId: string | null | undefined
+): boolean {
+  const r = normalizeRole(role);
+  if (r === 'owner' || r === 'admin') return true;
+  if (userId && createdByUserId && userId === createdByUserId) return true;
+  return false;
+}
+
 /** Messaging: owner, admin, supervisor, bidi */
 export function canManageMessaging(role: string | undefined | null): boolean {
   const r = normalizeRole(role);

@@ -3,17 +3,20 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
-import { Send, Plus, MoreVertical, Pencil, ChevronLeft, ChevronRight, Users, BarChart3 } from 'lucide-react';
+import { Send, Plus, MoreVertical, Pencil, ChevronLeft, ChevronRight, Users, BarChart3, Copy } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import {
   fetchCampaigns,
   createCampaign,
   deleteCampaign,
+  duplicateCampaign,
   type Campaign,
   type CampaignStatus,
   type CampaignListResponse,
 } from '@/lib/api/campaigns';
+import { useAuthStore } from '@/lib/stores/auth-store';
+import { canManageCampaignLifecycle } from '@/lib/permissions';
 import { clsx } from 'clsx';
 import { AccountStatusAvatar } from '@/components/bd-accounts/AccountStatusAvatar';
 
@@ -33,8 +36,13 @@ const statusColors: Record<CampaignStatus, string> = {
 
 const PAGE_SIZE = 20;
 
+function formatShortDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
 export default function CampaignsPage() {
   const { t } = useTranslation();
+  const user = useAuthStore((s) => s.user);
   const [response, setResponse] = useState<CampaignListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -85,6 +93,17 @@ export default function CampaignsPage() {
       await deleteCampaign(c.id);
       setMenuId(null);
       load();
+    } catch {
+      // handled
+    }
+  };
+
+  const handleDuplicate = async (c: Campaign) => {
+    if (!confirm(t('campaigns.duplicateCampaignConfirm'))) return;
+    try {
+      const created = await duplicateCampaign(c.id);
+      setMenuId(null);
+      window.location.href = `/dashboard/campaigns/${created.id}`;
     } catch {
       // handled
     }
@@ -162,6 +181,7 @@ export default function CampaignsPage() {
                   <thead>
                     <tr className="border-b border-border bg-muted/30">
                       <th className="text-left px-4 py-3 font-medium text-muted-foreground">{t('campaigns.campaignName')}</th>
+                      <th className="text-left px-4 py-3 font-medium text-muted-foreground hidden md:table-cell">{t('campaigns.createdAt')}</th>
                       <th className="text-left px-4 py-3 font-medium text-muted-foreground">{t('campaigns.statusLabel')}</th>
                       <th className="text-left px-4 py-3 font-medium text-muted-foreground hidden md:table-cell">{t('campaigns.owner')}</th>
                       <th className="text-left px-4 py-3 font-medium text-muted-foreground hidden lg:table-cell">{t('campaigns.bdAccount')}</th>
@@ -179,6 +199,9 @@ export default function CampaignsPage() {
                           <Link href={`/dashboard/campaigns/${c.id}`} className="font-medium text-foreground hover:text-primary truncate block max-w-[240px]">
                             {c.name}
                           </Link>
+                        </td>
+                        <td className="px-4 py-3 text-muted-foreground hidden md:table-cell whitespace-nowrap text-xs">
+                          {c.created_at ? formatShortDate(c.created_at) : '—'}
                         </td>
                         <td className="px-4 py-3">
                           <span className={clsx('inline-flex px-2 py-0.5 rounded-md text-xs font-medium', statusColors[c.status])}>
@@ -231,6 +254,16 @@ export default function CampaignsPage() {
                                   <Link href={`/dashboard/campaigns/${c.id}?tab=sequence`}>
                                     <span className="block px-3 py-2 text-sm hover:bg-muted cursor-pointer">{t('campaigns.sequence')}</span>
                                   </Link>
+                                  {canManageCampaignLifecycle(user?.role, user?.id, c.created_by_user_id) && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDuplicate(c)}
+                                      className="w-full text-left px-3 py-2 text-sm hover:bg-muted flex items-center gap-1.5"
+                                    >
+                                      <Copy className="w-3.5 h-3.5" />
+                                      {t('campaigns.duplicateCampaign')}
+                                    </button>
+                                  )}
                                   {(c.status === 'draft' || c.status === 'paused') && (
                                     <>
                                       <Link href={`/dashboard/campaigns/${c.id}?tab=sequence`}>
@@ -238,13 +271,15 @@ export default function CampaignsPage() {
                                           <Pencil className="w-3.5 h-3.5 inline mr-1.5" />{t('common.edit')}
                                         </span>
                                       </Link>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleDelete(c)}
-                                        className="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10"
-                                      >
-                                        {t('campaigns.deleteCampaign')}
-                                      </button>
+                                      {canManageCampaignLifecycle(user?.role, user?.id, c.created_by_user_id) && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDelete(c)}
+                                          className="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10"
+                                        >
+                                          {t('campaigns.deleteCampaign')}
+                                        </button>
+                                      )}
                                     </>
                                   )}
                                 </div>
