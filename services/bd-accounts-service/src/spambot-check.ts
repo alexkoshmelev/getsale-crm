@@ -10,10 +10,12 @@ export type SpamBotClassification = 'restricted' | 'clear' | 'unknown';
 export function classifySpamBotReply(text: string): SpamBotClassification {
   const t = (text || '').toLowerCase();
   if (
-    /good news|free as a bird|no limits are currently applied|not limited|everything looks fine|all good|no restrictions/i.test(
+    /good news|free as a bird|no limits are currently applied|not limited|everything looks fine|all good|no restrictions|free from any restrictions|your account is free from/i.test(
       t
     ) ||
-    /не ограничен|нет ограничений|всё в порядке|все в порядке|ограничения не примен/i.test(t)
+    /не ограничен|нет ограничений|всё в порядке|все в порядке|ограничения не примен|свободен от|ваш аккаунт свободен|свободен от каких-либо ограничений/i.test(
+      t
+    )
   ) {
     return 'clear';
   }
@@ -21,7 +23,7 @@ export function classifySpamBotReply(text: string): SpamBotClassification {
     /limited|restriction|cannot write|can't send|can not send|spam activity|report spam|too many|complaint|mute|banned/i.test(
       t
     ) ||
-    /ограничен|ограничения|жалоб|спам|блок|не можете писать|не можешь писать|нарушен/i.test(t)
+    /\bограничен\b|ограничени[ея]|ограничений|жалоб|спам|блок|не можете писать|не можешь писать|нарушен/i.test(t)
   ) {
     return 'restricted';
   }

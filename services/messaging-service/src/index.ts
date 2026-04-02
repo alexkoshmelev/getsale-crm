@@ -2,14 +2,6 @@ import { createServiceApp, ServiceHttpClient, interServiceHttpDefaults } from '@
 import { createLogger } from '@getsale/logger';
 import { Counter, Histogram } from 'prom-client';
 import { subscribeToEvents } from './event-handlers';
-
-/** Long-running LLM calls; align with campaign-service → ai (65s). Override: MESSAGING_AI_HTTP_TIMEOUT_MS. */
-function messagingAiTimeoutMs(): number {
-  const raw = process.env.MESSAGING_AI_HTTP_TIMEOUT_MS?.trim();
-  if (!raw) return 65_000;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 5_000 ? n : 65_000;
-}
 import { messagesRouter } from './routes/messages';
 import { chatsRouter } from './routes/chats';
 import { conversationsRouter } from './routes/conversations';
@@ -18,6 +10,22 @@ import { conversationAiRouter } from './routes/conversation-ai';
 import { sharedChatsRouter } from './routes/shared-chats';
 import { conversationDealsRouter } from './routes/conversation-deals';
 import { internalMessagingRouter } from './routes/internal';
+
+/** Long-running LLM calls; align with campaign-service → ai (65s). Override: MESSAGING_AI_HTTP_TIMEOUT_MS. */
+function messagingAiTimeoutMs(): number {
+  const raw = process.env.MESSAGING_AI_HTTP_TIMEOUT_MS?.trim();
+  if (!raw) return 65_000;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 5_000 ? n : 65_000;
+}
+
+/** Outbound send waits on Telegram; default 90s. Override: MESSAGING_BD_ACCOUNTS_HTTP_TIMEOUT_MS. */
+function messagingBdAccountsTimeoutMs(): number {
+  const raw = process.env.MESSAGING_BD_ACCOUNTS_HTTP_TIMEOUT_MS?.trim();
+  if (!raw) return 90_000;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 10_000 ? n : 90_000;
+}
 
 async function main() {
   const ctx = await createServiceApp({
@@ -31,6 +39,7 @@ async function main() {
     baseUrl: process.env.BD_ACCOUNTS_SERVICE_URL || 'http://bd-accounts-service:3007',
     name: 'bd-accounts-service',
     retries: 0,
+    timeoutMs: messagingBdAccountsTimeoutMs(),
     metricsRegistry: registry,
   }, log);
 

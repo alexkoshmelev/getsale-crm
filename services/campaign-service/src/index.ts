@@ -9,6 +9,14 @@ import { sequencesRouter } from './routes/sequences';
 import { executionRouter } from './routes/execution';
 import { participantsRouter } from './routes/participants';
 
+/** Inter-service POST /api/messaging/send can wait on Telegram via bd-accounts; default 90s. */
+function campaignMessagingTimeoutMs(): number {
+  const raw = process.env.CAMPAIGN_MESSAGING_HTTP_TIMEOUT_MS?.trim();
+  if (!raw) return 90_000;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 10_000 ? n : 90_000;
+}
+
 async function main() {
   const ctx = await createServiceApp({
     name: 'campaign-service',
@@ -30,6 +38,7 @@ async function main() {
     baseUrl: process.env.MESSAGING_SERVICE_URL || 'http://localhost:3003',
     name: 'messaging-service',
     retries: 0,
+    timeoutMs: campaignMessagingTimeoutMs(),
     metricsRegistry: registry,
   }, log);
 

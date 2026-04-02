@@ -43,6 +43,13 @@ function getInterServiceMetrics(registry: Registry) {
   return m;
 }
 
+/** Fetch/undici timeout via AbortController — transient; should not trip inter-service circuit breaker. */
+function isAbortOrTimeoutError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'AbortError') return true;
+  return /abort|aborted/i.test(err.message);
+}
+
 /** Optional context to forward to downstream services for attribution and tracing */
 export interface RequestContext {
   userId?: string;
@@ -235,8 +242,10 @@ export class ServiceHttpClient {
 
         // Do not count 502 (downstream/Telegram error) or 429 (rate limit) as circuit failure —
         // otherwise FloodWait/PEER_FLOOD from Telegram would open the circuit and block all sends.
+        // Do not count client timeouts/aborts — slow downstream under load is not "service dead".
         const skipCircuitFailure =
-          err instanceof ServiceCallError && (err.statusCode === 502 || err.statusCode === 429);
+          (err instanceof ServiceCallError && (err.statusCode === 502 || err.statusCode === 429)) ||
+          isAbortOrTimeoutError(err);
         if (!skipCircuitFailure) {
           this.circuitBreaker.recordFailure();
         }
