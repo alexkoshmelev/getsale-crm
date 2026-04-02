@@ -557,12 +557,8 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
         );
       }
 
-      await client.query(
-        `INSERT INTO campaign_participants (id, campaign_id, contact_id, bd_account_id, channel_id, status, current_step, next_send_at, metadata, enqueue_order, created_at, updated_at)
-         SELECT gen_random_uuid(), $1, contact_id, bd_account_id, channel_id, 'pending', 0, NULL, COALESCE(metadata, '{}'::jsonb), COALESCE(enqueue_order, 0), NOW(), NOW()
-         FROM campaign_participants WHERE campaign_id = $2`,
-        [newId, sourceId]
-      );
+      // Do not copy campaign_participants: audience stays in target_audience (contactIds).
+      // On Start, bulkInsertCampaignParticipants creates rows with next_send_at (standard path).
     });
 
     const out = await pool.query('SELECT * FROM campaigns WHERE id = $1', [newId]);
