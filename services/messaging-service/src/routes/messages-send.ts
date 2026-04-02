@@ -343,67 +343,77 @@ export function registerSendRoutes(router: Router, deps: MessagesRouterDeps): vo
     );
     const message = insertResult.rows[0];
 
-    await ensureConversation(pool, {
-      organizationId,
-      bdAccountId: bdAccountId || null,
-      channel,
-      channelId: sentChannelId,
-      contactId: contactIdOrNull,
+    res.json(message);
+
+    setImmediate(async () => {
+      try {
+        await ensureConversation(pool, {
+          organizationId,
+          bdAccountId: bdAccountId || null,
+          channel,
+          channelId: sentChannelId,
+          contactId: contactIdOrNull,
+        });
+
+        if (sentChannelId !== channelId) {
+          await mergeOrphanConversationPeerToCanonical(pool, {
+            organizationId,
+            bdAccountId: bdAccountId || null,
+            channel,
+            fromChannelId: channelId,
+            toChannelId: sentChannelId,
+          });
+        }
+
+        if (source !== 'campaign') {
+          await pool.query(
+            `UPDATE conversations SET first_manager_reply_at = COALESCE(first_manager_reply_at, NOW()), updated_at = NOW()
+             WHERE organization_id = $1 AND bd_account_id IS NOT DISTINCT FROM $2 AND channel = $3 AND channel_id = $4`,
+            [organizationId, bdAccountId, channel, sentChannelId]
+          );
+        }
+
+        const updatedResult = await pool.query('SELECT * FROM messages WHERE id = $1', [message.id]);
+        const updatedRow = updatedResult.rows[0] as Record<string, unknown> | undefined;
+
+        const event: MessageSentEvent = {
+          id: randomUUID(),
+          type: EventType.MESSAGE_SENT,
+          timestamp: new Date(),
+          organizationId,
+          userId,
+          correlationId: req.correlationId,
+          data: {
+            messageId: message.id,
+            channel,
+            contactId: contactIdOrNull ?? undefined,
+            bdAccountId,
+            channelId: updatedRow ? String(updatedRow.channel_id ?? '') : undefined,
+            content: updatedRow && typeof updatedRow.content === 'string' ? updatedRow.content : undefined,
+            direction: 'outbound',
+            telegramMessageId: (() => {
+              const v = updatedRow?.telegram_message_id;
+              return v != null && (typeof v === 'string' || typeof v === 'number') ? v : undefined;
+            })(),
+            createdAt: updatedRow && updatedRow.created_at != null ? String(updatedRow.created_at) : undefined,
+          },
+        };
+        try {
+          await rabbitmq.publishEvent(event);
+        } catch (publishErr) {
+          log.warn({
+            message: 'Message sent, but publishEvent failed',
+            messageId: message.id,
+            error: publishErr instanceof Error ? publishErr.message : String(publishErr),
+          });
+        }
+      } catch (postSendErr) {
+        log.warn({
+          message: 'messaging_post_send_async_error',
+          messageId: message.id,
+          error: postSendErr instanceof Error ? postSendErr.message : String(postSendErr),
+        });
+      }
     });
-
-    if (sentChannelId !== channelId) {
-      await mergeOrphanConversationPeerToCanonical(pool, {
-        organizationId,
-        bdAccountId: bdAccountId || null,
-        channel,
-        fromChannelId: channelId,
-        toChannelId: sentChannelId,
-      });
-    }
-
-    if (source !== 'campaign') {
-      await pool.query(
-        `UPDATE conversations SET first_manager_reply_at = COALESCE(first_manager_reply_at, NOW()), updated_at = NOW()
-         WHERE organization_id = $1 AND bd_account_id IS NOT DISTINCT FROM $2 AND channel = $3 AND channel_id = $4`,
-        [organizationId, bdAccountId, channel, sentChannelId]
-      );
-    }
-
-    const updatedResult = await pool.query('SELECT * FROM messages WHERE id = $1', [message.id]);
-    const updatedRow = updatedResult.rows[0] as Record<string, unknown> | undefined;
-
-    const event: MessageSentEvent = {
-      id: randomUUID(),
-      type: EventType.MESSAGE_SENT,
-      timestamp: new Date(),
-      organizationId,
-      userId,
-      correlationId: req.correlationId,
-      data: {
-        messageId: message.id,
-        channel,
-        contactId: contactIdOrNull ?? undefined,
-        bdAccountId,
-        channelId: updatedRow ? String(updatedRow.channel_id ?? '') : undefined,
-        content: updatedRow && typeof updatedRow.content === 'string' ? updatedRow.content : undefined,
-        direction: 'outbound',
-        telegramMessageId: (() => {
-          const v = updatedRow?.telegram_message_id;
-          return v != null && (typeof v === 'string' || typeof v === 'number') ? v : undefined;
-        })(),
-        createdAt: updatedRow && updatedRow.created_at != null ? String(updatedRow.created_at) : undefined,
-      },
-    };
-    try {
-      await rabbitmq.publishEvent(event);
-    } catch (publishErr) {
-      log.warn({
-        message: 'Message sent, but publishEvent failed',
-        messageId: message.id,
-        error: publishErr instanceof Error ? publishErr.message : String(publishErr),
-      });
-    }
-
-    res.json(updatedRow);
   }));
 }

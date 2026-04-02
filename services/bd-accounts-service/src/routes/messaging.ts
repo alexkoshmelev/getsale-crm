@@ -42,8 +42,8 @@ function peerTypeFromChatId(chatId: string): 'chat' | 'user' {
 }
 
 /**
- * After outbound send: ensure sync row uses canonical numeric chat id. If a row for the canonical id
- * already exists (e.g. from sync), delete the duplicate username-based row instead of UPDATE → 23505.
+ * After outbound send: migrate username-based rows to the canonical numeric chat id.
+ * Three idempotent queries, no branching — minimises lock duration vs the old 5-query pattern.
  */
 async function mergeOutboundSendSyncRow(
   pool: Pool,
@@ -60,52 +60,19 @@ async function mergeOutboundSendSyncRow(
     [canonical, bdAccountId, requestChatId]
   );
 
-  const existingCanonical = await pool.query(
-    `SELECT 1 FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1`,
-    [bdAccountId, canonical]
+  const pt = peerTypeFromChatId(canonical);
+  await pool.query(
+    `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id, sync_list_origin)
+     VALUES ($1, $2, '', $3, false, NULL, 'outbound_send')
+     ON CONFLICT (bd_account_id, telegram_chat_id)
+     DO UPDATE SET sync_list_origin = 'outbound_send'`,
+    [bdAccountId, canonical, pt]
   );
-  if (existingCanonical.rows.length > 0) {
-    await pool.query(`DELETE FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2`, [
-      bdAccountId,
-      requestChatId,
-    ]);
-    await pool.query(
-      `UPDATE bd_account_sync_chats SET sync_list_origin = 'outbound_send' WHERE bd_account_id = $1 AND telegram_chat_id = $2`,
-      [bdAccountId, canonical]
-    );
-    return;
-  }
 
-  try {
-    const upd = await pool.query(
-      `UPDATE bd_account_sync_chats SET telegram_chat_id = $3, sync_list_origin = 'outbound_send'
-       WHERE bd_account_id = $1 AND telegram_chat_id = $2`,
-      [bdAccountId, requestChatId, canonical]
-    );
-    if ((upd.rowCount ?? 0) === 0) {
-      const pt = peerTypeFromChatId(canonical);
-      await pool.query(
-        `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id, sync_list_origin)
-         VALUES ($1, $2, '', $3, false, NULL, 'outbound_send')
-         ON CONFLICT (bd_account_id, telegram_chat_id) DO NOTHING`,
-        [bdAccountId, canonical, pt]
-      );
-    }
-  } catch (e: unknown) {
-    const code = typeof e === 'object' && e !== null && 'code' in e ? (e as { code: string }).code : undefined;
-    if (code === '23505') {
-      await pool.query(`DELETE FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2`, [
-        bdAccountId,
-        requestChatId,
-      ]);
-      await pool.query(
-        `UPDATE bd_account_sync_chats SET sync_list_origin = 'outbound_send' WHERE bd_account_id = $1 AND telegram_chat_id = $2`,
-        [bdAccountId, canonical]
-      );
-      return;
-    }
-    throw e;
-  }
+  await pool.query(
+    `DELETE FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2`,
+    [bdAccountId, requestChatId]
+  );
 }
 
 export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
@@ -305,27 +272,8 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     }
 
     const chatIdStr = usedPeerForSync;
-    let resolvedChatId: string = chatIdStr;
-    const afterTelegramInvoke = Date.now();
-    if (chatIdStr) {
-      const peerType = peerTypeFromChatId(chatIdStr);
-      await pool.query(
-        `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id, sync_list_origin)
-         VALUES ($1, $2, '', $3, false, NULL, 'outbound_send')
-         ON CONFLICT (bd_account_id, telegram_chat_id) DO NOTHING`,
-        [id, chatIdStr, peerType]
-      );
-      const canonical = canonicalTelegramChatIdFromMessage(message);
-      await mergeOutboundSendSyncRow(pool, id, chatIdStr, canonical);
-      resolvedChatId = canonical || chatIdStr;
-    }
-
-    log.info({
-      message: 'bd_send_post_sync_db',
-      correlation_id: correlationId,
-      account_id: id,
-      elapsed_ms: Date.now() - afterTelegramInvoke,
-    });
+    const canonical = chatIdStr ? canonicalTelegramChatIdFromMessage(message) : null;
+    const resolvedChatId: string = (canonical || chatIdStr) ?? chatIdStr;
 
     const serialized = serializeMessage(message);
     const payload: Record<string, unknown> = {
@@ -336,7 +284,46 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
     };
     if (serialized.telegram_media) payload.telegram_media = serialized.telegram_media;
     if (serialized.telegram_entities) payload.telegram_entities = serialized.telegram_entities;
+
+    log.info({
+      message: 'bd_send_http_response',
+      correlation_id: correlationId,
+      account_id: id,
+      elapsed_ms: Date.now() - bdHttpT0,
+    });
     res.json(payload);
+
+    if (chatIdStr) {
+      setImmediate(async () => {
+        const syncT0 = Date.now();
+        try {
+          log.info({ message: 'bd_send_post_sync_start', correlation_id: correlationId, account_id: id });
+          const peerType = peerTypeFromChatId(chatIdStr);
+          await pool.query(
+            `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id, sync_list_origin)
+             VALUES ($1, $2, '', $3, false, NULL, 'outbound_send')
+             ON CONFLICT (bd_account_id, telegram_chat_id) DO NOTHING`,
+            [id, chatIdStr, peerType]
+          );
+          await mergeOutboundSendSyncRow(pool, id, chatIdStr, canonical);
+        } catch (e) {
+          log.warn({
+            message: 'bd_send_post_sync_error',
+            correlation_id: correlationId,
+            account_id: id,
+            error: e instanceof Error ? e.message : String(e),
+            elapsed_ms: Date.now() - syncT0,
+          });
+          return;
+        }
+        log.info({
+          message: 'bd_send_post_sync_done',
+          correlation_id: correlationId,
+          account_id: id,
+          elapsed_ms: Date.now() - syncT0,
+        });
+      });
+    }
   }));
 
   // POST /:id/send-bulk — send one message to multiple chats
@@ -362,15 +349,22 @@ export function messagingRouter({ pool, log, telegramManager }: Deps): Router {
       try {
         const sentMsg = await telegramManager.sendMessage(id, chatId, text, {});
         sent++;
-        const peerType = peerTypeFromChatId(chatId);
-        await pool.query(
-          `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id, sync_list_origin)
-           VALUES ($1, $2, '', $3, false, NULL, 'outbound_send')
-           ON CONFLICT (bd_account_id, telegram_chat_id) DO NOTHING`,
-          [id, chatId, peerType]
-        );
-        const canonical = canonicalTelegramChatIdFromMessage(sentMsg as { peerId?: unknown });
-        await mergeOutboundSendSyncRow(pool, id, chatId, canonical);
+        const bulkChatId = chatId;
+        const bulkCanonical = canonicalTelegramChatIdFromMessage(sentMsg as { peerId?: unknown });
+        setImmediate(async () => {
+          try {
+            const peerType = peerTypeFromChatId(bulkChatId);
+            await pool.query(
+              `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id, sync_list_origin)
+               VALUES ($1, $2, '', $3, false, NULL, 'outbound_send')
+               ON CONFLICT (bd_account_id, telegram_chat_id) DO NOTHING`,
+              [id, bulkChatId, peerType]
+            );
+            await mergeOutboundSendSyncRow(pool, id, bulkChatId, bulkCanonical);
+          } catch (e) {
+            log.warn({ message: 'bd_send_bulk_post_sync_error', account_id: id, chatId: bulkChatId, error: e instanceof Error ? e.message : String(e) });
+          }
+        });
       } catch (err: any) {
         failed.push({ channelId: chatId, error: err?.message || String(err) });
       }

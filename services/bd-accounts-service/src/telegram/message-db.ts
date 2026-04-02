@@ -225,27 +225,43 @@ export class MessageDb {
     const u = (username || '').trim();
     if (!u) return;
     const aliases = [`@${u}`, u];
-    await this.pool.query(
-      `UPDATE bd_account_sync_chats SET telegram_chat_id = $3, sync_list_origin = 'outbound_send'
-       WHERE bd_account_id = $1 AND telegram_chat_id = ANY($2::text[])`,
-      [accountId, aliases, numericChatId]
-    );
-    await this.pool.query(
-      `UPDATE messages SET channel_id = $3, updated_at = NOW()
-       WHERE bd_account_id = $1 AND channel = 'telegram' AND channel_id = ANY($2::text[])`,
-      [accountId, aliases, numericChatId]
-    );
-    await this.pool.query(
-      `UPDATE conversations SET channel_id = $3, updated_at = NOW()
-       WHERE bd_account_id IS NOT DISTINCT FROM $1::uuid AND channel = 'telegram' AND channel_id = ANY($2::text[])
-         AND NOT EXISTS (
-           SELECT 1 FROM conversations c2
-           WHERE c2.organization_id = conversations.organization_id
-             AND c2.bd_account_id IS NOT DISTINCT FROM $1::uuid
-             AND c2.channel = 'telegram' AND c2.channel_id = $3
-         )`,
-      [accountId, aliases, numericChatId]
-    );
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE bd_account_sync_chats SET telegram_chat_id = $3, sync_list_origin = 'outbound_send'
+         WHERE bd_account_id = $1 AND telegram_chat_id = ANY($2::text[])`,
+        [accountId, aliases, numericChatId]
+      );
+      await client.query(
+        `UPDATE messages SET channel_id = $3, updated_at = NOW()
+         WHERE bd_account_id = $1 AND channel = 'telegram' AND channel_id = ANY($2::text[])`,
+        [accountId, aliases, numericChatId]
+      );
+      await client.query(
+        `UPDATE conversations SET channel_id = $3, updated_at = NOW()
+         WHERE bd_account_id IS NOT DISTINCT FROM $1::uuid AND channel = 'telegram' AND channel_id = ANY($2::text[])
+           AND NOT EXISTS (
+             SELECT 1 FROM conversations c2
+             WHERE c2.organization_id = conversations.organization_id
+               AND c2.bd_account_id IS NOT DISTINCT FROM $1::uuid
+               AND c2.channel = 'telegram' AND c2.channel_id = $3
+           )`,
+        [accountId, aliases, numericChatId]
+      );
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      this.log.warn({
+        message: 'tryMigrateSyncChatUsernameAliases failed',
+        accountId,
+        numericChatId,
+        username: u,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      client.release();
+    }
   }
 
   async isChatInNonAllChatsFolder(accountId: string, telegramChatId: string): Promise<boolean> {
