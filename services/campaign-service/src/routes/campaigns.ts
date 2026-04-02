@@ -565,6 +565,35 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     res.status(201).json(out.rows[0]);
   }));
 
+  /** Clear participants and send history; keep target_audience, schedule, templates, sequences. Status → draft. */
+  router.post('/:id/reset-progress', asyncHandler(async (req, res) => {
+    const { organizationId, id: userId, role } = req.user;
+    const { id } = req.params;
+
+    const srcRes = await pool.query(
+      'SELECT id, created_by_user_id FROM campaigns WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL',
+      [id, organizationId]
+    );
+    if (srcRes.rows.length === 0) {
+      throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+    }
+    const createdBy = (srcRes.rows[0] as { created_by_user_id: string | null }).created_by_user_id;
+    if (!canManageCampaignLifecycle(role, userId, createdBy)) {
+      throw new AppError(403, 'Insufficient permissions', ErrorCodes.FORBIDDEN);
+    }
+
+    await withOrgContext(pool, organizationId, async (client) => {
+      await client.query('DELETE FROM campaign_participants WHERE campaign_id = $1', [id]);
+      await client.query(
+        'UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2 AND organization_id = $3',
+        [CampaignStatus.DRAFT, id, organizationId]
+      );
+    });
+
+    const out = await pool.query('SELECT * FROM campaigns WHERE id = $1', [id]);
+    res.json(out.rows[0]);
+  }));
+
   router.post('/', validate(CampaignCreateSchema), asyncHandler(async (req, res) => {
     const { id: userId, organizationId } = req.user;
     const { name, companyId, pipelineId, targetAudience, schedule } = req.body;

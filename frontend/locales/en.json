@@ -630,6 +630,8 @@
     "createdAt": "Created",
     "duplicateCampaign": "Duplicate",
     "duplicateCampaignConfirm": "Create a draft copy of this campaign with the same sequence and participants?",
+    "resetProgress": "Reset progress",
+    "resetProgressConfirm": "Clear all participants and send history for this campaign? Audience settings and message sequence stay the same. The campaign becomes a draft — you can start again from scratch.",
     "renameCampaign": "Rename",
     "renameCampaignSave": "Save name",
     "sendHistoryChronological": "Oldest first",

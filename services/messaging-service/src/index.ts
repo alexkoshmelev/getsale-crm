@@ -19,12 +19,12 @@ function messagingAiTimeoutMs(): number {
   return Number.isFinite(n) && n >= 5_000 ? n : 65_000;
 }
 
-/** Outbound send waits on Telegram; default 90s. Override: MESSAGING_BD_ACCOUNTS_HTTP_TIMEOUT_MS. */
+/** Outbound send waits on Telegram; default 120s. Override: MESSAGING_BD_ACCOUNTS_HTTP_TIMEOUT_MS. */
 function messagingBdAccountsTimeoutMs(): number {
   const raw = process.env.MESSAGING_BD_ACCOUNTS_HTTP_TIMEOUT_MS?.trim();
-  if (!raw) return 90_000;
+  if (!raw) return 120_000;
   const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 10_000 ? n : 90_000;
+  return Number.isFinite(n) && n >= 10_000 ? n : 120_000;
 }
 
 async function main() {

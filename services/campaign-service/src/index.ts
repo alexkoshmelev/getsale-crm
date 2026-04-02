@@ -9,9 +9,21 @@ import { sequencesRouter } from './routes/sequences';
 import { executionRouter } from './routes/execution';
 import { participantsRouter } from './routes/participants';
 
-/** Inter-service POST /api/messaging/send can wait on Telegram via bd-accounts; default 90s. */
+/**
+ * POST /api/messaging/send waits on messaging → bd-accounts → Telegram.
+ * Default 150s — must be ≥ MESSAGING_BD_ACCOUNTS_HTTP_TIMEOUT_MS + slack for messaging overhead.
+ * Override: CAMPAIGN_MESSAGING_HTTP_TIMEOUT_MS.
+ */
 function campaignMessagingTimeoutMs(): number {
   const raw = process.env.CAMPAIGN_MESSAGING_HTTP_TIMEOUT_MS?.trim();
+  if (!raw) return 150_000;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 10_000 ? n : 150_000;
+}
+
+/** Direct campaign → bd-accounts (read/typing before send, auto-responder). Default 90s. Override: CAMPAIGN_BD_ACCOUNTS_HTTP_TIMEOUT_MS. */
+function campaignBdAccountsTimeoutMs(): number {
+  const raw = process.env.CAMPAIGN_BD_ACCOUNTS_HTTP_TIMEOUT_MS?.trim();
   if (!raw) return 90_000;
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n >= 10_000 ? n : 90_000;
@@ -47,6 +59,7 @@ async function main() {
     baseUrl: process.env.BD_ACCOUNTS_SERVICE_URL || 'http://localhost:3007',
     name: 'bd-accounts-service',
     retries: 0,
+    timeoutMs: campaignBdAccountsTimeoutMs(),
     metricsRegistry: registry,
   }, log);
 

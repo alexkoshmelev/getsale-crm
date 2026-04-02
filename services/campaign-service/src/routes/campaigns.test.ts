@@ -144,4 +144,49 @@ describe('Campaigns Router', () => {
       expect(call[1]).toContain('aaa');
     });
   });
+
+  describe('POST /api/campaigns/:id/reset-progress', () => {
+    const CAMPAIGN_ID = '33333333-3333-3333-3333-333333333333';
+
+    it('deletes participants, sets draft, returns campaign', async () => {
+      const draftRow = {
+        id: CAMPAIGN_ID,
+        organization_id: TEST_ORG_ID,
+        name: 'Test',
+        status: 'draft',
+        target_audience: { contactIds: ['c1'] },
+      };
+      pool.query
+        .mockResolvedValueOnce({
+          rows: [{ id: CAMPAIGN_ID, created_by_user_id: TEST_USER_ID }],
+          rowCount: 1,
+        })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        .mockResolvedValueOnce({ rows: [draftRow], rowCount: 1 });
+
+      const res = await request(app)
+        .post(`/api/campaigns/${CAMPAIGN_ID}/reset-progress`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ id: CAMPAIGN_ID, status: 'draft' });
+      const calls = pool.query.mock.calls.map((c) => c[0] as string);
+      expect(calls.some((q) => q.includes('DELETE FROM campaign_participants'))).toBe(true);
+      expect(calls.some((q) => q.includes('UPDATE campaigns SET status'))).toBe(true);
+    });
+
+    it('returns 404 when campaign missing', async () => {
+      pool.query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+
+      const res = await request(app)
+        .post(`/api/campaigns/${CAMPAIGN_ID}/reset-progress`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(404);
+    });
+  });
 });

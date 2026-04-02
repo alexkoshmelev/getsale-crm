@@ -276,6 +276,12 @@ export async function duplicateCampaign(id: string): Promise<Campaign> {
   return data;
 }
 
+/** Remove all participants and send records; set status to draft. Keeps target_audience, schedule, templates, sequences. */
+export async function resetCampaignProgress(id: string): Promise<Campaign> {
+  const { data } = await apiClient.post<Campaign>(`/api/campaigns/${id}/reset-progress`);
+  return data;
+}
+
 export async function pauseCampaignAccount(
   campaignId: string,
   accountId: string

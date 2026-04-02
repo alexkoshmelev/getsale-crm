@@ -157,6 +157,7 @@ export class ServiceHttpClient {
     const url = `${this.baseUrl}${path}`;
     const method = options.method ?? 'GET';
     const timeout = options.timeoutMs ?? this.defaultTimeout;
+    const requestStartedAt = Date.now();
 
     if (!this.circuitBreaker.canExecute()) {
       this.interMetrics?.circuitRejects.inc({ client: this.name });
@@ -273,13 +274,40 @@ export class ServiceHttpClient {
       }
     }
 
+    const elapsedMs = Date.now() - requestStartedAt;
     this.log.error({
       message: `${this.name} call failed after ${this.retries + 1} attempts`,
       http_method: method,
       http_path: path,
       circuit_state: this.circuitBreaker.getState(),
       error: lastError?.message,
+      timeout_ms: timeout,
+      elapsed_ms: elapsedMs,
+      ...(lastError && isAbortOrTimeoutError(lastError) ? { abort_or_timeout: true as const } : {}),
     });
+
+    // #region agent log
+    if (lastError && isAbortOrTimeoutError(lastError)) {
+      fetch('http://127.0.0.1:7616/ingest/8e0fed1a-599a-4090-870e-153a68699529', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfe557' },
+        body: JSON.stringify({
+          sessionId: 'cfe557',
+          location: 'http-client.ts:request',
+          message: 'ServiceHttpClient aborted',
+          data: {
+            hypothesisId: 'H-timeout',
+            name: this.name,
+            http_method: method,
+            http_path: path,
+            timeout_ms: timeout,
+            elapsed_ms: elapsedMs,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+    }
+    // #endregion
 
     this.recordInterRequest(method, classifyInterServiceOutcome(lastError));
     throw lastError;

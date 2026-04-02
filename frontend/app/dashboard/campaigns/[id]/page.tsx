@@ -24,6 +24,7 @@ import {
   Pencil,
   Trash2,
   Copy,
+  RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { reportError, reportWarning } from '@/lib/error-reporter';
@@ -38,6 +39,7 @@ import {
   fetchCampaignSends,
   deleteCampaign,
   duplicateCampaign,
+  resetCampaignProgress,
   checkCampaignAudienceConflicts,
   enrichContactsFromTelegram,
   type CampaignWithDetails,
@@ -362,6 +364,19 @@ export default function CampaignDetailPage() {
     }
   };
 
+  const handleResetProgress = async () => {
+    if (!id || !confirm(t('campaigns.resetProgressConfirm'))) return;
+    setActionLoading(true);
+    try {
+      await resetCampaignProgress(id);
+      await load();
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'resetCampaignProgress' });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const handleDeleteCampaign = async () => {
     if (!id || !campaign) return;
     if (!confirm(t('campaigns.deleteCampaignConfirm', { name: campaign.name }))) return;
@@ -399,6 +414,9 @@ export default function CampaignDetailPage() {
   const canStart = campaign.status === 'draft' || campaign.status === 'paused' || campaign.status === 'completed';
   const canPause = campaign.status === 'active';
   const canStop = campaign.status === 'active' || campaign.status === 'paused';
+  const canShowResetProgress =
+    canLifecycle &&
+    (campaign.status !== 'draft' || (campaign.total_participants ?? 0) > 0);
   const canAddParticipants =
     campaign.status === 'draft' ||
     campaign.status === 'paused' ||
@@ -512,6 +530,12 @@ export default function CampaignDetailPage() {
                   <Copy className="w-4 h-4 mr-2" />
                   {t('campaigns.duplicateCampaign')}
                 </Button>
+                {canShowResetProgress && (
+                  <Button variant="outline" onClick={() => void handleResetProgress()} disabled={actionLoading}>
+                    <RotateCcw className="w-4 h-4 mr-2" />
+                    {t('campaigns.resetProgress')}
+                  </Button>
+                )}
                 {campaign.status !== 'active' && (
                   <Button
                     variant="outline"
