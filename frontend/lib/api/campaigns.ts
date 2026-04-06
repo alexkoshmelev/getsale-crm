@@ -638,6 +638,7 @@ export interface CampaignSendHistoryRow {
   sentAt: string;
   sequenceStep: number;
   status: string;
+  participantStatus?: string | null;
   messageId: string | null;
   /** Delivery / deferral details (e.g. event: min_gap, rate_limit_429). */
   metadata?: Record<string, unknown> | null;
@@ -646,6 +647,7 @@ export interface CampaignSendHistoryRow {
   contactName: string;
   messageContent: string | null;
   messageStatus: string | null;
+  messageDirection?: string | null;
 }
 
 export interface CampaignSendsPage {

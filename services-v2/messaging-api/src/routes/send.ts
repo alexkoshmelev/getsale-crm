@@ -8,7 +8,16 @@ import type { MessagingDeps } from '../types';
 const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
 
 const SendMessageSchema = z.object({
-  contactId: z.string().uuid().optional().nullable(),
+  contactId: z.preprocess(
+    (v) => {
+      if (v == null) return null;
+      const s = typeof v === 'string' ? v.trim() : '';
+      if (!s) return null;
+      const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      return uuidRe.test(s) ? s : null;
+    },
+    z.string().uuid().optional().nullable(),
+  ),
   channel: z.string().default('telegram'),
   channelId: z.string().min(1),
   content: z.string().max(10000).optional().default(''),

@@ -195,10 +195,10 @@ export function registerDiscoveryRoutes(app: FastifyInstance, deps: CoreDeps): v
     const taskId = randomUUID();
 
     const result = await db.write.query(
-      `INSERT INTO contact_discovery_tasks (id, organization_id, name, type, status, progress, total, params, results)
-       VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6, '{}'::jsonb)
+      `INSERT INTO contact_discovery_tasks (id, organization_id, created_by_user_id, name, type, status, progress, total, params, results)
+       VALUES ($1, $2, $3, $4, $5, 'pending', 0, $6, $7, '{}'::jsonb)
        RETURNING ${TASK_COLUMNS}`,
-      [taskId, user.organizationId, name, type, total, JSON.stringify(finalParams)],
+      [taskId, user.organizationId, user.id, name, type, total, JSON.stringify(finalParams)],
     );
 
     reply.code(201);
@@ -228,20 +228,27 @@ export function registerDiscoveryRoutes(app: FastifyInstance, deps: CoreDeps): v
     } else if (action === 'pause') {
       if (currentStatus === 'running') {
         newStatus = 'paused';
+      } else if (currentStatus === 'completed' || currentStatus === 'stopped' || currentStatus === 'failed') {
+        return { id, status: currentStatus, updated_at: new Date() };
       } else {
         throw new AppError(400, `Cannot pause task in status ${currentStatus}`, ErrorCodes.BAD_REQUEST);
       }
     } else {
       if (currentStatus === 'running' || currentStatus === 'paused' || currentStatus === 'pending') {
         newStatus = 'stopped';
+      } else if (currentStatus === 'completed' || currentStatus === 'stopped' || currentStatus === 'failed') {
+        return { id, status: currentStatus, updated_at: new Date() };
       } else {
         throw new AppError(400, `Cannot stop task in status ${currentStatus}`, ErrorCodes.BAD_REQUEST);
       }
     }
 
     const updated = await db.write.query(
-      'UPDATE contact_discovery_tasks SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING id, status, updated_at',
-      [newStatus, id],
+      `UPDATE contact_discovery_tasks
+       SET status = $1, created_by_user_id = COALESCE(created_by_user_id, $3), updated_at = NOW()
+       WHERE id = $2
+       RETURNING id, status, updated_at`,
+      [newStatus, id, user.id],
     );
 
     if (action === 'start') {
@@ -266,16 +273,66 @@ export function registerDiscoveryRoutes(app: FastifyInstance, deps: CoreDeps): v
     const user = request.user!;
     const { sources, bdAccountId } = ParseResolveSchema.parse(request.body);
 
-    // TODO: integrate with telegram-session-manager HTTP API for synchronous resolve.
-    // CoreDeps has no TSM HTTP client yet — returning empty results as a safe fallback.
-    log.warn({
-      message: 'parse/resolve: returning empty results (TSM HTTP integration pending)',
-      organizationId: user.organizationId,
-      bdAccountId,
-      sourceCount: sources.length,
-    });
+    const TSM_BASE = process.env.TELEGRAM_SERVICE_URL || 'http://telegram-sm:4005';
+    const INTERNAL_AUTH = process.env.INTERNAL_AUTH_SECRET || '';
 
-    return { results: [] };
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-organization-id': user.organizationId,
+      'x-user-id': user.id,
+      'x-user-role': user.role ?? 'member',
+    };
+    if (INTERNAL_AUTH) headers['x-internal-auth'] = INTERNAL_AUTH;
+
+    const tsmResp = await fetch(
+      `${TSM_BASE}/api/bd-accounts/${bdAccountId}/resolve-chats`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ inputs: sources }),
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+
+    if (!tsmResp.ok) {
+      const text = await tsmResp.text().catch(() => '');
+      log.warn({ message: `parse/resolve: TSM call failed (${tsmResp.status})`, error: text });
+      throw new AppError(502, 'Failed to resolve sources via Telegram', ErrorCodes.INTERNAL_ERROR);
+    }
+
+    const tsmData = (await tsmResp.json()) as {
+      results: Array<{
+        input: string;
+        resolved: boolean;
+        id?: string;
+        type?: string;
+        username?: string | null;
+        title?: string | null;
+        error?: string;
+      }>;
+    };
+
+    type SourceType = 'channel' | 'public_group' | 'private_group' | 'comment_group' | 'unknown';
+    const mapType = (t?: string, entity?: any): SourceType => {
+      if (t === 'channel') return 'channel';
+      if (t === 'group') return 'public_group';
+      return 'unknown';
+    };
+
+    const results = tsmData.results.map((r) => ({
+      input: r.input,
+      type: mapType(r.type),
+      title: r.title || r.input,
+      username: r.username || undefined,
+      chatId: r.id || '',
+      membersCount: undefined as number | undefined,
+      linkedChatId: undefined as number | undefined,
+      canGetMembers: r.type === 'group',
+      canGetMessages: r.resolved && r.type !== 'user',
+      error: r.resolved ? undefined : (r.error || 'Could not resolve'),
+    }));
+
+    return { results };
   });
 
   app.post('/api/crm/parse/start', { preHandler: [requireUser] }, async (request, reply) => {
@@ -322,6 +379,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, deps: CoreDeps): v
         chatId: s.chatId,
         title: s.title,
         peerType: s.type,
+        username: (s as any).username || undefined,
       })),
       bdAccountId: accountIds[0],
       excludeAdmins: settingsFinal.excludeAdmins,
@@ -364,8 +422,12 @@ export function registerDiscoveryRoutes(app: FastifyInstance, deps: CoreDeps): v
       [taskId, user.organizationId],
     );
     if (!task.rows.length) throw new AppError(404, 'Task not found', ErrorCodes.NOT_FOUND);
-    if (task.rows[0].status !== 'running') {
-      throw new AppError(400, `Cannot pause task in status ${task.rows[0].status}`, ErrorCodes.BAD_REQUEST);
+    const currentStatus: string = task.rows[0].status;
+    if (currentStatus === 'completed' || currentStatus === 'stopped' || currentStatus === 'failed') {
+      return { taskId, status: currentStatus };
+    }
+    if (currentStatus !== 'running') {
+      throw new AppError(400, `Cannot pause task in status ${currentStatus}`, ErrorCodes.BAD_REQUEST);
     }
 
     await db.write.query(
@@ -387,6 +449,9 @@ export function registerDiscoveryRoutes(app: FastifyInstance, deps: CoreDeps): v
     if (!task.rows.length) throw new AppError(404, 'Task not found', ErrorCodes.NOT_FOUND);
 
     const status: string = task.rows[0].status;
+    if (status === 'completed' || status === 'stopped' || status === 'failed') {
+      return { taskId, status };
+    }
     if (status !== 'running' && status !== 'paused' && status !== 'pending') {
       throw new AppError(400, `Cannot stop task in status ${status}`, ErrorCodes.BAD_REQUEST);
     }

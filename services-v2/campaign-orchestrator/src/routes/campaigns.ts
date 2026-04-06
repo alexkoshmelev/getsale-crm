@@ -612,7 +612,154 @@ export function registerCampaignRoutes(app: FastifyInstance, deps: Deps): void {
       [id, user.organizationId],
     );
     if (!campaign.rows.length) throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
-    if (campaign.rows[0].status === 'active') throw new AppError(400, 'Campaign already active', ErrorCodes.BAD_REQUEST);
+    const camp = campaign.rows[0] as Record<string, unknown>;
+    if (camp.status === 'active') throw new AppError(400, 'Campaign already active', ErrorCodes.BAD_REQUEST);
+
+    const seqRes = await db.read.query('SELECT 1 FROM campaign_sequences WHERE campaign_id = $1 LIMIT 1', [id]);
+    if (!seqRes.rows.length) throw new AppError(400, 'Add at least one sequence step before starting', ErrorCodes.BAD_REQUEST);
+
+    const audience = (camp.target_audience || {}) as {
+      contactIds?: string[];
+      filters?: Record<string, unknown>;
+      limit?: number;
+      onlyNew?: boolean;
+      bdAccountId?: string;
+      bdAccountIds?: string[];
+      sendDelaySeconds?: number;
+      sendDelayMinSeconds?: number;
+      sendDelayMaxSeconds?: number;
+      dailySendTarget?: number;
+    };
+    const audienceLimit = Math.min(audience.limit ?? 5000, 10000);
+
+    let contactsQuery: string;
+    const queryParams: unknown[] = [user.organizationId];
+    let paramIdx = 2;
+
+    if (audience.contactIds && Array.isArray(audience.contactIds) && audience.contactIds.length > 0) {
+      const ids = audience.contactIds.slice(0, audienceLimit).filter((x) => typeof x === 'string');
+      if (ids.length === 0) throw new AppError(400, 'No valid contact IDs in audience', ErrorCodes.BAD_REQUEST);
+      contactsQuery = `
+        SELECT c.id AS contact_id, c.telegram_id, c.username
+        FROM contacts c
+        WHERE c.organization_id = $1
+        AND (
+          (c.telegram_id IS NOT NULL AND TRIM(c.telegram_id) != '')
+          OR (c.username IS NOT NULL AND TRIM(c.username) != '')
+        )
+        AND c.id = ANY($${paramIdx}::uuid[])
+      `;
+      queryParams.push(ids);
+      paramIdx++;
+    } else {
+      contactsQuery = `
+        SELECT c.id AS contact_id, c.telegram_id, c.username
+        FROM contacts c
+        WHERE c.organization_id = $1
+        AND (
+          (c.telegram_id IS NOT NULL AND TRIM(c.telegram_id) != '')
+          OR (c.username IS NOT NULL AND TRIM(c.username) != '')
+        )
+      `;
+      if (audience.filters?.companyId) {
+        contactsQuery += ` AND c.company_id = $${paramIdx++}`;
+        queryParams.push(audience.filters.companyId);
+      }
+      if (audience.filters?.pipelineId) {
+        contactsQuery += ` AND EXISTS (SELECT 1 FROM leads l WHERE l.contact_id = c.id AND l.pipeline_id = $${paramIdx})`;
+        queryParams.push(audience.filters.pipelineId);
+        paramIdx++;
+      }
+      if (audience.onlyNew) {
+        contactsQuery += ` AND NOT EXISTS (
+          SELECT 1 FROM campaign_participants cp2
+          JOIN campaigns c2 ON c2.id = cp2.campaign_id
+          WHERE cp2.contact_id = c.id AND c2.organization_id = c.organization_id
+        )`;
+      }
+      contactsQuery += ` LIMIT ${audienceLimit}`;
+    }
+
+    const contactsResult = await db.read.query(contactsQuery, queryParams);
+    const contacts = contactsResult.rows as { contact_id: string; telegram_id: string | null; username: string | null }[];
+
+    const hadExplicitIds = Array.isArray(audience.contactIds) && audience.contactIds.length > 0;
+    if (hadExplicitIds && contacts.length === 0) {
+      throw new AppError(400, 'None of the selected contacts have a Telegram ID or username.', ErrorCodes.BAD_REQUEST);
+    }
+
+    const bdAccountIdsRaw = audience.bdAccountIds ?? (audience.bdAccountId ? [audience.bdAccountId] : []);
+    const bdAccountIdsFiltered = bdAccountIdsRaw.filter((x): x is string => typeof x === 'string');
+    let accountIds: string[] = [];
+    if (bdAccountIdsFiltered.length > 0) {
+      const check = await db.read.query(
+        'SELECT id FROM bd_accounts WHERE id = ANY($1::uuid[]) AND organization_id = $2 AND is_active = true',
+        [bdAccountIdsFiltered, user.organizationId],
+      );
+      const order = new Map(bdAccountIdsFiltered.map((x, i) => [x, i]));
+      accountIds = (check.rows as { id: string }[])
+        .map((r) => r.id)
+        .sort((a, b) => (order.get(a) ?? 999) - (order.get(b) ?? 999));
+    }
+    if (accountIds.length === 0) {
+      const fallback = await db.read.query(
+        'SELECT id FROM bd_accounts WHERE organization_id = $1 AND is_active = true LIMIT 1',
+        [user.organizationId],
+      );
+      accountIds = fallback.rows.length > 0 ? [(fallback.rows[0] as { id: string }).id] : [];
+    }
+
+    const ordRow = await db.read.query(
+      'SELECT COALESCE(MAX(enqueue_order), -1) + 1 AS n FROM campaign_participants WHERE campaign_id = $1',
+      [id],
+    );
+    let enqueueOrder = Number((ordRow.rows[0] as { n?: number })?.n ?? 0);
+    let insertedCount = 0;
+    const dailyCap = audience.dailySendTarget ?? 50;
+
+    for (const row of contacts) {
+      const bdAccountId = accountIds.length > 0 ? accountIds[insertedCount % accountIds.length]! : null;
+      const telegramIdNorm = row.telegram_id != null && String(row.telegram_id).trim() !== '' ? String(row.telegram_id).trim() : null;
+      const usernameNorm = row.username != null && row.username.trim().replace(/^@/, '') !== '' ? row.username.trim().replace(/^@/, '') : null;
+      let channelId: string | null = telegramIdNorm ?? usernameNorm;
+
+      if (channelId && bdAccountId) {
+        const chatRes = await db.read.query(
+          'SELECT bd_account_id, telegram_chat_id FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+          [bdAccountId, channelId],
+        );
+        if (chatRes.rows.length > 0) {
+          channelId = String((chatRes.rows[0] as { telegram_chat_id: string }).telegram_chat_id);
+        }
+      }
+      if (!channelId || !bdAccountId) continue;
+
+      const slotIndex = enqueueOrder + insertedCount;
+      const baseIntervalSec = dailyCap > 0 ? Math.max(60, Math.floor(((18 - 9) * 3600) / dailyCap)) : 60;
+      const offsetSec = slotIndex * baseIntervalSec + (slotIndex === 0 ? 0 : Math.floor(Math.random() * Math.max(10, Math.floor(baseIntervalSec * 0.1)) * 2) - Math.max(10, Math.floor(baseIntervalSec * 0.1)));
+      const nextSendAt = new Date(Date.now() + Math.max(0, offsetSec) * 1000);
+
+      const ins = await db.write.query(
+        `INSERT INTO campaign_participants (id, campaign_id, contact_id, bd_account_id, channel_id, status, current_step, next_send_at, enqueue_order, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'pending', 0, $6, $7, NOW(), NOW())
+         ON CONFLICT (campaign_id, contact_id) DO NOTHING
+         RETURNING id`,
+        [randomUUID(), id, row.contact_id, bdAccountId, channelId, nextSendAt, slotIndex],
+      );
+      if (ins.rowCount && ins.rows.length > 0) insertedCount++;
+    }
+
+    if (contacts.length > 0 && insertedCount === 0) {
+      const existing = await db.read.query(
+        'SELECT COUNT(*)::int AS c FROM campaign_participants WHERE campaign_id = $1',
+        [id],
+      );
+      if (Number((existing.rows[0] as { c?: number })?.c ?? 0) === 0) {
+        throw new AppError(400, 'No participants could be added. Ensure contacts have Telegram data and an active BD account is selected.', ErrorCodes.BAD_REQUEST);
+      }
+    }
+
+    log.info({ message: `Inserted ${insertedCount} participants for campaign ${id}` });
 
     const scheduled = await scheduler.scheduleCampaign(id);
 
@@ -628,7 +775,7 @@ export function registerCampaignRoutes(app: FastifyInstance, deps: Deps): void {
       organizationId: user.organizationId,
       userId: user.id,
       correlationId: request.correlationId,
-      data: { campaignId: id, scheduledCount: scheduled },
+      data: { campaignId: id, scheduledCount: scheduled, insertedCount },
     } as unknown as Event).catch(() => {});
 
     const updated = await db.read.query('SELECT * FROM campaigns WHERE id = $1', [id]);

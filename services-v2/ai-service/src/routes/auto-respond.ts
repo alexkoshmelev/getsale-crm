@@ -4,7 +4,7 @@ import { requireUser, validate, AppError, ErrorCodes } from '@getsale/service-fr
 import { AIRateLimiter } from '../rate-limiter';
 import { resolveOpenRouterAutoRespondModel } from '../openrouter-models';
 import { AiAutoRespondSchema } from '../validation';
-import { callOpenRouter, extractOpenRouterContent } from '../openai-client';
+import { callOpenRouter, extractOpenRouterContent, OpenRouterError } from '../openai-client';
 
 const AUTO_REPLY_SYSTEM_HINT = `You are replying in a Telegram business chat outside working hours.
 Follow the user's system instructions closely. Be concise, friendly, and helpful.
@@ -82,11 +82,15 @@ export function registerAutoRespondRoutes(app: FastifyInstance, { log, rateLimit
       } catch (err: unknown) {
         if (err instanceof AppError) throw err;
         const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes('timed out')) {
+        if (msg.includes('timed out') || msg.includes('AbortError')) {
           throw new AppError(504, 'AI request timed out', ErrorCodes.INTERNAL_ERROR);
         }
-        log.warn({ message: 'auto-respond failed', error: msg });
-        throw new AppError(502, 'AI request failed', ErrorCodes.INTERNAL_ERROR);
+        if (err instanceof OpenRouterError && err.httpStatus === 429) {
+          log.warn({ message: 'auto-respond rate-limited upstream', model });
+          throw new AppError(429, 'AI provider is temporarily rate-limited. Please try again in a few seconds.', ErrorCodes.RATE_LIMITED);
+        }
+        log.warn({ message: 'auto-respond failed', error: msg, model });
+        throw new AppError(502, `AI request failed: ${msg.slice(0, 200)}`, ErrorCodes.INTERNAL_ERROR);
       }
     },
   );

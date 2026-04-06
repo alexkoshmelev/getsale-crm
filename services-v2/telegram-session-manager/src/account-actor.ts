@@ -71,7 +71,7 @@ export class AccountActor {
     this.rabbitmq = config.rabbitmq;
     this.redis = config.redis;
     this.log = config.log;
-    this.rateLimiter = new AccountRateLimiter(3, 60_000, 3);
+    this.rateLimiter = new AccountRateLimiter(30, 60_000, 30);
     this.commandQueue = `telegram:commands:${this.accountId}`;
   }
 
@@ -134,6 +134,7 @@ export class AccountActor {
     if (!me) throw new Error(`getMe() returned null for account ${this.accountId}`);
 
     this.registerInboundHandler();
+    this.registerReadReceiptHandler();
     await this.updateProfileInfo(me, row.phone_number);
     this.startSessionSaveLoop();
     this.startKeepaliveLoop();
@@ -152,6 +153,68 @@ export class AccountActor {
       },
       new NewMessage({ incoming: true }),
     );
+  }
+
+  private registerReadReceiptHandler(): void {
+    this.client!.addEventHandler(async (update: any) => {
+      try {
+        const cn = update?.className;
+        if (cn === 'UpdateReadHistoryOutbox') {
+          const peer = update.peer;
+          let channelId = '';
+          if (peer?.userId != null) channelId = String(peer.userId.value ?? peer.userId);
+          else if (peer?.chatId != null) channelId = String(peer.chatId.value ?? peer.chatId);
+          else if (peer?.channelId != null) channelId = String(peer.channelId.value ?? peer.channelId);
+          if (!channelId) return;
+          const maxId = update.maxId ?? 0;
+          await this.handleReadOutbox(channelId, maxId);
+        } else if (cn === 'UpdateReadChannelOutbox') {
+          const channelIdRaw = update.channelId;
+          const channelId = channelIdRaw != null ? String(channelIdRaw.value ?? channelIdRaw) : '';
+          if (!channelId) return;
+          const maxId = update.maxId ?? 0;
+          await this.handleReadOutbox(channelId, maxId);
+        }
+      } catch (err) {
+        this.log.warn({ message: 'Read receipt handler error', error: String(err) });
+      }
+    });
+  }
+
+  private async handleReadOutbox(channelId: string, maxId: number): Promise<void> {
+    if (!maxId || maxId <= 0) return;
+    try {
+      const result = await this.pool.query(
+        `UPDATE messages
+         SET status = 'read', updated_at = NOW()
+         WHERE organization_id = $1 AND bd_account_id = $2
+           AND channel_id = $3 AND direction = 'outbound'
+           AND telegram_message_id IS NOT NULL
+           AND telegram_message_id ~ '^[0-9]+$'
+           AND telegram_message_id::bigint <= $4
+           AND status <> 'read'`,
+        [this.organizationId, this.accountId, channelId, maxId],
+      );
+      if (result.rowCount && result.rowCount > 0) {
+        this.log.info({ message: 'Marked messages as read', accountId: this.accountId, channelId, maxId, count: result.rowCount });
+        await this.invalidateCampaignStatsForChannel(channelId);
+      }
+    } catch (err) {
+      this.log.warn({ message: 'handleReadOutbox failed', channelId, maxId, error: String(err) });
+    }
+  }
+
+  private async invalidateCampaignStatsForChannel(channelId: string): Promise<void> {
+    try {
+      const res = await this.pool.query(
+        `SELECT DISTINCT cp.campaign_id FROM campaign_participants cp
+         WHERE cp.bd_account_id = $1 AND cp.channel_id = $2`,
+        [this.accountId, channelId],
+      );
+      for (const row of res.rows as { campaign_id: string }[]) {
+        await this.redis.del(`campaign:stats:${row.campaign_id}`);
+      }
+    } catch (_) { /* best-effort */ }
   }
 
   private async handleInboundMessage(event: NewMessageEvent): Promise<void> {
@@ -280,7 +343,16 @@ export class AccountActor {
     );
   }
 
+  private static readonly HEAVYWEIGHT_COMMANDS = new Set([
+    CommandType.SEND_MESSAGE,
+    CommandType.SEND_BULK,
+    CommandType.FORWARD_MESSAGE,
+    CommandType.GET_PARTICIPANTS,
+  ]);
+
   private async processCommand(command: TelegramCommand): Promise<void> {
+    const isHeavy = AccountActor.HEAVYWEIGHT_COMMANDS.has(command.type as CommandType);
+
     if (this.state === 'flood_wait') {
       const wait = this.rateLimiter.getFloodWaitRemaining();
       if (wait > 0) {
@@ -293,13 +365,14 @@ export class AccountActor {
       }
     }
 
-    if (!this.rateLimiter.canConsume()) {
-      const delay = this.rateLimiter.timeUntilAvailable();
-      this.log.warn({ message: `Rate limit hit for ${this.accountId}, waiting ${delay}ms` });
-      await new Promise((r) => setTimeout(r, delay));
+    if (isHeavy) {
+      if (!this.rateLimiter.canConsume()) {
+        const delay = this.rateLimiter.timeUntilAvailable();
+        this.log.warn({ message: `Rate limit hit for ${this.accountId}, waiting ${delay}ms` });
+        await new Promise((r) => setTimeout(r, delay));
+      }
+      this.rateLimiter.consume();
     }
-
-    this.rateLimiter.consume();
 
     try {
       switch (command.type) {
@@ -449,15 +522,28 @@ export class AccountActor {
     const telegramMessageId = sentMessage?.id ?? null;
     const messageId = payload.messageId || randomUUID();
 
-    try {
-      await this.pool.query(
-        `INSERT INTO messages
-          (id, organization_id, content, direction, bd_account_id, channel_id, channel, telegram_message_id, status, created_at)
-         VALUES ($1, $2, $3, 'outbound', $4, $5, 'telegram', $6, 'delivered', NOW())`,
-        [messageId, payload.organizationId, payload.text, this.accountId, chatId, telegramMessageId],
-      );
-    } catch (insertErr) {
-      this.log.warn({ message: 'Message insert failed (possible duplicate)', error: String(insertErr), messageId });
+    if (payload.messageId) {
+      try {
+        await this.pool.query(
+          `UPDATE messages
+           SET telegram_message_id = $1, status = 'delivered', updated_at = NOW()
+           WHERE id = $2 AND organization_id = $3`,
+          [telegramMessageId, messageId, payload.organizationId],
+        );
+      } catch (updateErr) {
+        this.log.warn({ message: 'Message update failed', error: String(updateErr), messageId });
+      }
+    } else {
+      try {
+        await this.pool.query(
+          `INSERT INTO messages
+            (id, organization_id, content, direction, bd_account_id, channel_id, channel, telegram_message_id, status, created_at)
+           VALUES ($1, $2, $3, 'outbound', $4, $5, 'telegram', $6, 'delivered', NOW())`,
+          [messageId, payload.organizationId, payload.text, this.accountId, chatId, telegramMessageId],
+        );
+      } catch (insertErr) {
+        this.log.warn({ message: 'Message insert failed (possible duplicate)', error: String(insertErr), messageId });
+      }
     }
 
     await this.rabbitmq.publishEvent({
@@ -476,6 +562,22 @@ export class AccountActor {
         telegramMessageId,
       },
     } as unknown as Event);
+
+    if ((payload as any).participantId) {
+      try {
+        await this.pool.query(
+          `UPDATE campaign_sends SET message_id = $1
+           WHERE id = (
+             SELECT id FROM campaign_sends
+             WHERE campaign_participant_id = $2 AND message_id IS NULL
+             ORDER BY sent_at DESC LIMIT 1
+           )`,
+          [messageId, (payload as any).participantId],
+        );
+      } catch (linkErr) {
+        this.log.warn({ message: 'Failed to link message to campaign_sends', error: String(linkErr), messageId });
+      }
+    }
 
     await this.pool.query(
       'UPDATE bd_accounts SET last_activity = NOW() WHERE id = $1',

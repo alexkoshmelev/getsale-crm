@@ -230,7 +230,9 @@ export default function ContactDiscoveryPage() {
          chatId: String(g.chatId ?? ''),
          title: g.title != null ? String(g.title) : String(g.chatId ?? ''),
          type: (g.peerType === 'channel' ? 'channel' : 'public_group') as ResolvedSource['type'],
-         canGetMembers: true,
+         username: g.username || undefined,
+         membersCount: g.membersCount,
+         canGetMembers: g.peerType !== 'channel',
          canGetMessages: true,
        }))
      );

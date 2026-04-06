@@ -1048,7 +1048,21 @@ export default function CampaignDetailPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(sendsData?.data ?? []).map((row) => (
+                  {(sendsData?.data ?? []).map((row) => {
+                    const dir = (row as Record<string, unknown>).messageDirection as string | null;
+                    const pStatus = (row as Record<string, unknown>).participantStatus as string | null;
+                    const statusLabel = pStatus === 'replied' ? t('campaigns.replied')
+                      : row.messageStatus === 'read' ? t('campaigns.read')
+                      : row.messageStatus === 'delivered' ? t('campaigns.delivered', { defaultValue: 'Доставлено' })
+                      : row.status === 'sent' ? t('campaigns.sent')
+                      : row.status;
+                    const msgPreview = row.messageContent
+                      ? (dir === 'inbound' ? `← ${row.messageContent}` : row.messageContent)
+                      : '—';
+                    const metaStr = row.metadata && typeof row.metadata === 'object' && Object.keys(row.metadata).length > 0
+                      ? ('event' in row.metadata ? String((row.metadata as { event?: string }).event ?? '') : JSON.stringify(row.metadata).slice(0, 80))
+                      : null;
+                    return (
                     <tr key={row.sendId} className="border-b border-border/80">
                       <td className="p-3 whitespace-nowrap text-muted-foreground">{formatDateTime(row.sentAt)}</td>
                       <td className="p-3 max-w-[140px] truncate" title={row.contactName}>
@@ -1056,23 +1070,24 @@ export default function CampaignDetailPage() {
                       </td>
                       <td className="p-3 tabular-nums">{row.sequenceStep + 1}</td>
                       <td className="p-3">
-                        <span className="text-xs">{row.status}</span>
-                        {row.messageStatus && (
-                          <span className="text-xs text-muted-foreground block">{row.messageStatus}</span>
-                        )}
+                        <span className={clsx('inline-flex px-2 py-0.5 rounded-full text-xs font-medium',
+                          pStatus === 'replied' && 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400',
+                          row.messageStatus === 'read' && pStatus !== 'replied' && 'bg-blue-500/15 text-blue-700 dark:text-blue-400',
+                          row.status === 'sent' && pStatus !== 'replied' && row.messageStatus !== 'read' && 'bg-muted text-muted-foreground',
+                          row.status === 'failed' && 'bg-destructive/15 text-destructive',
+                        )}>
+                          {statusLabel}
+                        </span>
                       </td>
                       <td className="p-3 max-w-md truncate text-muted-foreground" title={row.messageContent ?? ''}>
-                        {row.messageContent ?? '—'}
+                        {msgPreview}
                       </td>
-                      <td className="p-3 max-w-[200px] text-xs text-muted-foreground hidden lg:table-cell truncate" title={row.metadata ? JSON.stringify(row.metadata) : ''}>
-                        {row.metadata && typeof row.metadata === 'object' && row.metadata !== null && 'event' in row.metadata
-                          ? String((row.metadata as { event?: string }).event ?? '')
-                          : row.metadata
-                            ? JSON.stringify(row.metadata).slice(0, 80)
-                            : '—'}
+                      <td className="p-3 max-w-[200px] text-xs text-muted-foreground hidden lg:table-cell truncate" title={metaStr ?? ''}>
+                        {metaStr || '—'}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

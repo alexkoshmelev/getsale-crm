@@ -8,6 +8,7 @@ import { registerSequenceRoutes } from './routes/sequences';
 import { registerExecutionRoutes } from './routes/execution';
 import { registerParticipantRoutes } from './routes/participants';
 import { registerStaticDataRoutes } from './routes/static-data';
+import { subscribeToCampaignEvents } from './event-handlers';
 
 async function main() {
   const redis = new RedisClient({ url: process.env.REDIS_URL || 'redis://localhost:6380' });
@@ -45,6 +46,8 @@ async function main() {
   registerSequenceRoutes(app, { db, log });
   registerExecutionRoutes(app, { db, rabbitmq, log });
   registerParticipantRoutes(app, { db, log });
+
+  await subscribeToCampaignEvents({ pool: db.write, rabbitmq, log, redis });
 
   await ctx.start();
 }

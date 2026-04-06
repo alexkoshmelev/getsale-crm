@@ -754,7 +754,7 @@ export function registerConversationFeatureRoutes(app: FastifyInstance, deps: Me
         '/api/ai/conversations/analyze',
         { messages },
         undefined,
-        { organizationId: user.organizationId, correlationId: request.correlationId },
+        { userId: user.id, organizationId: user.organizationId, userRole: user.role, correlationId: request.correlationId },
       );
 
       await db.write.query(
@@ -822,7 +822,7 @@ export function registerConversationFeatureRoutes(app: FastifyInstance, deps: Me
         '/api/ai/chat/summarize',
         { messages },
         undefined,
-        { organizationId: user.organizationId, correlationId: request.correlationId },
+        { userId: user.id, organizationId: user.organizationId, userRole: user.role, correlationId: request.correlationId },
       );
       const summary = aiData.summary ?? '';
 

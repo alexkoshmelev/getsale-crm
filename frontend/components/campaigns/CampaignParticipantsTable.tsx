@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
 import { MessageSquare, Loader2, User, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
@@ -14,6 +14,8 @@ import {
   type CampaignParticipantPhase,
   type CampaignParticipantAccount,
 } from '@/lib/api/campaigns';
+import { fetchBdAccountAvatarBlob } from '@/lib/api/bd-accounts';
+import { blobUrlCache, avatarAccountKey } from '@/lib/cache/blob-url-cache';
 import { clsx } from 'clsx';
 
 function accountInitials(displayName: string | null | undefined): string {
@@ -22,6 +24,27 @@ function accountInitials(displayName: string | null | undefined): string {
   if (parts.length >= 2) return (parts[0]![0] + parts[1]![0]).toUpperCase().slice(0, 2);
   return displayName.slice(0, 2).toUpperCase();
 }
+
+const MiniAccountAvatar = memo(function MiniAccountAvatar({ accountId, displayName }: { accountId: string; displayName?: string | null }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const mounted = useRef(true);
+  const key = avatarAccountKey(accountId);
+  useEffect(() => {
+    mounted.current = true;
+    const cached = blobUrlCache.get(key);
+    if (cached) { setSrc(cached); return () => { mounted.current = false; }; }
+    fetchBdAccountAvatarBlob(accountId).then((blob) => {
+      if (mounted.current && blob) { const u = URL.createObjectURL(blob); blobUrlCache.set(key, u); setSrc(u); }
+    }).catch(() => {});
+    return () => { mounted.current = false; };
+  }, [accountId, key]);
+  if (src) return <img src={src} alt="" className="w-8 h-8 rounded-full object-cover bg-muted shrink-0" title={displayName ?? accountId} />;
+  return (
+    <div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center shrink-0 text-[10px] font-semibold text-primary" title={displayName ?? accountId}>
+      {accountInitials(displayName)}
+    </div>
+  );
+});
 
 interface CampaignParticipantsTableProps {
   campaignId: string;
@@ -337,12 +360,7 @@ export function CampaignParticipantsTable({
                   </td>
                   <td className="px-4 py-3" title={p.bd_account_display_name ?? p.bd_account_id ?? undefined}>
                     {p.bd_account_id ? (
-                      <div
-                        className="w-8 h-8 rounded-full bg-muted flex items-center justify-center shrink-0 text-[10px] font-medium text-muted-foreground border border-border"
-                        title={p.bd_account_display_name ?? p.bd_account_id}
-                      >
-                        {accountInitials(p.bd_account_display_name)}
-                      </div>
+                      <MiniAccountAvatar accountId={p.bd_account_id} displayName={p.bd_account_display_name} />
                     ) : (
                       <span className="text-muted-foreground">—</span>
                     )}
@@ -377,7 +395,7 @@ export function CampaignParticipantsTable({
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell">{formatDate(p.sent_at)}</td>
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell">{formatDate(p.replied_at)}</td>
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell" title={p.next_send_at ?? undefined}>
-                    {(p.status_phase === 'pending' || p.status_phase === 'scheduled' || p.status_phase === 'sent') && p.next_send_at
+                    {(p.status_phase === 'pending' || p.status_phase === 'scheduled') && p.next_send_at && new Date(p.next_send_at) > new Date()
                       ? formatDate(p.next_send_at)
                       : '—'}
                   </td>

@@ -147,6 +147,7 @@ services:
       RABBITMQ_URL: amqp://getsale:getsale_dev@rabbitmq:5672
       REDIS_URL: redis://redis:6379
       INTERNAL_AUTH_SECRET: ${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
+      TELEGRAM_SERVICE_URL: http://telegram-sm:4005
     depends_on:
       postgres:
         condition: service_healthy
@@ -245,6 +246,8 @@ services:
       RABBITMQ_URL: amqp://getsale:getsale_dev@rabbitmq:5672
       REDIS_URL: redis://redis:6379
       WORKER_CONCURRENCY: "1"
+      AI_SERVICE_URL: http://ai-service:4010
+      INTERNAL_AUTH_SECRET: ${INTERNAL_AUTH_SECRET:-dev_internal_auth_secret}
     depends_on:
       postgres:
         condition: service_healthy

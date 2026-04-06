@@ -121,9 +121,10 @@ export function useMessagingActions(
     scrollToBottom();
     try {
       const body: Record<string, string> = {
-        contactId: s.selectedChat.contact_id ?? '', channel: s.selectedChat.channel,
+        channel: s.selectedChat.channel,
         channelId: s.selectedChat.channel_id, content: messageText, bdAccountId: s.selectedAccountId,
       };
+      if (s.selectedChat.contact_id) body.contactId = s.selectedChat.contact_id;
       if (s.selectedChat.username?.trim()) body.usernameHint = s.selectedChat.username.trim().replace(/^@/, '');
       if (fileToSend) { body.fileBase64 = await fileToBase64(fileToSend); body.fileName = fileToSend.name; }
       if (replyTo?.telegram_message_id) body.replyToMessageId = replyTo.telegram_message_id;

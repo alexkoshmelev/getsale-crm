@@ -58,9 +58,11 @@ export interface OpenRouterResponse {
   }>;
 }
 
+const MAX_RETRIES = 3;
+const RETRY_DELAYS_MS = [1500, 3000, 6000];
+
 /**
- * Calls the OpenRouter chat completions API with timeout support.
- * Returns the parsed response or throws on error.
+ * Calls the OpenRouter chat completions API with timeout support and retry on 429/502/503.
  */
 export async function callOpenRouter(options: OpenRouterOptions): Promise<OpenRouterResponse> {
   const apiKey = process.env.OPENROUTER_API_KEY?.trim();
@@ -68,35 +70,68 @@ export async function callOpenRouter(options: OpenRouterOptions): Promise<OpenRo
     throw new Error('OPENROUTER_API_KEY not set');
   }
 
-  const timeoutMs = parseOpenRouterTimeoutMs();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const { reasoning, ...rest } = options;
+  const payload: Record<string, unknown> = { ...rest };
+  if (reasoning && reasoning.effort !== 'none') {
+    payload.reasoning = reasoning;
+  }
+  const bodyStr = JSON.stringify(payload);
 
-  try {
-    const response = await fetch(OPENROUTER_CHAT_COMPLETIONS, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(options),
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
+  let lastError: Error | null = null;
 
-    if (!response.ok) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delay = RETRY_DELAYS_MS[attempt - 1] ?? 6000;
+      log.info({ message: 'OpenRouter retry', attempt, delay, model: rest.model });
+      await new Promise((r) => setTimeout(r, delay));
+    }
+
+    const timeoutMs = parseOpenRouterTimeoutMs();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(OPENROUTER_CHAT_COMPLETIONS, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: bodyStr,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (response.ok) {
+        return (await response.json()) as OpenRouterResponse;
+      }
+
       const errText = await response.text().catch(() => '');
-      log.warn({ message: 'OpenRouter request failed', httpStatus: response.status, body: errText.slice(0, 500) });
-      throw new Error(`OpenRouter HTTP ${response.status}`);
-    }
+      log.warn({ message: 'OpenRouter request failed', httpStatus: response.status, model: rest.model, attempt, body: errText.slice(0, 500) });
+      lastError = new OpenRouterError(`OpenRouter HTTP ${response.status}: ${errText.slice(0, 200)}`, response.status);
 
-    return (await response.json()) as OpenRouterResponse;
-  } catch (err) {
-    clearTimeout(timer);
-    if (err instanceof Error && (err.name === 'AbortError' || err.message === 'AbortError')) {
-      throw new Error('OpenRouter request timed out');
+      if (response.status === 429 || response.status === 502 || response.status === 503) {
+        continue;
+      }
+      throw lastError;
+    } catch (err) {
+      clearTimeout(timer);
+      if (err instanceof OpenRouterError) throw err;
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'AbortError')) {
+        lastError = new Error('OpenRouter request timed out');
+        continue;
+      }
+      throw err;
     }
-    throw err;
+  }
+
+  throw lastError ?? new Error('OpenRouter request failed after retries');
+}
+
+export class OpenRouterError extends Error {
+  constructor(message: string, public readonly httpStatus: number) {
+    super(message);
+    this.name = 'OpenRouterError';
   }
 }
 

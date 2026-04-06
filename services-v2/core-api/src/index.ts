@@ -13,6 +13,7 @@ import { registerNoteRoutes } from './routes/notes';
 import { registerReminderRoutes } from './routes/reminders';
 import { registerAnalyticsRoutes } from './routes/analytics';
 import { registerDiscoveryRoutes } from './routes/discovery';
+import { startDiscoveryLoop } from './discovery-loop';
 
 async function main() {
   const redis = new RedisClient({ url: process.env.REDIS_URL || 'redis://localhost:6380' });
@@ -108,6 +109,8 @@ async function main() {
     'events',
     'core-api-v2.activity',
   );
+
+  startDiscoveryLoop({ db, log, redis });
 
   await ctx.start();
 }
