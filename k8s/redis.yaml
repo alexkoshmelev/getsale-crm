@@ -1,20 +1,29 @@
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: Service
 metadata:
-  name: redis-pvc
-  namespace: getsale-crm
+  name: redis
+  namespace: getsale-v2
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: getsale
 spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
+  type: ClusterIP
+  ports:
+    - port: 6379
+      targetPort: 6379
+      protocol: TCP
+      name: redis
+  selector:
+    app: redis
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: redis
-  namespace: getsale-crm
+  namespace: getsale-v2
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: getsale
 spec:
   replicas: 1
   selector:
@@ -24,37 +33,60 @@ spec:
     metadata:
       labels:
         app: redis
+        app.kubernetes.io/part-of: getsale
     spec:
       containers:
-      - name: redis
-        image: redis:7-alpine
-        command: ["redis-server", "--appendonly", "yes"]
-        ports:
-        - containerPort: 6379
-        volumeMounts:
-        - name: redis-storage
-          mountPath: /data
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-          limits:
-            memory: "1Gi"
-            cpu: "500m"
+        - name: redis
+          image: redis:7-alpine
+          command:
+            - redis-server
+            - --appendonly
+            - "yes"
+          ports:
+            - containerPort: 6379
+              name: redis
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
       volumes:
-      - name: redis-storage
-        persistentVolumeClaim:
-          claimName: redis-pvc
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-data
 ---
 apiVersion: v1
-kind: Service
+kind: PersistentVolumeClaim
 metadata:
-  name: redis
-  namespace: getsale-crm
-spec:
-  selector:
+  name: redis-data
+  namespace: getsale-v2
+  labels:
     app: redis
-  ports:
-  - port: 6379
-    targetPort: 6379
-
+    app.kubernetes.io/part-of: getsale
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi

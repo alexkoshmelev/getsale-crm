@@ -10,30 +10,22 @@
   
   "documentation": {
     "paths": {
-      "root": "ai_docs",
-      "plans": "ai_docs/develop/plans",
-      "reports": "ai_docs/develop/reports",
-      "issues": "ai_docs/develop/issues",
-      "architecture": "ai_docs/develop/architecture",
-      "features": "ai_docs/develop/features",
-      "api": "ai_docs/develop/api",
-      "components": "ai_docs/develop/components",
-      "design": "ai_docs/design",
-      "changelog": "ai_docs/changelog",
-      "audits": "ai_docs/develop/audits"
+      "root": "docs",
+      "architecture": "docs/architecture",
+      "api": "docs/api",
+      "features": "docs/domain",
+      "plans": "docs/product",
+      "operations": "docs/operations",
+      "runbooks": "docs/runbooks"
     },
     "enabled": {
-      "plans": true,
-      "reports": true,
-      "issues": true,
       "architecture": true,
-      "features": true,
       "api": true,
-      "components": true,
-      "design": true,
-      "changelog": true,
-      "audits": true
+      "features": true,
+      "plans": true,
+      "operations": true,
+      "runbooks": true
     },
-    "comment": "Customize paths for your project. Set 'enabled' to false or path to null to disable specific documentation types"
+    "comment": "All documentation is in docs/ with subdirectories. See docs/INDEX.md for navigation."
   }
 }

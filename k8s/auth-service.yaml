@@ -2,78 +2,73 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: auth-service
-  namespace: getsale-crm
+  namespace: getsale-v2
+  labels:
+    app.kubernetes.io/name: auth-service
+    app.kubernetes.io/part-of: getsale
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: auth-service
+      app.kubernetes.io/name: auth-service
   template:
     metadata:
       labels:
-        app: auth-service
+        app.kubernetes.io/name: auth-service
+        app.kubernetes.io/part-of: getsale
     spec:
       containers:
-      - name: auth-service
-        image: getsale/auth-service:latest
-        ports:
-        - containerPort: 3001
-        env:
-        - name: NODE_ENV
-          value: "production"
-        - name: PORT
-          value: "3001"
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: postgres-secret
-              key: url
-        - name: REDIS_URL
-          value: "redis://redis:6379"
-        - name: RABBITMQ_URL
-          valueFrom:
-            secretKeyRef:
-              name: rabbitmq-secret
-              key: url
-        - name: JWT_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: jwt-secret
-              key: secret
-        - name: JWT_REFRESH_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: jwt-secret
-              key: refresh-secret
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 3001
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 3001
-          initialDelaySeconds: 10
-          periodSeconds: 5
+        - name: auth-service
+          image: getsale/auth-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4001
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: getsale-common-config
+            - secretRef:
+                name: getsale-secrets
+          env:
+            - name: PORT
+              value: "4001"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4001
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: auth-service
-  namespace: getsale-crm
+  namespace: getsale-v2
+  labels:
+    app.kubernetes.io/name: auth-service
+    app.kubernetes.io/part-of: getsale
 spec:
+  type: ClusterIP
   selector:
-    app: auth-service
+    app.kubernetes.io/name: auth-service
   ports:
-  - port: 3001
-    targetPort: 3001
-
+    - port: 4001
+      targetPort: 4001
+      protocol: TCP

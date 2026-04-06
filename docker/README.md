@@ -51,7 +51,7 @@ docker/
 npm run build --workspace=shared/types && npm run build --workspace=shared/events && npm run build --workspace=shared/logger && npm run build --workspace=shared/utils && npm run build --workspace=shared/service-core
 ```
 
-Подробнее: [ai_docs/develop/architecture/shared-build-order.md](../ai_docs/develop/architecture/shared-build-order.md).
+Подробнее: [SHARED_BUILD_ORDER.md](../docs/architecture/SHARED_BUILD_ORDER.md).
 
 ## Продакшн на сервере (docker-compose.server.yml)
 

@@ -50,5 +50,5 @@ async function login(email: string, password: string): Promise<AuthResult> {
 
 - **Canonical location:** `docs/adr/` — see [docs/adr/README.md](../../docs/adr/README.md).
 - New ADRs: numbered file `NNNN-kebab-case-title.md`; optional one-line entry in the README table there.
-- Do not duplicate full ADR text under `ai_docs/`; link from ADR to supplementary notes in `ai_docs/develop/architecture/` if needed.
+- Supplementary architecture notes go in `docs/architecture/`.
 - Human-facing contributor entry: [CONTRIBUTING.md](../../CONTRIBUTING.md).

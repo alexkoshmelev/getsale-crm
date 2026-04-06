@@ -1,6 +1,6 @@
 # GetSale CRM - k6 Load Tests
 
-Load testing suite for the v2 backend API using [k6](https://k6.io/).
+Load testing suite for the backend API using [k6](https://k6.io/).
 
 ## Prerequisites
 
