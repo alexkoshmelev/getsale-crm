@@ -166,6 +166,13 @@ export interface MessageSentEvent extends BaseEvent {
   };
 }
 
+export interface MessageReadEvent extends BaseEvent {
+  type: EventType.MESSAGE_READ;
+  data: {
+    conversationId: string;
+  };
+}
+
 export interface MessageDeletedEvent extends BaseEvent {
   type: EventType.MESSAGE_DELETED;
   data: {
@@ -647,6 +654,7 @@ export type Event =
   | OrganizationCreatedEvent
   | MessageReceivedEvent
   | MessageSentEvent
+  | MessageReadEvent
   | MessageDeletedEvent
   | MessageEditedEvent
   | DealStageChangedEvent

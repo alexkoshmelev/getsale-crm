@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: getsale-v2
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: getsale
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gateway
+        app.kubernetes.io/part-of: getsale
+    spec:
+      containers:
+        - name: gateway
+          image: getsale/gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: getsale-common-config
+            - secretRef:
+                name: getsale-secrets
+          env:
+            - name: PORT
+              value: "8000"
+            - name: AUTH_SERVICE_URL
+              value: http://auth-service.getsale-v2.svc.cluster.local:4001
+            - name: CORE_API_SERVICE_URL
+              value: http://core-api.getsale-v2.svc.cluster.local:4002
+            - name: MESSAGING_SERVICE_URL
+              value: http://messaging-api.getsale-v2.svc.cluster.local:4003
+            - name: TELEGRAM_SERVICE_URL
+              value: http://telegram-sm.getsale-v2.svc.cluster.local:4005
+            - name: CAMPAIGN_SERVICE_URL
+              value: http://campaign-orchestrator.getsale-v2.svc.cluster.local:4006
+            - name: AUTOMATION_SERVICE_URL
+              value: http://automation-engine.getsale-v2.svc.cluster.local:4007
+            - name: NOTIFICATION_HUB_URL
+              value: http://notification-hub.getsale-v2.svc.cluster.local:4008
+            - name: ANALYTICS_SERVICE_URL
+              value: http://core-api.getsale-v2.svc.cluster.local:4002
+            - name: USER_SERVICE_URL
+              value: http://user-service.getsale-v2.svc.cluster.local:4009
+            - name: AI_SERVICE_URL
+              value: http://ai-service.getsale-v2.svc.cluster.local:4010
+            - name: FRONTEND_SERVICE_URL
+              value: http://frontend.getsale-v2.svc.cluster.local:3000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: getsale-v2
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: getsale
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: gateway
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
