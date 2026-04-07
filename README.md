@@ -2,31 +2,39 @@
 
 > **Event-driven, Microservices-based, AI-first CRM Platform**
 
-## Архитектура
+## Архитектура (v2 — active)
 
-### Микросервисы
+### Микросервисы (12 сервисов)
 
-1. **api-gateway** - Единая точка входа, маршрутизация, rate limiting
-2. **auth-service** - Identity & Access Management (JWT, 2FA, RBAC, OAuth)
-3. **user-service** - Управление профилями, подписки, биллинг (Stripe)
-4. **bd-accounts-service** - Управление BD аккаунтами (Telegram GramJS), подключение, синхронизация
-5. **crm-service** - CRM Core (Contacts, Companies, Deals), Contact Discovery
-6. **pipeline-service** - Управление воронкой продаж, стадиями, лиды
-7. **messaging-service** - Unified messaging (Telegram GramJS)
-8. **automation-service** - Автоматизация переходов, триггеры, правила
-9. **analytics-service** - Метрики конверсии, аналитика воронки, отчеты
-10. **team-service** - Управление командами, распределение клиентов, права доступа
-11. **websocket-service** - Real-time WebSocket соединения
-12. **ai-service** - AI Agents System (Draft generation, summarize, campaign rephrase)
-13. **campaign-service** - Cold Outreach Engine (кампании, шаблоны, sequences, участники)
-14. **activity-service** - Лента активности организации
+1. **gateway** — Единая точка входа, маршрутизация, rate limiting, WebSocket proxy (port 8000)
+2. **auth-service** — Identity & Access Management (JWT, 2FA, RBAC, OAuth) (port 4001)
+3. **core-api** — CRM Core (Contacts, Companies, Deals), Pipeline, Teams, Activity (port 4002)
+4. **messaging-api** — Unified messaging, чаты, сообщения (port 4003)
+5. **telegram-session-manager** — Telegram GramJS, подключение, синхронизация (port 4005)
+6. **campaign-orchestrator** — Cold Outreach Engine, кампании, шаблоны, sequences (port 4006)
+7. **campaign-worker** — Воркер отправки кампаний (масштабируется горизонтально)
+8. **automation-engine** — Автоматизация переходов, триггеры, правила (port 4007)
+9. **notification-hub** — Real-time WebSocket соединения, уведомления (port 4008)
+10. **user-service** — Профили, подписки, биллинг (Stripe, NowPayments) (port 4009)
+11. **ai-service** — AI Agents System (Draft generation, summarize, campaign rephrase) (port 4010)
+12. **analytics-worker** — Метрики конверсии, аналитика воронки (background worker)
+
+### Общие библиотеки (shared-v2/)
+
+- **@getsale/types** — TypeScript типы
+- **@getsale/events** — Event definitions
+- **@getsale/logger** — Структурированное логирование
+- **@getsale/cache** — Redis кеш
+- **@getsale/queue** — RabbitMQ клиент
+- **@getsale/service-framework** — Общий фреймворк сервисов (Fastify)
+- **@getsale/telegram** — Telegram GramJS обёртка
 
 ### Инфраструктура
 
-- **RabbitMQ** - Message Queue для event-driven коммуникации
-- **Redis** - Кеш и session storage
-- **PostgreSQL** - Основная БД
-- **Prometheus + Grafana** - Мониторинг
+- **RabbitMQ** — Message Queue для event-driven коммуникации
+- **Redis** — Кеш и session storage
+- **PostgreSQL** — Основная БД
+- **Prometheus + Grafana** — Мониторинг
 
 ## Быстрый старт
 
@@ -36,10 +44,11 @@
 npm install
 make dev
 # или
-docker-compose up -d
+docker compose -f docker-compose.v2.yml up -d
 
 # Фронтенд: http://localhost:5173
 # API Gateway: http://localhost:8000
+# RabbitMQ UI: http://localhost:15673
 ```
 
 Подробнее: [docs/operations/GETTING_STARTED.md](docs/operations/GETTING_STARTED.md)
@@ -72,43 +81,46 @@ kubectl apply -f k8s/
 
 ```
 getsale-crm/
-├── services/                # Микросервисы (14 сервисов)
-│   ├── api-gateway/        # API Gateway
-│   ├── auth-service/       # Identity & Access Management
-│   ├── user-service/       # Профили, подписки
-│   ├── bd-accounts-service/# Telegram (GramJS)
-│   ├── crm-service/       # CRM Core + Contact Discovery
-│   ├── pipeline-service/  # Воронки, лиды
-│   ├── messaging-service/ # Чаты, сообщения
-│   ├── automation-service/# Автоматизация
-│   ├── analytics-service/ # Аналитика
-│   ├── team-service/      # Команды
-│   ├── websocket-service/ # Real-time WebSocket
-│   ├── ai-service/        # AI Agents & Drafts
-│   ├── campaign-service/  # Cold Outreach
-│   └── activity-service/  # Лента активности
-├── frontend/               # Next.js App Router
-├── shared/                 # Общие библиотеки
-│   ├── types/             # TypeScript типы
-│   ├── events/            # Event definitions
-│   ├── logger/            # Структурированное логирование
-│   ├── utils/             # Утилиты (RabbitMQ, Redis)
-│   └── service-core/     # Общее ядро сервисов
-├── migrations/             # Knex миграции БД
-├── infrastructure/         # Prometheus конфигурация
-├── k8s/                   # Kubernetes манифесты
-├── docker/                # Docker конфигурации
-├── load-tests/            # k6 нагрузочные тесты
-├── docs/                  # Документация
-│   ├── architecture/     # Архитектура и дизайн
-│   ├── api/              # API контракты
-│   ├── domain/           # Бизнес-флоу
-│   ├── product/          # Продуктовая стратегия
-│   ├── operations/       # Развёртывание и инфра
-│   ├── runbooks/         # Операционные runbooks
-│   └── adr/              # Architecture Decision Records
-├── docker-compose.yml     # Docker Compose для разработки
-└── Makefile              # Команды для разработки
+├── services-v2/             # Микросервисы v2 (12 сервисов, Fastify)
+│   ├── gateway/             # API Gateway + WS proxy
+│   ├── auth-service/        # Identity & Access Management
+│   ├── core-api/            # CRM + Pipeline + Teams + Activity
+│   ├── messaging-api/       # Чаты, сообщения
+│   ├── telegram-session-manager/ # Telegram (GramJS)
+│   ├── campaign-orchestrator/# Cold Outreach
+│   ├── campaign-worker/     # Воркер отправки
+│   ├── automation-engine/   # Автоматизация
+│   ├── notification-hub/    # Real-time WebSocket
+│   ├── user-service/        # Профили, подписки
+│   ├── ai-service/          # AI Agents & Drafts
+│   └── analytics-worker/    # Аналитика (background)
+├── shared-v2/               # Общие библиотеки v2
+│   ├── types/               # TypeScript типы
+│   ├── events/              # Event definitions
+│   ├── logger/              # Структурированное логирование
+│   ├── cache/               # Redis кеш
+│   ├── queue/               # RabbitMQ клиент
+│   ├── service-framework/   # Fastify фреймворк сервисов
+│   └── telegram/            # Telegram GramJS обёртка
+├── services/                # [Legacy v1] Микросервисы (14 сервисов, Express)
+├── shared/                  # [Legacy v1] Общие библиотеки
+├── frontend/                # Next.js App Router
+├── migrations/              # Knex миграции БД
+├── infrastructure/          # Prometheus конфигурация
+├── k8s/                     # Kubernetes манифесты
+├── docker/                  # Docker конфигурации
+├── load-tests/              # k6 нагрузочные тесты
+├── docs/                    # Документация
+│   ├── architecture/        # Архитектура и дизайн
+│   ├── api/                 # API контракты
+│   ├── domain/              # Бизнес-флоу
+│   ├── product/             # Продуктовая стратегия
+│   ├── operations/          # Развёртывание и инфра
+│   ├── runbooks/            # Операционные runbooks
+│   └── adr/                 # Architecture Decision Records
+├── docker-compose.v2.yml    # Docker Compose v2 (active)
+├── docker-compose.yml       # Docker Compose v1 (legacy)
+└── Makefile                 # Команды для разработки
 ```
 
 ## Event-Driven Architecture

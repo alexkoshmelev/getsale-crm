@@ -8,16 +8,17 @@ WORKDIR /app
 # Copy root and workspace config
 COPY package*.json ./
 COPY shared/ ./shared/
+COPY shared-v2/ ./shared-v2/
 COPY ${SERVICE_PATH}/package*.json ./${SERVICE_PATH}/
 
 # Install with devDependencies for build (tsc). NODE_ENV=development so devDependencies install reliably in CI.
 ENV NODE_ENV=development
 RUN npm install
 
-# Build shared packages in dependency order: types -> events -> logger -> utils -> service-core
-RUN npm run build --workspace=shared/types && \
-    npm run build --workspace=shared/events && \
-    npm run build --workspace=shared/logger && \
+# Build shared packages in dependency order: types, events, logger (shared-v2/) -> utils, service-core (shared/)
+RUN npm run build --workspace=shared-v2/types && \
+    npm run build --workspace=shared-v2/events && \
+    npm run build --workspace=shared-v2/logger && \
     npm run build --workspace=shared/utils && \
     npm run build --workspace=shared/service-core
 

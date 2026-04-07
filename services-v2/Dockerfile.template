@@ -7,26 +7,24 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-COPY shared/ ./shared/
 COPY shared-v2/ ./shared-v2/
 
 ARG SERVICE
 COPY services-v2/${SERVICE}/ ./services-v2/${SERVICE}/
 
-# Patch workspaces: remove v1 services/* and narrow services-v2/* to the one being built
+# Patch workspaces: only shared-v2 and the service being built
 RUN node -e "\
   const fs=require('fs');\
   const p=JSON.parse(fs.readFileSync('package.json','utf8'));\
-  p.workspaces=['shared/*','shared-v2/*','shared-v2/telegram','services-v2/'+process.argv[1]];\
+  p.workspaces=['shared-v2/*','shared-v2/telegram','services-v2/'+process.argv[1]];\
   fs.writeFileSync('package.json',JSON.stringify(p,null,2));" "${SERVICE}"
 
 RUN npm install --ignore-scripts
 
-# Build shared libraries in dependency order, then the service
-RUN npm run build -w @getsale/types && \
-    npm run build -w @getsale/logger && \
-    npm run build -w @getsale/events && \
-    npm run build -w @getsale/utils && \
+# Build shared-v2 libraries in dependency order, then the service
+RUN npm run build -w shared-v2/types && \
+    npm run build -w shared-v2/logger && \
+    npm run build -w shared-v2/events && \
     npm run build -w shared-v2/cache && \
     npm run build -w shared-v2/queue && \
     npm run build -w shared-v2/service-framework && \
@@ -39,7 +37,6 @@ WORKDIR /app
 RUN addgroup -g 1001 -S nodejs && adduser -S getsale -u 1001
 
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/shared/ ./shared/
 COPY --from=builder /app/shared-v2/ ./shared-v2/
 ARG SERVICE
 COPY --from=builder /app/services-v2/${SERVICE}/ ./services-v2/${SERVICE}/

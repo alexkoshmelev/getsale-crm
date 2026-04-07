@@ -2,6 +2,35 @@ import Redis from 'ioredis';
 import { RedisClient } from './redis-client';
 
 /**
+ * Atomically HINCRBY unreadCount and INCR the inbox counter only on 0→1 transition.
+ * KEYS[1] = conv meta hash, KEYS[2] = inbox unread counter
+ */
+const INCR_UNREAD_LUA = `
+  local prev = tonumber(redis.call('HGET', KEYS[1], 'unreadCount')) or 0
+  redis.call('HINCRBY', KEYS[1], 'unreadCount', 1)
+  if prev == 0 then
+    redis.call('INCR', KEYS[2])
+  end
+  return prev
+`;
+
+/**
+ * Atomically reset conversation unreadCount and DECR the inbox counter if it was > 0.
+ * KEYS[1] = conv meta hash, KEYS[2] = inbox unread counter
+ */
+const MARK_READ_LUA = `
+  local prev = tonumber(redis.call('HGET', KEYS[1], 'unreadCount')) or 0
+  redis.call('HSET', KEYS[1], 'unreadCount', '0')
+  if prev > 0 then
+    local cnt = redis.call('DECR', KEYS[2])
+    if cnt < 0 then
+      redis.call('SET', KEYS[2], '0')
+    end
+  end
+  return prev
+`;
+
+/**
  * CQRS inbox read model backed by Redis sorted sets.
  *
  * Data model:
@@ -37,6 +66,10 @@ export class InboxModel {
     return `conv:${conversationId}:meta`;
   }
 
+  private unreadCountKey(orgId: string, userId: string): string {
+    return `inbox:${orgId}:${userId}:unread_count`;
+  }
+
   /**
    * Update inbox when a message is received or sent.
    * Atomic pipeline: ZADD inbox + HSET conversation metadata.
@@ -62,20 +95,22 @@ export class InboxModel {
     pipe.hset(metaK, 'contactId', contactId);
     pipe.hset(metaK, 'updatedAt', String(timestamp));
 
-    if (params.incrementUnread) {
-      pipe.hincrby(metaK, 'unreadCount', 1);
-    }
-
     pipe.expire(metaK, 86400 * 7);
 
     await pipe.exec();
+
+    if (params.incrementUnread) {
+      const counterKey = this.unreadCountKey(orgId, userId);
+      await this.redis.raw.eval(INCR_UNREAD_LUA, 2, metaK, counterKey);
+    }
   }
 
   /**
-   * Mark conversation as read (reset unread counter).
+   * Mark conversation as read (reset unread counter and decrement inbox counter atomically).
    */
-  async markRead(conversationId: string): Promise<void> {
-    await this.redis.raw.hset(this.metaKey(conversationId), 'unreadCount', '0');
+  async markRead(orgId: string, userId: string, conversationId: string): Promise<void> {
+    const counterKey = this.unreadCountKey(orgId, userId);
+    await this.redis.raw.eval(MARK_READ_LUA, 2, this.metaKey(conversationId), counterKey);
   }
 
   /**
@@ -123,29 +158,49 @@ export class InboxModel {
   }
 
   /**
-   * Get total unread count across all conversations (sum of unread counters).
+   * O(1) total unread conversation count — reads the incrementally maintained counter.
    */
   async getTotalUnread(orgId: string, userId: string): Promise<number> {
-    const key = this.inboxKey(orgId, userId);
-    const convIds = await this.redis.raw.zrevrange(key, 0, -1);
-    if (convIds.length === 0) return 0;
-
-    const pipe = this.redis.pipeline();
-    for (const cid of convIds) {
-      pipe.hget(this.metaKey(cid), 'unreadCount');
-    }
-    const results = await pipe.exec();
-    let total = 0;
-    for (const [err, val] of results!) {
-      if (!err && val) total += parseInt(val as string, 10) || 0;
-    }
-    return total;
+    const val = await this.redis.raw.get(this.unreadCountKey(orgId, userId));
+    return Math.max(0, parseInt(val || '0', 10));
   }
 
   /**
-   * Remove a conversation from user's inbox.
+   * Rebuild unread counter from scratch by scanning all conversations.
+   * Use for repair after inconsistencies (e.g. missed decrements, Redis flush).
+   */
+  async rebuildUnreadCount(orgId: string, userId: string): Promise<number> {
+    const key = this.inboxKey(orgId, userId);
+    const convIds = await this.redis.raw.zrevrange(key, 0, -1);
+
+    let count = 0;
+    if (convIds.length > 0) {
+      const pipe = this.redis.pipeline();
+      for (const cid of convIds) {
+        pipe.hget(this.metaKey(cid), 'unreadCount');
+      }
+      const results = await pipe.exec();
+      for (const [err, val] of results!) {
+        if (!err && val && parseInt(val as string, 10) > 0) {
+          count++;
+        }
+      }
+    }
+
+    await this.redis.raw.set(this.unreadCountKey(orgId, userId), String(count));
+    return count;
+  }
+
+  /**
+   * Remove a conversation from user's inbox, adjusting the unread counter if needed.
    */
   async removeFromInbox(orgId: string, userId: string, conversationId: string): Promise<void> {
-    await this.redis.raw.zrem(this.inboxKey(orgId, userId), conversationId);
+    const unread = await this.redis.raw.hget(this.metaKey(conversationId), 'unreadCount');
+    const pipe = this.redis.pipeline();
+    pipe.zrem(this.inboxKey(orgId, userId), conversationId);
+    if (unread && parseInt(unread, 10) > 0) {
+      pipe.decr(this.unreadCountKey(orgId, userId));
+    }
+    await pipe.exec();
   }
 }

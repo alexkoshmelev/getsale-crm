@@ -258,7 +258,7 @@ export function registerMessageActionRoutes(app: FastifyInstance, deps: Messagin
     }
     await db.write.query(markQuery, markParams);
 
-    if (conversationId) await inbox.markRead(conversationId);
+    if (conversationId) await inbox.markRead(user.organizationId, user.id, conversationId);
 
     publishMarkReadToTelegram(deps, {
       userId: user.id,

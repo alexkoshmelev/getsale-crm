@@ -4,6 +4,9 @@ import { AppError, ErrorCodes, requireUser, DatabasePools } from '@getsale/servi
 import { RedisClient } from '@getsale/cache';
 import { RabbitMQClient } from '@getsale/queue';
 import { Logger } from '@getsale/logger';
+import { randomUUID } from 'crypto';
+import { EventType, type Event } from '@getsale/events';
+import { encryptSession, decryptIfNeeded } from '@getsale/telegram';
 import { SessionCoordinator } from '../coordinator';
 import { PhoneLoginHandler } from '../phone-login-handler';
 import { CommandType } from '../command-types';
@@ -76,6 +79,25 @@ const VerifyCodeBody = z.object({
   phoneCode: data.phoneCode || data.code,
 })).refine(data => !!data.phoneNumber, { message: 'phoneNumber or phone is required' })
   .refine(data => !!data.phoneCode, { message: 'phoneCode or code is required' });
+
+const ConnectBody = z.object({
+  platform: z.literal('telegram').optional(),
+  phoneNumber: z.string().min(1).max(32).trim(),
+  sessionString: z.string().max(10000).optional(),
+  proxyConfig: z
+    .union([
+      z.null(),
+      z.object({
+        type: z.enum(['socks5']).default('socks5'),
+        host: z.string().min(1),
+        port: z.number().int().min(1).max(65535),
+        username: z.string().optional(),
+        password: z.string().optional(),
+      }),
+    ])
+    .optional()
+    .nullable(),
+});
 
 const PurchaseBody = z.object({
   platform: z.string().default('telegram'),
@@ -315,6 +337,85 @@ export function registerBdAccountRoutes(app: FastifyInstance, deps: Deps): void 
       }
       throw error;
     }
+  });
+
+  // ── POST /api/bd-accounts/connect — legacy endpoint for existing sessions ──
+
+  app.post('/api/bd-accounts/connect', { preHandler: [requireUser] }, async (request) => {
+    const user = request.user!;
+    assertNotViewer(user);
+    const body = ConnectBody.parse(request.body);
+    const phoneNumber = body.phoneNumber;
+
+    const existing = await db.read.query(
+      'SELECT id, session_string, session_encrypted FROM bd_accounts WHERE phone_number = $1 AND organization_id = $2',
+      [phoneNumber, user.organizationId],
+    );
+
+    let accountId: string;
+    let existingSessionString: string | undefined;
+
+    if (existing.rows.length > 0) {
+      accountId = existing.rows[0].id;
+      const row = existing.rows[0] as { session_string?: string; session_encrypted?: boolean };
+      existingSessionString = row.session_string
+        ? decryptIfNeeded(row.session_string, !!row.session_encrypted) ?? undefined
+        : undefined;
+      if (body.proxyConfig) {
+        await db.write.query(
+          'UPDATE bd_accounts SET proxy_config = $1 WHERE id = $2',
+          [JSON.stringify(body.proxyConfig), accountId],
+        );
+      }
+    } else {
+      const apiId = String(phoneLoginHandler['apiId'] || 0);
+      const apiHash = encryptSession(phoneLoginHandler['apiHash'] || '');
+      const insertResult = await db.write.query(
+        `INSERT INTO bd_accounts (organization_id, telegram_id, phone_number, api_id, api_hash,
+         is_active, session_encrypted, created_by_user_id, proxy_config, connection_state)
+         VALUES ($1, $2, $3, $4, $5, true, true, $6, $7, 'connecting') RETURNING id`,
+        [
+          user.organizationId, phoneNumber, phoneNumber, apiId, apiHash,
+          user.id, body.proxyConfig ? JSON.stringify(body.proxyConfig) : null,
+        ],
+      );
+      accountId = insertResult.rows[0].id;
+    }
+
+    const sessionToUse = body.sessionString || existingSessionString;
+    if (sessionToUse) {
+      await db.write.query(
+        `UPDATE bd_accounts SET session_string = $1, session_encrypted = true,
+         is_active = true, connection_state = 'reconnecting', updated_at = NOW()
+         WHERE id = $2`,
+        [encryptSession(sessionToUse), accountId],
+      );
+    } else {
+      await db.write.query(
+        "UPDATE bd_accounts SET is_active = true, connection_state = 'reconnecting', updated_at = NOW() WHERE id = $1",
+        [accountId],
+      );
+    }
+
+    await rabbitmq.publishCommand(`telegram:commands:${accountId}`, {
+      type: CommandType.RECONNECT,
+      payload: { accountId, organizationId: user.organizationId },
+    });
+
+    await rabbitmq.publishEvent({
+      id: randomUUID(),
+      type: EventType.BD_ACCOUNT_CONNECTED,
+      timestamp: new Date(),
+      organizationId: user.organizationId,
+      userId: user.id,
+      data: { bdAccountId: accountId, platform: 'telegram', userId: user.id },
+    } as Event);
+
+    const result = await db.read.query(
+      `SELECT ${BD_ACCOUNT_DETAIL_SELECT} FROM bd_accounts WHERE id = $1`,
+      [accountId],
+    );
+    return result.rows[0];
   });
 
   // ── POST /api/bd-accounts/:id/disconnect ──

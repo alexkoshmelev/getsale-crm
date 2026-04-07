@@ -101,6 +101,11 @@ export async function createService(config: ServiceConfig): Promise<ServiceConte
     registers: [registry],
   });
 
+  const isProduction = process.env.NODE_ENV === 'production';
+  const slowRequestMsParsed = parseInt(process.env.LOG_SLOW_REQUEST_MS || '1000', 10);
+  const logSlowRequestMs =
+    Number.isFinite(slowRequestMsParsed) && slowRequestMsParsed > 0 ? slowRequestMsParsed : 1000;
+
   app.addHook('onResponse', (request, reply, done) => {
     const route = request.routeOptions?.url || request.url;
     const labels = {
@@ -110,16 +115,21 @@ export async function createService(config: ServiceConfig): Promise<ServiceConte
     };
     httpRequestDuration.observe(labels, reply.elapsedTime / 1000);
     httpRequestsTotal.inc(labels);
-    log.info({
-      message: `${request.method} ${request.url}`,
-      correlation_id: request.correlationId,
-      http_method: request.method,
-      http_path: request.url,
-      http_status: reply.statusCode,
-      duration_ms: Math.round(reply.elapsedTime),
-      user_id: request.user?.id,
-      organization_id: request.user?.organizationId,
-    });
+
+    const durationMs = Math.round(reply.elapsedTime);
+    const pathname = requestPathname(request.url);
+    if (shouldLogHttpRequest(isProduction, pathname, reply.statusCode, durationMs, logSlowRequestMs)) {
+      log.info({
+        message: `${request.method} ${request.url}`,
+        correlation_id: request.correlationId,
+        http_method: request.method,
+        http_path: request.url,
+        http_status: reply.statusCode,
+        duration_ms: durationMs,
+        user_id: request.user?.id,
+        organization_id: request.user?.organizationId,
+      });
+    }
     done();
   });
 
@@ -236,4 +246,23 @@ function normalizePath(path: string): string {
   return path
     .replace(/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '/:id')
     .replace(/\/\d+/g, '/:n');
+}
+
+function requestPathname(url: string): string {
+  const q = url.indexOf('?');
+  return q === -1 ? url : url.slice(0, q);
+}
+
+/** Production: skip noisy probe paths; otherwise log only slow or error responses. Dev: log all requests. */
+function shouldLogHttpRequest(
+  production: boolean,
+  pathname: string,
+  statusCode: number,
+  durationMs: number,
+  slowThresholdMs: number,
+): boolean {
+  if (!production) return true;
+  if (pathname === '/health' || pathname === '/ready' || pathname === '/metrics') return false;
+  if (statusCode >= 400) return true;
+  return durationMs > slowThresholdMs;
 }

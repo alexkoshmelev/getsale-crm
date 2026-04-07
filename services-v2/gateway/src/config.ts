@@ -19,7 +19,8 @@ if (process.env.NODE_ENV === 'production') {
 export const PORT = parseInt(process.env.PORT || '8000', 10);
 export const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6380';
 
-export const RATE_LIMIT_GLOBAL_PER_SEC = parseInt(process.env.RATE_LIMIT_GLOBAL_PER_SEC || '100', 10);
+/** Per-process global request cap (incoming to this gateway instance). Tune via RATE_LIMIT_GLOBAL_PER_SEC for expected traffic and replica count. */
+export const RATE_LIMIT_GLOBAL_PER_SEC = parseInt(process.env.RATE_LIMIT_GLOBAL_PER_SEC || '10000', 10);
 export const RATE_LIMIT_AUTH_ROUTES = parseInt(process.env.RATE_LIMIT_AUTH_ROUTES || '10', 10);
 export const RATE_LIMIT_AUTH = parseInt(process.env.RATE_LIMIT_AUTH || '1000', 10);
 export const RATE_LIMIT_ANON = parseInt(process.env.RATE_LIMIT_ANON || '100', 10);

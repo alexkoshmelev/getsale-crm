@@ -96,6 +96,10 @@ async function main() {
     redis: process.env.REDIS_URL || 'redis://localhost:6380',
   });
 
+  // WORKER_CONCURRENCY controls parallel jobs per process (default: 1 for safe single-threaded operation).
+  // Preferred scaling: run multiple container replicas (horizontal) behind the same BullMQ queue.
+  // Alternatively, raise this value for multiple concurrent jobs per process — ensure the DB pool
+  // size (`max`) is >= concurrency to avoid connection starvation under load.
   const concurrency = parseInt(process.env.WORKER_CONCURRENCY || '1', 10);
 
   jobQueue.process(async (job: Job<CampaignJobData>) => {

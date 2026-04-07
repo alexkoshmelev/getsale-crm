@@ -107,7 +107,7 @@ export function registerConversationRoutes(app: FastifyInstance, deps: Messaging
       }
     }
 
-    await inbox.markRead(id);
+    await inbox.markRead(user.organizationId, user.id, id);
 
     rabbitmq.publishEvent({
       id: randomUUID(), type: EventType.MESSAGE_READ, timestamp: new Date(),

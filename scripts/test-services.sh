@@ -27,20 +27,18 @@ check_health() {
     fi
 }
 
-# Проверка health checks
+# Проверка health checks (v2 services)
 echo "📋 Проверка Health Checks:"
-check_health "API Gateway" 8000
-check_health "Auth Service" 3001
-check_health "User Service" 3006
-check_health "BD Accounts Service" 3007
-check_health "CRM Service" 3002
-check_health "Pipeline Service" 3008
-check_health "Messaging Service" 3003
-check_health "Automation Service" 3009
-check_health "Analytics Service" 3010
-check_health "Team Service" 3011
-check_health "WebSocket Service" 3004
-check_health "AI Service" 3005
+check_health "Gateway" 8000
+check_health "Auth Service" 4001
+check_health "Core API" 4002
+check_health "Messaging API" 4003
+check_health "Telegram Session Manager" 4005
+check_health "Campaign Orchestrator" 4006
+check_health "Automation Engine" 4007
+check_health "Notification Hub" 4008
+check_health "User Service" 4009
+check_health "AI Service" 4010
 
 echo ""
 echo "=========================================="

@@ -19,11 +19,20 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN
 
 const HEARTBEAT_INTERVAL = 25_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_EVENTS = 100;
+/** Per socket, per process. With multiple hub replicas, each instance enforces its own window (no global cap). */
+const RATE_LIMIT_MAX_EVENTS = 80;
 const ALLOWED_ROOM_PREFIXES = ['org:', 'user:', 'bd-account:', 'chat:'];
-const MAX_CONNECTIONS_PER_ORG = 100;
+/**
+ * Per-process org connection cap. Behind a load balancer with N replicas, effective org-wide capacity is roughly
+ * N × this value (each replica tracks only its own sockets). This default is intentionally conservative so the
+ * aggregate stays reasonable when scaling horizontally. For strict global enforcement across replicas, use
+ * Redis-backed counters (INCR/EXPIRE or a small Lua script) keyed by organization id, or sticky sessions plus ops tuning.
+ */
+const MAX_CONNECTIONS_PER_ORG = 30;
 const HEARTBEAT_TIMEOUT_MS = 90_000;
 
+// In-memory only: limits are per Node process. Multiple replicas each apply their own caps (see MAX_CONNECTIONS_PER_ORG).
+// For strict global limits, mirror counts in Redis. rateLimits: per socket id on this instance; orgConnectionCounts: per org on this instance.
 const rateLimits = new Map<string, { count: number; resetAt: number }>();
 const orgConnectionCounts = new Map<string, number>();
 

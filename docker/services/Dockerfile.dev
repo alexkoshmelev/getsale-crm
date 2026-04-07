@@ -9,8 +9,9 @@ WORKDIR /app
 # Copy root package files for workspaces
 COPY package*.json ./
 
-# Copy shared packages
+# Copy shared packages (types, events, logger moved to shared-v2/ during v1→v2 migration)
 COPY shared/ ./shared/
+COPY shared-v2/ ./shared-v2/
 
 # Copy service package.json
 COPY ${SERVICE_PATH}/package*.json ./${SERVICE_PATH}/
@@ -18,10 +19,10 @@ COPY ${SERVICE_PATH}/package*.json ./${SERVICE_PATH}/
 # Install all dependencies (workspaces will resolve local packages)
 RUN npm install
 
-# Build shared packages in dependency order: types -> events -> logger -> utils -> service-core
-RUN npm run build --workspace=shared/types && \
-    npm run build --workspace=shared/events && \
-    npm run build --workspace=shared/logger && \
+# Build shared packages in dependency order: types -> events -> logger (now in shared-v2/) -> utils -> service-core
+RUN npm run build --workspace=shared-v2/types && \
+    npm run build --workspace=shared-v2/events && \
+    npm run build --workspace=shared-v2/logger && \
     npm run build --workspace=shared/utils && \
     npm run build --workspace=shared/service-core
 

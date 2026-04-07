@@ -105,6 +105,46 @@ export function registerAccountRoutes(app: FastifyInstance, deps: Deps): void {
   });
 
   /**
+   * POST /api/bd-accounts/spambot-check-all
+   * Queue SpamBot checks for all org accounts that haven't been checked recently.
+   */
+  app.post('/api/bd-accounts/spambot-check-all', { preHandler: [requireUser] }, async (request) => {
+    const user = request.user!;
+    assertNotViewer(user);
+    const role = (user.role || '').toLowerCase();
+    if (role !== 'owner' && role !== 'admin') {
+      throw new AppError(403, 'Only organization admins can run bulk SpamBot checks', ErrorCodes.FORBIDDEN);
+    }
+
+    const hours = parseInt(String(process.env.SPAMBOT_CHECK_INTERVAL_HOURS || '6'), 10) || 6;
+    const gapMs = parseInt(String(process.env.SPAMBOT_CHECK_GAP_MS || '8000'), 10) || 8000;
+    const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
+
+    const accounts = await db.read.query(
+      `SELECT id FROM bd_accounts
+       WHERE organization_id = $1 AND is_active = true
+         AND (last_spambot_check_at IS NULL OR last_spambot_check_at < $2)
+       ORDER BY last_spambot_check_at ASC NULLS FIRST`,
+      [user.organizationId, cutoff],
+    );
+
+    let queued = 0;
+    for (const row of accounts.rows as { id: string }[]) {
+      await rabbitmq.publishCommand(`telegram:commands:${row.id}`, {
+        type: CommandType.SPAMBOT_CHECK,
+        payload: { accountId: row.id, organizationId: user.organizationId },
+      });
+      queued++;
+      if (gapMs > 0 && queued < accounts.rows.length) {
+        await new Promise((r) => setTimeout(r, gapMs));
+      }
+    }
+
+    log.info({ message: `Queued spambot checks for ${queued} accounts`, entity_type: 'bd_account' });
+    return { ok: true, queued };
+  });
+
+  /**
    * GET /api/bd-accounts/:id/status
    * Single account status with connection info.
    */

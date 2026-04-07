@@ -7,6 +7,7 @@ import { registerSendRoutes } from './routes/send';
 import { registerChatRoutes } from './routes/chats';
 import { registerMessageActionRoutes } from './routes/message-actions';
 import { registerConversationFeatureRoutes } from './routes/conversation-features';
+import { handleMessagingRabbitEvent } from './messaging-event-handlers';
 
 async function main() {
   const redis = new RedisClient({ url: process.env.REDIS_URL || 'redis://localhost:6380' });
@@ -37,33 +38,18 @@ async function main() {
   registerConversationFeatureRoutes(app, deps);
 
   await rabbitmq.subscribeToEvents(
-    [EventType.MESSAGE_RECEIVED, EventType.MESSAGE_SENT, EventType.MESSAGE_READ],
+    [
+      EventType.MESSAGE_RECEIVED,
+      EventType.MESSAGE_SENT,
+      EventType.MESSAGE_READ,
+      EventType.MESSAGE_DELETED,
+      EventType.MESSAGE_EDITED,
+    ],
     async (event) => {
       try {
-        const data = event.data as Record<string, unknown>;
-        if (event.type === EventType.MESSAGE_RECEIVED || event.type === EventType.MESSAGE_SENT) {
-          const conversationId = data.conversationId as string;
-          const orgId = event.organizationId;
-          const userId = data.assignedUserId as string || event.userId;
-
-          if (conversationId && orgId && userId) {
-            await inbox.onMessage({
-              orgId,
-              userId,
-              conversationId,
-              messagePreview: (data.text as string || '').slice(0, 200),
-              contactName: (data.contactName as string) || '',
-              contactId: (data.contactId as string) || '',
-              timestamp: event.timestamp.getTime(),
-              incrementUnread: event.type === EventType.MESSAGE_RECEIVED,
-            });
-          }
-        } else if (event.type === EventType.MESSAGE_READ) {
-          const conversationId = data.conversationId as string;
-          if (conversationId) await inbox.markRead(conversationId);
-        }
+        await handleMessagingRabbitEvent(event, deps);
       } catch (err) {
-        log.error({ message: 'Inbox model update failed', event_type: event.type, error: String(err) });
+        log.error({ message: 'Messaging RabbitMQ event handler failed', event_type: event.type, error: String(err) });
       }
     },
     'events',

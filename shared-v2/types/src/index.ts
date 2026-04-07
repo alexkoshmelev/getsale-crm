@@ -310,4 +310,3 @@ export const CampaignParticipantFilter = {
   SHARED: 'shared',
 } as const;
 export type CampaignParticipantFilterValue = (typeof CampaignParticipantFilter)[keyof typeof CampaignParticipantFilter];
-

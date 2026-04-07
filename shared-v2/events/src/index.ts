@@ -137,14 +137,13 @@ export interface MessageReceivedEvent extends BaseEvent {
   data: {
     messageId: string;
     channel: string;
-    channelId?: string; // telegram chat id for room targeting
+    channelId?: string;
     contactId?: string;
     bdAccountId?: string;
     content: string;
     direction?: 'inbound' | 'outbound';
     telegramMessageId?: string | number;
     replyToTelegramId?: string | number;
-    /** Для отображения реплая и медиа на фронте без доп. запроса */
     telegramMedia?: Record<string, unknown> | null;
     telegramEntities?: Array<Record<string, unknown>> | null;
     createdAt?: string;
@@ -336,36 +335,26 @@ export interface BDAccountTelegramUpdateEvent extends BaseEvent {
     maxId?: number;
     draftText?: string;
     replyToMsgId?: number;
-    /** updateMessageID: confirmed telegram message id */
     telegramMessageId?: number;
     randomId?: string;
-    /** dialog_pinned / pinned_dialogs */
     pinned?: boolean;
     folderId?: number;
     order?: string[];
-    /** user_name */
     firstName?: string;
     lastName?: string;
     usernames?: string[];
-    /** user_phone */
     phone?: string;
-    /** chat_participant_add/delete */
     inviterId?: string;
     version?: number;
-    /** scheduled_message / delete_scheduled_messages */
     messageIds?: number[];
-    /** message_poll / message_poll_vote */
     pollId?: string;
     poll?: Record<string, unknown>;
     results?: Record<string, unknown>;
     options?: string[];
     qts?: number;
-    /** channel_too_long: pts hint */
     pts?: number;
-    /** callback_query / phone_call: id */
     queryId?: string;
     phoneCallId?: string;
-    /** notify_settings: optional JSON-serializable */
     notifySettings?: Record<string, unknown>;
   };
 }
@@ -398,7 +387,6 @@ export interface AutomationRuleTriggeredEvent extends BaseEvent {
   };
 }
 
-// Subscription events
 export interface SubscriptionUpdatedEvent extends BaseEvent {
   type: EventType.SUBSCRIPTION_UPDATED;
   data: {
@@ -418,7 +406,6 @@ export interface SubscriptionCancelledEvent extends BaseEvent {
   };
 }
 
-// Team events
 export interface TeamCreatedEvent extends BaseEvent {
   type: EventType.TEAM_CREATED;
   data: {
@@ -447,7 +434,6 @@ export interface TeamInvitationSentEvent extends BaseEvent {
   };
 }
 
-// BD Account events
 export interface BDAccountDisconnectedEvent extends BaseEvent {
   type: EventType.BD_ACCOUNT_DISCONNECTED;
   data: {
@@ -468,7 +454,6 @@ export interface BDAccountPurchasedEvent extends BaseEvent {
   };
 }
 
-// Stage events
 export interface StageCreatedEvent extends BaseEvent {
   type: EventType.STAGE_CREATED;
   data: {
@@ -497,7 +482,6 @@ export interface StageDeletedEvent extends BaseEvent {
   };
 }
 
-// Lead events (pipeline-service)
 export interface LeadCreatedEvent extends BaseEvent {
   type: EventType.LEAD_CREATED;
   data: {
@@ -529,7 +513,6 @@ export interface LeadStageChangedEvent extends BaseEvent {
   };
 }
 
-/** ЭТАП 7: лид создан из кампании. Messaging подписывается и вызывает attachLead (idempotent). */
 export interface LeadCreatedFromCampaignEvent extends BaseEvent {
   type: EventType.LEAD_CREATED_FROM_CAMPAIGN;
   data: {
@@ -544,7 +527,6 @@ export interface LeadCreatedFromCampaignEvent extends BaseEvent {
   };
 }
 
-/** ЭТАП 6: SLA breach — лид в стадии дольше max_days. breachDate = логический день в org TZ (YYYY-MM-DD). */
 export interface LeadSlaBreachEvent extends BaseEvent {
   type: EventType.LEAD_SLA_BREACH;
   data: {
@@ -559,7 +541,6 @@ export interface LeadSlaBreachEvent extends BaseEvent {
   };
 }
 
-/** ЭТАП 6: SLA breach — сделка в стадии дольше max_days. breachDate = логический день в org TZ (YYYY-MM-DD). */
 export interface DealSlaBreachEvent extends BaseEvent {
   type: EventType.DEAL_SLA_BREACH;
   data: {
@@ -573,7 +554,6 @@ export interface DealSlaBreachEvent extends BaseEvent {
   };
 }
 
-// Automation events
 export interface AutomationRuleCreatedEvent extends BaseEvent {
   type: EventType.AUTOMATION_RULE_CREATED;
   data: {
@@ -596,7 +576,6 @@ export interface TriggerExecutedEvent extends BaseEvent {
   };
 }
 
-// Company / Contact / Deal events (CRM)
 export interface CompanyCreatedEvent extends BaseEvent {
   type: EventType.COMPANY_CREATED;
   data: { companyId: string };
@@ -632,7 +611,6 @@ export interface DealUpdatedEvent extends BaseEvent {
   data: { dealId: string };
 }
 
-// Analytics events
 export interface MetricRecordedEvent extends BaseEvent {
   type: EventType.METRIC_RECORDED;
   data: {
@@ -643,7 +621,6 @@ export interface MetricRecordedEvent extends BaseEvent {
   };
 }
 
-// Discovery (contact discovery / parsing)
 export interface DiscoveryTaskStartedEvent extends BaseEvent {
   type: EventType.DISCOVERY_TASK_STARTED;
   data: { taskId: string; name?: string };
@@ -700,4 +677,3 @@ export type Event =
   | AutomationRuleTriggeredEvent
   | MetricRecordedEvent
   | DiscoveryTaskStartedEvent;
-

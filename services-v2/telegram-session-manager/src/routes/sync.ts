@@ -347,6 +347,89 @@ export function registerSyncRoutes(app: FastifyInstance, deps: Deps): void {
     return { folders: folderList };
   });
 
+  // ── Folders (raw Telegram) ──
+
+  /**
+   * GET /api/bd-accounts/:id/folders
+   * Returns raw Telegram folder list from DB.
+   * If ?refresh=1, fetches fresh folder filters via GramJS first.
+   */
+  app.get('/api/bd-accounts/:id/folders', { preHandler: [requireUser] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const user = request.user!;
+    const { refresh } = request.query as { refresh?: string };
+
+    const account = await db.read.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId],
+    );
+    getAccountOr404(account);
+
+    if (refresh === '1') {
+      const client = getActiveClient(id, deps);
+      await refreshFoldersFromTelegram(id, client, db, log);
+    }
+
+    const rows = await db.read.query(
+      'SELECT folder_id, folder_title, icon FROM bd_account_sync_folders WHERE bd_account_id = $1 ORDER BY order_index, folder_id',
+      [id],
+    );
+    const folders = [
+      { id: 0, title: 'Все чаты', isCustom: false, emoticon: '💬' },
+      ...rows.rows.map((r: any) => ({
+        id: Number(r.folder_id),
+        title: (r.folder_title || '').trim() || `Папка ${r.folder_id}`,
+        isCustom: Number(r.folder_id) >= 2,
+        emoticon: r.icon || undefined,
+      })),
+    ];
+    return { folders };
+  });
+
+  /**
+   * POST /api/bd-accounts/:id/folders-refetch
+   * Refresh folder list directly from Telegram via GramJS.
+   */
+  app.post('/api/bd-accounts/:id/folders-refetch', { preHandler: [requireUser] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const user = request.user!;
+    assertNotViewer(user);
+
+    const account = await db.read.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId],
+    );
+    getAccountOr404(account);
+
+    const client = getActiveClient(id, deps);
+
+    let filters: any[];
+    try {
+      const result = await client.invoke(new Api.messages.GetDialogFilters()) as any;
+      filters = Array.isArray(result) ? result : (result?.filters ?? []);
+    } catch (err) {
+      throw new AppError(503, 'Failed to fetch folder filters from Telegram', ErrorCodes.INTERNAL_ERROR);
+    }
+
+    const folders = [
+      { id: 0, title: 'Все чаты', isCustom: false, emoticon: '💬' },
+      ...filters
+        .filter((f: any) => f && f.className !== 'DialogFilterDefault')
+        .map((f: any) => {
+          const fid = Number(f.id);
+          const rawTitle = typeof f.title === 'string' ? f.title : (f.title?.text ?? '');
+          return {
+            id: fid,
+            title: rawTitle.trim() || `Папка ${fid}`,
+            isCustom: fid >= 2,
+            emoticon: f.emoticon || undefined,
+          };
+        }),
+    ];
+
+    return { folders, success: true };
+  });
+
   // ── Sync Folders ──
 
   /**
@@ -585,6 +668,123 @@ export function registerSyncRoutes(app: FastifyInstance, deps: Deps): void {
       [folderRowId, id],
     );
     reply.code(204).send();
+  });
+
+  /**
+   * POST /api/bd-accounts/:id/sync-folders-refresh
+   * Trigger a refresh of sync folders (currently a stub matching v1 behavior).
+   */
+  app.post('/api/bd-accounts/:id/sync-folders-refresh', { preHandler: [requireUser] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const user = request.user!;
+    assertNotViewer(user);
+
+    const account = await db.read.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId],
+    );
+    getAccountOr404(account);
+
+    return { success: true };
+  });
+
+  /**
+   * POST /api/bd-accounts/:id/sync-folders-push-to-telegram
+   * Push locally saved sync folders to Telegram as dialog filters via GramJS.
+   */
+  app.post('/api/bd-accounts/:id/sync-folders-push-to-telegram', { preHandler: [requireUser] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const user = request.user!;
+    assertNotViewer(user);
+
+    const account = await db.read.query(
+      'SELECT id FROM bd_accounts WHERE id = $1 AND organization_id = $2',
+      [id, user.organizationId],
+    );
+    getAccountOr404(account);
+
+    const client = getActiveClient(id, deps);
+    const errors: string[] = [];
+    let updated = 0;
+
+    const foldersRows = await db.read.query(
+      'SELECT id, folder_id, folder_title, icon FROM bd_account_sync_folders WHERE bd_account_id = $1 AND folder_id >= 2 ORDER BY order_index',
+      [id],
+    );
+    if (foldersRows.rows.length === 0) {
+      return { success: true, updated: 0, errors: [] };
+    }
+
+    for (const row of foldersRows.rows as any[]) {
+      const folderId = Number(row.folder_id);
+      const title = String(row.folder_title || '').trim() || `Folder ${folderId}`;
+      const emoticon = row.icon && String(row.icon).trim() ? String(row.icon).trim().slice(0, 4) : undefined;
+
+      const chatsRows = await db.read.query(
+        'SELECT telegram_chat_id FROM bd_account_sync_chat_folders WHERE bd_account_id = $1 AND folder_id = $2',
+        [id, folderId],
+      );
+
+      const includePeers: any[] = [];
+      for (const c of chatsRows.rows as any[]) {
+        const tid = String(c.telegram_chat_id || '').trim();
+        if (!tid) continue;
+        try {
+          const peerInput = Number.isNaN(Number(tid)) ? tid : Number(tid);
+          const peer = await client.getInputEntity(peerInput);
+          includePeers.push(new Api.InputDialogPeer({ peer }));
+        } catch (e: unknown) {
+          errors.push(`Chat ${tid}: ${String((e as Error)?.message || e)}`);
+        }
+      }
+
+      const titleObj = new Api.TextWithEntities({ text: title, entities: [] });
+
+      try {
+        const filter = new Api.DialogFilter({
+          id: folderId,
+          title: titleObj,
+          emoticon: emoticon || '',
+          pinnedPeers: [],
+          includePeers,
+          excludePeers: [],
+          contacts: false,
+          nonContacts: false,
+          groups: false,
+          broadcasts: false,
+          bots: false,
+        });
+        await client.invoke(new Api.messages.UpdateDialogFilter({ id: folderId, filter }));
+        updated++;
+      } catch (e: unknown) {
+        const msg = String((e as Error)?.message || e);
+        if (msg.includes('includePeers') || msg.includes('include_peers')) {
+          try {
+            const filterAlt = new (Api as any).DialogFilter({
+              id: folderId,
+              title: titleObj,
+              emoticon: emoticon || '',
+              pinned_peers: [],
+              include_peers: includePeers,
+              exclude_peers: [],
+              contacts: false,
+              non_contacts: false,
+              groups: false,
+              broadcasts: false,
+              bots: false,
+            });
+            await client.invoke(new Api.messages.UpdateDialogFilter({ id: folderId, filter: filterAlt }));
+            updated++;
+          } catch (e2: unknown) {
+            errors.push(`Folder "${title}" (id=${folderId}): ${String((e2 as Error)?.message || e2)}`);
+          }
+        } else {
+          errors.push(`Folder "${title}" (id=${folderId}): ${msg}`);
+        }
+      }
+    }
+
+    return { success: true, updated, errors };
   });
 
   // ── Sync Chats ──

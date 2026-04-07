@@ -13,6 +13,7 @@ export class CacheManager<T = unknown> {
   private redis: RedisClient;
   private ttl: number;
   private prefix: string;
+  private inflight = new Map<string, Promise<T>>();
 
   constructor(redis: RedisClient, options: CacheOptions) {
     this.redis = redis;
@@ -47,13 +48,28 @@ export class CacheManager<T = unknown> {
 
   /**
    * Get with cache-aside pattern: fetch from cache first, else call loader and cache result.
+   * Uses in-memory singleflight to prevent cache stampede — concurrent requests for the
+   * same key share one loader call instead of hammering the DB in parallel.
    */
   async getOrLoad(key: string, loader: () => Promise<T>, ttlOverride?: number): Promise<T> {
     const cached = await this.get(key);
     if (cached !== null) return cached;
-    const value = await loader();
-    await this.set(key, value, ttlOverride);
-    return value;
+
+    const fullKey = this.k(key);
+    const pending = this.inflight.get(fullKey);
+    if (pending) return pending;
+
+    const promise = loader()
+      .then(async (value) => {
+        await this.set(key, value, ttlOverride);
+        return value;
+      })
+      .finally(() => {
+        this.inflight.delete(fullKey);
+      });
+
+    this.inflight.set(fullKey, promise);
+    return promise;
   }
 
   /**

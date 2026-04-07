@@ -1,7 +1,17 @@
 import http from 'k6/http';
 import { check, group, sleep } from 'k6';
 import { Trend, Counter, Rate } from 'k6/metrics';
-import { BASE_URL, THRESHOLDS_MIXED } from './config.js';
+import {
+  BASE_URL,
+  THRESHOLDS_MIXED,
+  MIXED_VU_TARGETS_BASE,
+  MIXED_VU_TARGETS_HIGH,
+  mixedRampStages,
+} from './config.js';
+
+const LOAD_LEVEL = (__ENV.LOAD_LEVEL || '').toLowerCase();
+const vuTargets =
+  LOAD_LEVEL === 'high' ? MIXED_VU_TARGETS_HIGH : MIXED_VU_TARGETS_BASE;
 import {
   authHeaders, randomString, randomEmail, signup, signin,
   setupTestUser, jsonHeaders,
@@ -20,55 +30,35 @@ export const options = {
     crm_users: {
       executor: 'ramping-vus',
       startVUs: 0,
-      stages: [
-        { duration: '1m', target: 200 },
-        { duration: '5m', target: 200 },
-        { duration: '30s', target: 0 },
-      ],
+      stages: mixedRampStages(vuTargets.crm_users),
       exec: 'crmScenario',
       tags: { scenario: 'crm' },
     },
     messaging_users: {
       executor: 'ramping-vus',
       startVUs: 0,
-      stages: [
-        { duration: '1m', target: 150 },
-        { duration: '5m', target: 150 },
-        { duration: '30s', target: 0 },
-      ],
+      stages: mixedRampStages(vuTargets.messaging_users),
       exec: 'messagingScenario',
       tags: { scenario: 'messaging' },
     },
     pipeline_users: {
       executor: 'ramping-vus',
       startVUs: 0,
-      stages: [
-        { duration: '1m', target: 75 },
-        { duration: '5m', target: 75 },
-        { duration: '30s', target: 0 },
-      ],
+      stages: mixedRampStages(vuTargets.pipeline_users),
       exec: 'pipelineScenario',
       tags: { scenario: 'pipeline' },
     },
     admin_users: {
       executor: 'ramping-vus',
       startVUs: 0,
-      stages: [
-        { duration: '1m', target: 50 },
-        { duration: '5m', target: 50 },
-        { duration: '30s', target: 0 },
-      ],
+      stages: mixedRampStages(vuTargets.admin_users),
       exec: 'adminScenario',
       tags: { scenario: 'admin' },
     },
     auth_flow: {
       executor: 'ramping-vus',
       startVUs: 0,
-      stages: [
-        { duration: '1m', target: 25 },
-        { duration: '5m', target: 25 },
-        { duration: '30s', target: 0 },
-      ],
+      stages: mixedRampStages(vuTargets.auth_flow),
       exec: 'authScenario',
       tags: { scenario: 'auth' },
     },

@@ -47,7 +47,7 @@ spec:
             - name: NODE_ENV
               valueFrom:
                 configMapKeyRef:
-                  name: getsale-config
+                  name: getsale-common-config
                   key: NODE_ENV
           resources:
             requests:

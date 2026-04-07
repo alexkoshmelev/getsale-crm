@@ -5,7 +5,6 @@ import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import proxy from '@fastify/http-proxy';
 import replyFrom from '@fastify/reply-from';
-import http from 'node:http';
 import Redis from 'ioredis';
 import { createLogger } from '@getsale/logger';
 import { RedisClient } from '@getsale/cache';
@@ -32,12 +31,6 @@ interface GatewayUser {
 const log = createLogger('gateway-v2');
 const redis = new RedisClient({ url: REDIS_URL });
 const rateLimitRedis = new Redis(REDIS_URL);
-
-const keepAliveAgent = new http.Agent({
-  keepAlive: true,
-  maxSockets: 128,
-  keepAliveMsecs: 30_000,
-});
 
 const SLIDING_WINDOW_LUA = `
   local key = KEYS[1]

@@ -140,6 +140,8 @@ async function main() {
     opts: { jobId: 'refresh-views-recurring' },
   });
 
+  // Concurrency 1: materialized view refreshes are heavy and serialized intentionally.
+  // Scale analytics event throughput horizontally with multiple container replicas instead.
   refreshQueue.process(async (job) => {
     if (job.name === 'refresh-views') {
       log.info({ message: 'Refreshing materialized views' });
