@@ -21,7 +21,8 @@
     "@getsale/types": "*",
     "fastify": "^5.3.3",
     "ioredis": "^5.4.2",
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.2",
+    "prom-client": "^15.1.0"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.5",

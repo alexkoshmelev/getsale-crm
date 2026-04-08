@@ -6,6 +6,7 @@ import rateLimit from '@fastify/rate-limit';
 import proxy from '@fastify/http-proxy';
 import replyFrom from '@fastify/reply-from';
 import Redis from 'ioredis';
+import { Registry, Counter, Histogram, collectDefaultMetrics } from 'prom-client';
 import { createLogger } from '@getsale/logger';
 import { RedisClient } from '@getsale/cache';
 import {
@@ -73,8 +74,42 @@ async function start() {
 
   app.decorateRequest('gatewayUser', null as unknown as GatewayUser | undefined);
 
+  // --- Prometheus metrics ---
+  const registry = new Registry();
+  collectDefaultMetrics({ register: registry });
+
+  const httpRequestDuration = new Histogram({
+    name: 'http_request_duration_seconds',
+    help: 'HTTP request duration in seconds',
+    labelNames: ['method', 'route', 'status'],
+    registers: [registry],
+  });
+
+  const httpRequestsTotal = new Counter({
+    name: 'http_requests_total',
+    help: 'Total HTTP requests',
+    labelNames: ['method', 'route', 'status'],
+    registers: [registry],
+  });
+
+  app.addHook('onResponse', (request, reply, done) => {
+    const route = request.routeOptions?.url || request.url.split('?')[0] || 'unknown';
+    const labels = {
+      method: request.method,
+      route,
+      status: String(reply.statusCode),
+    };
+    httpRequestDuration.observe(labels, reply.elapsedTime / 1000);
+    httpRequestsTotal.inc(labels);
+    done();
+  });
+
   // --- Health checks ---
   app.get('/health', async () => ({ status: 'ok', service: 'gateway-v2' }));
+  app.get('/metrics', async (request, reply) => {
+    reply.header('Content-Type', registry.contentType);
+    return reply.send(await registry.metrics());
+  });
   app.get('/ready', async (request, reply) => {
     try {
       await redis.ping();

@@ -44,6 +44,9 @@ services:
     ports:
       - "5673:5672"
       - "15673:15672"
+      - "15693:15692"
+    volumes:
+      - ./observability/rabbitmq-plugins:/etc/rabbitmq/enabled_plugins:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_running"]
       interval: 10s
@@ -123,6 +126,10 @@ services:
       COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
       AUTH_COOKIE_ACCESS: ${AUTH_COOKIE_ACCESS:-access_token_dev}
       AUTH_COOKIE_REFRESH: ${AUTH_COOKIE_REFRESH:-refresh_token_dev}
+      AUTH_RL_SIGNUP: "${AUTH_RL_SIGNUP:-500}"
+      AUTH_RL_SIGNIN_IP: "${AUTH_RL_SIGNIN_IP:-500}"
+      AUTH_RL_SIGNIN_EMAIL: "${AUTH_RL_SIGNIN_EMAIL:-100}"
+      AUTH_RL_REFRESH: "${AUTH_RL_REFRESH:-500}"
     depends_on:
       postgres:
         condition: service_healthy

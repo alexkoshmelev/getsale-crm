@@ -37,6 +37,14 @@ function getClientIp(request: FastifyRequest): string {
   return request.ip || 'unknown';
 }
 
+const RL_SIGNUP_LIMIT = parseInt(process.env.AUTH_RL_SIGNUP || '5', 10);
+const RL_SIGNUP_WINDOW = parseInt(process.env.AUTH_RL_SIGNUP_WINDOW_MS || '3600000', 10);
+const RL_SIGNIN_IP_LIMIT = parseInt(process.env.AUTH_RL_SIGNIN_IP || '10', 10);
+const RL_SIGNIN_EMAIL_LIMIT = parseInt(process.env.AUTH_RL_SIGNIN_EMAIL || '5', 10);
+const RL_SIGNIN_WINDOW = parseInt(process.env.AUTH_RL_SIGNIN_WINDOW_MS || '900000', 10);
+const RL_REFRESH_LIMIT = parseInt(process.env.AUTH_RL_REFRESH || '5', 10);
+const RL_REFRESH_WINDOW = parseInt(process.env.AUTH_RL_REFRESH_WINDOW_MS || '60000', 10);
+
 function setCookiesAndSend(reply: FastifyReply, accessToken: string, refreshToken: string, user: { id: string; email: string; organizationId: string; role: string }) {
   reply
     .setCookie(AUTH_COOKIE_ACCESS, accessToken, { ...AUTH_COOKIE_OPTS, maxAge: ACCESS_MAX_AGE_SEC })
@@ -49,7 +57,7 @@ export function registerAuthRoutes(app: FastifyInstance, deps: Deps): void {
 
   app.post('/api/auth/signup', async (request, reply) => {
     const body = SignupSchema.parse(request.body);
-    await checkRateLimit(redis, 'auth:signup', getClientIp(request), 5, 3600_000, 'Too many sign-up attempts');
+    await checkRateLimit(redis, 'auth:signup', getClientIp(request), RL_SIGNUP_LIMIT, RL_SIGNUP_WINDOW, 'Too many sign-up attempts');
 
     const { email, password, organizationName, inviteToken } = body;
     const orgName = organizationName?.trim()?.slice(0, AU_ORG_NAME_MAX_LEN) || 'My Organization';
@@ -140,8 +148,8 @@ export function registerAuthRoutes(app: FastifyInstance, deps: Deps): void {
   app.post('/api/auth/signin', async (request, reply) => {
     const body = SigninSchema.parse(request.body);
     const ip = getClientIp(request);
-    await checkRateLimit(redis, 'auth:signin', ip, 10, 900_000, 'Too many sign-in attempts');
-    await checkRateLimit(redis, 'auth:signin:email', body.email, 5, 900_000, 'Too many attempts for this account');
+    await checkRateLimit(redis, 'auth:signin', ip, RL_SIGNIN_IP_LIMIT, RL_SIGNIN_WINDOW, 'Too many sign-in attempts');
+    await checkRateLimit(redis, 'auth:signin:email', body.email, RL_SIGNIN_EMAIL_LIMIT, RL_SIGNIN_WINDOW, 'Too many attempts for this account');
 
     const result = await pool.query('SELECT * FROM users WHERE email = $1', [body.email]);
     if (!result.rows.length) throw new AppError(401, 'Invalid credentials', ErrorCodes.UNAUTHORIZED);
@@ -203,7 +211,7 @@ export function registerAuthRoutes(app: FastifyInstance, deps: Deps): void {
 
   app.post('/api/auth/refresh', async (request, reply) => {
     const ip = getClientIp(request);
-    await checkRateLimit(redis, 'auth:refresh', ip, 5, 60_000, 'Too many refresh attempts');
+    await checkRateLimit(redis, 'auth:refresh', ip, RL_REFRESH_LIMIT, RL_REFRESH_WINDOW, 'Too many refresh attempts');
 
     const cookies = (request as unknown as Record<string, unknown>).cookies as Record<string, string> | undefined;
     const refreshToken = cookies?.[AUTH_COOKIE_REFRESH];

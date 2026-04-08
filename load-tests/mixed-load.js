@@ -1,6 +1,6 @@
 import http from 'k6/http';
 import { check, group, sleep } from 'k6';
-import { Trend, Counter, Rate } from 'k6/metrics';
+import { Trend, Counter } from 'k6/metrics';
 import {
   BASE_URL,
   THRESHOLDS_MIXED,
@@ -12,9 +12,10 @@ import {
 const LOAD_LEVEL = (__ENV.LOAD_LEVEL || '').toLowerCase();
 const vuTargets =
   LOAD_LEVEL === 'high' ? MIXED_VU_TARGETS_HIGH : MIXED_VU_TARGETS_BASE;
+const POOL_SIZE = parseInt(__ENV.USER_POOL_SIZE || (LOAD_LEVEL === 'high' ? '150' : '50'), 10);
+
 import {
-  authHeaders, randomString, randomEmail, signup, signin,
-  setupTestUser, jsonHeaders,
+  authHeaders, randomString, createUserPool, REFRESH_COOKIE,
 } from './helpers.js';
 
 const scenarioErrors = new Counter('scenario_errors');
@@ -75,49 +76,56 @@ export const options = {
 };
 
 export function setup() {
-  const user = setupTestUser();
-  if (!user) throw new Error('Setup failed: could not create test user');
+  console.log(`Creating user pool: ${POOL_SIZE} users via auth-service direct...`);
+  const users = createUserPool(POOL_SIZE);
+  if (users.length === 0) throw new Error('Setup failed: could not create any test users');
+  console.log(`User pool ready: ${users.length} users created`);
 
-  const headers = authHeaders(user.accessToken);
+  const stageNames = ['New', 'Contacted', 'Qualified', 'Proposal', 'Won'];
 
-  let pipelineId = null;
-  let stageIds = [];
+  for (let u = 0; u < users.length; u++) {
+    const headers = authHeaders(users[u].accessToken);
 
-  const pipeRes = http.post(
-    `${BASE_URL}/api/pipeline`,
-    JSON.stringify({ name: `Mixed Pipeline ${randomString(4)}`, isDefault: true }),
-    { headers, tags: { name: 'setup_pipeline' } },
-  );
+    const pipeRes = http.post(
+      `${BASE_URL}/api/pipeline`,
+      JSON.stringify({ name: `Pipeline ${randomString(4)}`, isDefault: true }),
+      { headers, tags: { name: 'setup_pipeline' } },
+    );
 
-  if (pipeRes.status === 201) {
-    pipelineId = pipeRes.json('id');
+    if (pipeRes.status === 201) {
+      const pipelineId = pipeRes.json('id');
+      users[u].pipelineId = pipelineId;
+      users[u].stageIds = [];
 
-    const stageNames = ['New', 'Contacted', 'Qualified', 'Proposal', 'Won'];
-    for (let i = 0; i < stageNames.length; i++) {
-      const stageRes = http.post(
-        `${BASE_URL}/api/pipeline/stages`,
-        JSON.stringify({ pipelineId, name: stageNames[i], orderIndex: i }),
-        { headers, tags: { name: 'setup_stage' } },
-      );
-      if (stageRes.status === 201) {
-        stageIds.push(stageRes.json('id'));
+      for (let i = 0; i < stageNames.length; i++) {
+        const stageRes = http.post(
+          `${BASE_URL}/api/pipeline/stages`,
+          JSON.stringify({ pipelineId, name: stageNames[i], orderIndex: i }),
+          { headers, tags: { name: 'setup_stage' } },
+        );
+        if (stageRes.status === 201) {
+          users[u].stageIds.push(stageRes.json('id'));
+        }
       }
+    } else {
+      users[u].pipelineId = null;
+      users[u].stageIds = [];
     }
   }
 
-  return {
-    accessToken: user.accessToken,
-    email: user.email,
-    password: 'LoadTest1234!',
-    pipelineId,
-    stageIds,
-  };
+  console.log(`Setup complete: ${users.length} users, each with pipeline + stages`);
+  return { users };
+}
+
+function pickUser(data) {
+  return data.users[(__VU - 1) % data.users.length];
 }
 
 // --- CRM Scenario (40% of users) ---
 
 export function crmScenario(data) {
-  const headers = authHeaders(data.accessToken);
+  const user = pickUser(data);
+  const headers = authHeaders(user.accessToken);
 
   group('CRM - list contacts', () => {
     const page = Math.floor(Math.random() * 5) + 1;
@@ -190,7 +198,8 @@ export function crmScenario(data) {
 // --- Messaging Scenario (30% of users) ---
 
 export function messagingScenario(data) {
-  const headers = authHeaders(data.accessToken);
+  const user = pickUser(data);
+  const headers = authHeaders(user.accessToken);
   let conversationId = null;
 
   group('MSG - inbox', () => {
@@ -251,8 +260,10 @@ export function messagingScenario(data) {
 // --- Pipeline Scenario (15% of users) ---
 
 export function pipelineScenario(data) {
-  const headers = authHeaders(data.accessToken);
-  const { pipelineId, stageIds } = data;
+  const user = pickUser(data);
+  const headers = authHeaders(user.accessToken);
+  const pipelineId = user.pipelineId;
+  const stageIds = user.stageIds || [];
 
   group('PIPE - list pipelines', () => {
     const res = http.get(`${BASE_URL}/api/pipeline`, {
@@ -279,53 +290,70 @@ export function pipelineScenario(data) {
 
   sleep(0.5);
 
-  group('PIPE - list leads', () => {
-    const res = http.get(`${BASE_URL}/api/pipeline/leads?page=1&limit=100`, {
-      headers,
-      tags: { name: 'pipe_leads' },
-    });
-    check(res, { 'leads 200': (r) => r.status === 200 });
-    pipeTrend.add(res.timings.duration);
-  });
-
-  sleep(0.5);
-
-  if (stageIds.length > 0) {
-    let leadId = null;
-
-    group('PIPE - create lead', () => {
-      const payload = JSON.stringify({
-        stageId: stageIds[0],
-        title: `Mixed Lead ${randomString(5)}`,
-        value: Math.floor(Math.random() * 5000) + 100,
-      });
-
-      const res = http.post(`${BASE_URL}/api/pipeline/leads`, payload, {
+  if (pipelineId) {
+    group('PIPE - list leads', () => {
+      const res = http.get(`${BASE_URL}/api/pipeline/leads?pipelineId=${pipelineId}&page=1&limit=100`, {
         headers,
-        tags: { name: 'pipe_create_lead' },
+        tags: { name: 'pipe_leads' },
       });
-
-      const ok = check(res, { 'create lead 201': (r) => r.status === 201 });
+      check(res, { 'leads 200': (r) => r.status === 200 });
       pipeTrend.add(res.timings.duration);
-
-      if (ok) {
-        leadId = res.json('id');
-      }
     });
 
-    if (leadId && stageIds.length > 1) {
-      sleep(0.5);
+    sleep(0.5);
 
-      group('PIPE - move lead', () => {
-        const nextIdx = Math.floor(Math.random() * (stageIds.length - 1)) + 1;
-        const res = http.patch(
-          `${BASE_URL}/api/pipeline/leads/${leadId}/stage`,
-          JSON.stringify({ stageId: stageIds[nextIdx] }),
-          { headers, tags: { name: 'pipe_move_lead' } },
-        );
-        check(res, { 'move lead 200': (r) => r.status === 200 });
-        pipeTrend.add(res.timings.duration);
+    if (stageIds.length > 0) {
+      let leadId = null;
+
+      // Create lead requires a contactId — create a contact first
+      const contactPayload = JSON.stringify({
+        firstName: `Lead${randomString(3)}`,
+        lastName: `Test${randomString(3)}`,
+        email: `${randomString(8)}@pipe.local`,
       });
+      const contactRes = http.post(`${BASE_URL}/api/crm/contacts`, contactPayload, {
+        headers,
+        tags: { name: 'pipe_create_contact' },
+      });
+
+      if (contactRes.status === 201) {
+        const contactId = contactRes.json('id');
+
+        group('PIPE - create lead', () => {
+          const payload = JSON.stringify({
+            contactId,
+            pipelineId,
+            stageId: stageIds[0],
+          });
+
+          const res = http.post(`${BASE_URL}/api/pipeline/leads`, payload, {
+            headers,
+            tags: { name: 'pipe_create_lead' },
+          });
+
+          const ok = check(res, { 'create lead 201': (r) => r.status === 201 });
+          pipeTrend.add(res.timings.duration);
+
+          if (ok) {
+            leadId = res.json('id');
+          }
+        });
+
+        if (leadId && stageIds.length > 1) {
+          sleep(0.5);
+
+          group('PIPE - move lead', () => {
+            const nextIdx = Math.floor(Math.random() * (stageIds.length - 1)) + 1;
+            const res = http.patch(
+              `${BASE_URL}/api/pipeline/leads/${leadId}/stage`,
+              JSON.stringify({ stageId: stageIds[nextIdx] }),
+              { headers, tags: { name: 'pipe_move_lead' } },
+            );
+            check(res, { 'move lead 200': (r) => r.status === 200 });
+            pipeTrend.add(res.timings.duration);
+          });
+        }
+      }
     }
   }
 
@@ -335,7 +363,8 @@ export function pipelineScenario(data) {
 // --- Admin Scenario (10% of users) ---
 
 export function adminScenario(data) {
-  const headers = authHeaders(data.accessToken);
+  const user = pickUser(data);
+  const headers = authHeaders(user.accessToken);
 
   group('ADMIN - analytics summary', () => {
     const res = http.get(`${BASE_URL}/api/analytics/summary?period=month`, {
@@ -405,53 +434,31 @@ export function adminScenario(data) {
 }
 
 // --- Auth Flow Scenario (5% of users) ---
+// Tests me + refresh using pool users (signup/signin tested via setup).
 
-export function authScenario() {
-  const email = randomEmail();
-  const password = 'LoadTest1234!';
+export function authScenario(data) {
+  const user = pickUser(data);
+  const headers = authHeaders(user.accessToken);
 
-  group('AUTH - signup', () => {
-    const result = signup(email, password);
-    if (!result) {
-      scenarioErrors.add(1);
-      return;
-    }
-    authTrend.add(0);
+  group('AUTH - get me', () => {
+    const res = http.get(`${BASE_URL}/api/auth/me`, {
+      headers,
+      tags: { name: 'auth_me' },
+    });
+    check(res, { 'me 200': (r) => r.status === 200 });
+    authTrend.add(res.timings.duration);
   });
 
   sleep(1);
 
-  group('AUTH - signin', () => {
-    const result = signin(email, password);
-    if (!result) {
-      scenarioErrors.add(1);
-      return;
-    }
-    authTrend.add(0);
-
-    sleep(0.5);
-
-    group('AUTH - get me', () => {
-      const res = http.get(`${BASE_URL}/api/auth/me`, {
-        headers: authHeaders(result.accessToken),
-        tags: { name: 'auth_me' },
-      });
-      check(res, { 'me 200': (r) => r.status === 200 });
-      authTrend.add(res.timings.duration);
+  group('AUTH - refresh', () => {
+    const jar = http.cookieJar();
+    jar.set(BASE_URL, REFRESH_COOKIE, user.refreshToken);
+    const res = http.post(`${BASE_URL}/api/auth/refresh`, null, {
+      tags: { name: 'auth_refresh' },
     });
-
-    sleep(0.5);
-
-    group('AUTH - refresh', () => {
-      const res = http.post(`${BASE_URL}/api/auth/refresh`, null, {
-        headers: authHeaders(result.accessToken),
-        tags: { name: 'auth_refresh' },
-      });
-      check(res, {
-        'refresh 200': (r) => r.status === 200,
-      });
-      authTrend.add(res.timings.duration);
-    });
+    check(res, { 'refresh 200': (r) => r.status === 200 });
+    authTrend.add(res.timings.duration);
   });
 
   sleep(2 + Math.random() * 2);

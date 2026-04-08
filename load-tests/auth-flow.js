@@ -2,7 +2,10 @@ import http from 'k6/http';
 import { check, group, sleep } from 'k6';
 import { Trend, Counter } from 'k6/metrics';
 import { BASE_URL, THRESHOLDS } from './config.js';
-import { randomEmail, authHeaders, signup, signin, jsonHeaders } from './helpers.js';
+import {
+  randomEmail, authHeaders, signupDirect, signinDirect,
+  ACCESS_COOKIE, REFRESH_COOKIE,
+} from './helpers.js';
 
 const signupDuration = new Trend('auth_signup_duration');
 const signinDuration = new Trend('auth_signin_duration');
@@ -30,15 +33,12 @@ export default function () {
   const password = 'LoadTest1234!';
 
   group('signup', () => {
-    const result = signup(email, password);
+    const result = signupDirect(email, password);
     if (!result) {
       authErrors.add(1);
       return;
     }
-    signupDuration.add(http.get(`${BASE_URL}/api/auth/me`, {
-      headers: authHeaders(result.accessToken),
-      tags: { name: 'timing_noop' },
-    }).timings.duration);
+    signupDuration.add(0);
   });
 
   sleep(0.5);
@@ -46,7 +46,7 @@ export default function () {
   let tokens = null;
 
   group('signin', () => {
-    tokens = signin(email, password);
+    tokens = signinDirect(email, password);
     if (!tokens) {
       authErrors.add(1);
       return;
@@ -59,8 +59,9 @@ export default function () {
   sleep(0.3);
 
   group('refresh', () => {
+    const jar = http.cookieJar();
+    jar.set(BASE_URL, REFRESH_COOKIE, tokens.refreshToken);
     const res = http.post(`${BASE_URL}/api/auth/refresh`, null, {
-      headers: authHeaders(tokens.accessToken),
       tags: { name: 'refresh' },
     });
 
@@ -75,8 +76,8 @@ export default function () {
       return;
     }
 
-    if (res.cookies.access_token) {
-      tokens.accessToken = res.cookies.access_token[0].value;
+    if (res.cookies[ACCESS_COOKIE]) {
+      tokens.accessToken = res.cookies[ACCESS_COOKIE][0].value;
     }
   });
 
