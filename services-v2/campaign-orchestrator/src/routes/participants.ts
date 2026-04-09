@@ -84,16 +84,22 @@ export function registerParticipantRoutes(app: FastifyInstance, deps: Deps): voi
          conv.shared_chat_created_at,
          st.name AS pipeline_stage_name,
          fs.first_sent_at AS sent_at,
-         CASE WHEN cp.status = 'replied' THEN cp.updated_at ELSE NULL END AS replied_at,
-         (m_first.status = 'read') AS first_message_read
+         COALESCE(cp.replied_at, CASE WHEN cp.status = 'replied' THEN cp.updated_at ELSE NULL END) AS replied_at,
+         (m_first.status = 'read') AS first_message_read,
+         cs_read.read_at AS campaign_send_read_at
        FROM campaign_participants cp
        JOIN contacts c ON c.id = cp.contact_id
        LEFT JOIN bd_accounts ba ON ba.id = cp.bd_account_id
        LEFT JOIN LATERAL (
-         SELECT cs.sent_at AS first_sent_at, cs.message_id AS first_message_id
-         FROM campaign_sends cs WHERE cs.campaign_participant_id = cp.id AND cs.status = 'sent' ORDER BY cs.sent_at LIMIT 1
+         SELECT cs.sent_at AS first_sent_at, cs.message_id AS first_message_id, cs.status AS first_send_status
+         FROM campaign_sends cs WHERE cs.campaign_participant_id = cp.id AND cs.status IN ('sent', 'queued') ORDER BY cs.sent_at LIMIT 1
        ) fs ON true
        LEFT JOIN messages m_first ON m_first.id = fs.first_message_id
+       LEFT JOIN LATERAL (
+         SELECT cs2.read_at FROM campaign_sends cs2
+         WHERE cs2.campaign_participant_id = cp.id AND cs2.read_at IS NOT NULL
+         ORDER BY cs2.read_at DESC LIMIT 1
+       ) cs_read ON true
        LEFT JOIN conversations conv ON conv.campaign_id = cp.campaign_id AND conv.bd_account_id = cp.bd_account_id AND conv.channel = 'telegram' AND conv.channel_id = cp.channel_id
        LEFT JOIN leads l ON l.id = conv.lead_id
        LEFT JOIN stages st ON st.id = l.stage_id
@@ -106,15 +112,13 @@ export function registerParticipantRoutes(app: FastifyInstance, deps: Deps): voi
     const rows = (result.rows as Record<string, unknown>[]).map((r) => {
       const st = String(r.participant_status ?? '');
       const hasSent = r.sent_at != null;
+      const isDelivered = hasSent && r.first_send_status === 'sent';
       const phase = (() => {
-        if (st === 'failed') return 'failed';
-        if (r.shared_chat_created_at) return 'shared';
+        if (st === 'failed' || st === 'skipped' || st === 'completed') return 'failed';
         if (st === 'replied') return 'replied';
-        if (hasSent && r.first_message_read) return 'read';
-        if (hasSent) return 'sent';
-        if (st === 'completed') return 'skipped';
-        if (st === 'pending') return 'pending';
-        return 'scheduled';
+        if (isDelivered && r.first_message_read) return 'read';
+        if (isDelivered) return 'sent';
+        return 'waiting';
       })();
 
       let last_error: string | null = null;
@@ -142,6 +146,7 @@ export function registerParticipantRoutes(app: FastifyInstance, deps: Deps): voi
         current_step: r.current_step ?? 0,
         next_send_at: st === 'failed' ? null : (r.next_send_at instanceof Date ? (r.next_send_at as Date).toISOString() : r.next_send_at),
         sequence_total_steps: r.sequence_total_steps ?? 0,
+        read_at: r.campaign_send_read_at instanceof Date ? (r.campaign_send_read_at as Date).toISOString() : (r.campaign_send_read_at ?? null),
       };
     });
 

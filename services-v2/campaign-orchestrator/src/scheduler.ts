@@ -77,7 +77,8 @@ export class CampaignScheduler {
     }
 
     const now = Date.now();
-    let cumulativeDelay = 0;
+    const FIRST_SEND_DELAY_MS = 5000;
+    let cumulativeDelay = FIRST_SEND_DELAY_MS;
 
     const jobs = participants.rows.map((p: Record<string, string>, idx: number) => {
       if (idx > 0) {
@@ -110,9 +111,13 @@ export class CampaignScheduler {
       };
     });
 
+    await this.pool.query(
+      "UPDATE campaigns SET status = 'active', updated_at = NOW() WHERE id = $1",
+      [campaignId],
+    );
+
     await this.jobQueue.addBulk(jobs);
 
-    // Update next_send_at for each participant so the frontend shows correct times
     for (const job of jobs) {
       const nextSendAt = new Date(job.data.scheduledAt);
       await this.pool.query(
@@ -120,11 +125,6 @@ export class CampaignScheduler {
         [nextSendAt, job.data.participantId],
       );
     }
-
-    await this.pool.query(
-      "UPDATE campaigns SET status = 'active', updated_at = NOW() WHERE id = $1",
-      [campaignId],
-    );
 
     this.log.info({ message: `Scheduled ${jobs.length} jobs for campaign ${campaignId}` });
     return jobs.length;
@@ -158,19 +158,24 @@ export class CampaignScheduler {
       this.pool.query('SELECT COUNT(*)::int AS total FROM campaign_participants WHERE campaign_id = $1', [campaignId]),
       this.pool.query('SELECT status, COUNT(*)::int AS cnt FROM campaign_participants WHERE campaign_id = $1 GROUP BY status', [campaignId]),
       this.pool.query(
-        `SELECT COUNT(*)::int AS cnt FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id WHERE cp.campaign_id = $1 AND cs.status = 'sent'`,
+        `SELECT COUNT(*)::int AS cnt FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id WHERE cp.campaign_id = $1 AND cs.status IN ('sent', 'queued')`,
         [campaignId],
       ),
       this.pool.query(
-        `SELECT COUNT(DISTINCT cp.id)::int AS cnt FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id WHERE cp.campaign_id = $1 AND cs.status = 'sent'`,
+        `SELECT COUNT(DISTINCT cp.id)::int AS cnt FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id WHERE cp.campaign_id = $1 AND cs.status IN ('sent', 'queued')`,
         [campaignId],
       ),
       this.pool.query(
-        `SELECT MIN(cs.sent_at) AS first_send_at, MAX(cs.sent_at) AS last_send_at FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id WHERE cp.campaign_id = $1 AND cs.status = 'sent'`,
+        `SELECT MIN(cs.sent_at) AS first_send_at, MAX(cs.sent_at) AS last_send_at FROM campaign_sends cs JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id WHERE cp.campaign_id = $1 AND cs.status IN ('sent', 'queued')`,
         [campaignId],
       ),
       this.pool.query(
-        `SELECT COUNT(DISTINCT cp.id)::int AS cnt FROM campaign_participants cp INNER JOIN campaign_sends cs ON cs.campaign_participant_id = cp.id INNER JOIN messages m ON m.id = cs.message_id AND m.status = 'read' WHERE cp.campaign_id = $1 AND cs.status = 'sent'`,
+        `SELECT COUNT(DISTINCT cp.id)::int AS cnt FROM campaign_participants cp
+         INNER JOIN campaign_sends cs ON cs.campaign_participant_id = cp.id
+         WHERE cp.campaign_id = $1 AND cs.status = 'sent'
+           AND (cs.read_at IS NOT NULL OR EXISTS (
+             SELECT 1 FROM messages m WHERE m.id = cs.message_id AND m.status = 'read'
+           ))`,
         [campaignId],
       ),
       this.pool.query(
@@ -239,9 +244,17 @@ export class CampaignScheduler {
       if (typeof val === 'string' && val.trim()) errorSample = val;
     }
 
+    const byPhase = {
+      waiting: (byStatus.pending ?? 0) + (byStatus.in_progress ?? 0) + (byStatus.awaiting_reply ?? 0),
+      sent: byStatus.sent ?? 0,
+      replied: byStatus.replied ?? 0,
+      failed: (byStatus.failed ?? 0) + (byStatus.skipped ?? 0),
+    };
+
     const stats: Record<string, unknown> = {
       total,
       byStatus,
+      byPhase,
       ...(failedCount > 0 && { error_summary: { count: failedCount, sample: errorSample } }),
       totalSends,
       contactsSent,

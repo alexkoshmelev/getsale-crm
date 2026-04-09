@@ -47,7 +47,7 @@ async function main() {
   registerExecutionRoutes(app, { db, rabbitmq, log });
   registerParticipantRoutes(app, { db, log });
 
-  await subscribeToCampaignEvents({ pool: db.write, rabbitmq, log, redis });
+  await subscribeToCampaignEvents({ pool: db.write, rabbitmq, log, redis, jobQueue });
 
   await ctx.start();
 }

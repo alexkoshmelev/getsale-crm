@@ -158,16 +158,13 @@ export interface CampaignParticipant {
   updated_at: string;
 }
 
-/** PHASE 2.5 — участник с полями для воронки (статус по этапу, даты, conversation_id). */
+/** Simplified participant phase for UI display (5 statuses). */
 export type CampaignParticipantPhase =
+  | 'waiting'
   | 'sent'
   | 'read'
   | 'replied'
-  | 'shared'
-  | 'failed'
-  | 'pending'
-  | 'scheduled'
-  | 'skipped';
+  | 'failed';
 
 export interface CampaignParticipantRow {
   participant_id: string;
@@ -191,11 +188,14 @@ export interface CampaignParticipantRow {
   next_send_at?: string | null;
   /** Total number of steps in the campaign sequence. */
   sequence_total_steps?: number;
+  /** When the latest sent message was read by the contact. */
+  read_at?: string | null;
 }
 
 export interface CampaignStats {
   total: number;
   byStatus: Record<string, number>;
+  byPhase?: { waiting: number; sent: number; replied: number; failed: number };
   /** When there are failed participants, a sample error message (e.g. PEER_FLOOD). */
   error_summary?: { count: number; sample?: string };
   totalSends?: number;
@@ -305,6 +305,8 @@ export async function removeCampaignAccount(
 
 export interface AudienceConflictRow {
   contact_id: string;
+  contact_name: string | null;
+  contact_username: string | null;
   campaign_id: string;
   campaign_name: string;
   participant_status: string;
@@ -654,6 +656,26 @@ export interface CampaignSendsPage {
   data: CampaignSendHistoryRow[];
   /** total = all rows (sent, deferred, failed); sentTotal = delivered messages only */
   pagination: { page: number; limit: number; total: number; sentTotal: number; totalPages: number };
+}
+
+export interface CampaignParticipantExportRow {
+  first_name: string | null;
+  last_name: string | null;
+  username: string | null;
+  phone: string | null;
+  email: string | null;
+  status: string;
+  display_status: string;
+  first_sent_at: string | null;
+  sender_account: string | null;
+  is_read: boolean;
+  replied_at: string | null;
+  first_reply_text: string | null;
+}
+
+export async function fetchCampaignParticipantsExport(campaignId: string): Promise<CampaignParticipantExportRow[]> {
+  const { data } = await apiClient.get<CampaignParticipantExportRow[]>(`/api/campaigns/${campaignId}/participants/export`);
+  return data;
 }
 
 export async function fetchCampaignSends(

@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import Link from 'next/link';
-import { MessageSquare, Loader2, User, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
+import { MessageSquare, Loader2, User, Trash2, ChevronDown, ChevronRight, CheckCircle2 } from 'lucide-react';
 import {
   fetchCampaignParticipantRows,
   fetchCampaignParticipantAccounts,
@@ -50,26 +50,25 @@ interface CampaignParticipantsTableProps {
   campaignId: string;
   campaign?: CampaignWithDetails | null;
   isActive: boolean;
+  refreshSignal?: number;
   onRefresh?: () => void;
   onRemoveContact?: (contactId: string) => void;
   onRemoveAll?: () => void;
 }
 
 const PHASE_KEYS: Record<CampaignParticipantPhase, string> = {
+  waiting: 'campaigns.waiting',
   sent: 'campaigns.sent',
   read: 'campaigns.read',
   replied: 'campaigns.replied',
-  shared: 'campaigns.shared',
   failed: 'campaigns.statusFailed',
-  pending: 'campaigns.participantPhasePending',
-  scheduled: 'campaigns.participantPhaseScheduled',
-  skipped: 'campaigns.participantPhaseSkipped',
 };
 
 export function CampaignParticipantsTable({
   campaignId,
   campaign,
   isActive,
+  refreshSignal,
   onRefresh,
   onRemoveContact,
   onRemoveAll,
@@ -129,7 +128,7 @@ export function CampaignParticipantsTable({
       return;
     }
     load();
-  }, [campaignId, showSelectedOnly, filter, bdAccountId, sentFrom, sentTo]);
+  }, [campaignId, showSelectedOnly, filter, bdAccountId, sentFrom, sentTo, refreshSignal]);
 
   useEffect(() => {
     if (showSelectedOnly) return;
@@ -340,6 +339,7 @@ export function CampaignParticipantsTable({
                 <th className="text-left px-4 py-3 font-medium text-foreground hidden sm:table-cell">{t('campaigns.stepShort')}</th>
                 <th className="text-left px-4 py-3 font-medium text-foreground hidden sm:table-cell">Pipeline</th>
                 <th className="text-left px-4 py-3 font-medium text-foreground hidden md:table-cell">{t('campaigns.sent')}</th>
+                <th className="text-left px-4 py-3 font-medium text-foreground hidden md:table-cell w-12">{t('campaigns.read')}</th>
                 <th className="text-left px-4 py-3 font-medium text-foreground hidden md:table-cell">{t('campaigns.replied')}</th>
                 <th className="text-left px-4 py-3 font-medium text-foreground hidden md:table-cell">{t('campaigns.nextSendAt')}</th>
                 <th className="w-24 px-4 py-3" />
@@ -369,14 +369,11 @@ export function CampaignParticipantsTable({
                     <span
                       className={clsx(
                         'inline-flex px-2 py-0.5 rounded-full text-xs font-medium',
-                        p.status_phase === 'shared' && 'bg-primary/20 text-primary',
-                        p.status_phase === 'replied' && 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400',
-                        p.status_phase === 'read' && 'bg-blue-500/15 text-blue-700 dark:text-blue-400',
+                        p.status_phase === 'waiting' && 'bg-amber-500/10 text-amber-800 dark:text-amber-200',
                         p.status_phase === 'sent' && 'bg-muted text-muted-foreground',
+                        p.status_phase === 'read' && 'bg-blue-500/15 text-blue-700 dark:text-blue-400',
+                        p.status_phase === 'replied' && 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400',
                         p.status_phase === 'failed' && 'bg-destructive/15 text-destructive',
-                        p.status_phase === 'pending' && 'bg-amber-500/10 text-amber-800 dark:text-amber-200',
-                        p.status_phase === 'scheduled' && 'bg-sky-500/10 text-sky-800 dark:text-sky-200',
-                        p.status_phase === 'skipped' && 'bg-muted/80 text-muted-foreground'
                       )}
                       title={p.status_phase === 'failed' && p.last_error ? p.last_error : undefined}
                     >
@@ -393,9 +390,16 @@ export function CampaignParticipantsTable({
                   </td>
                   <td className="px-4 py-3 text-muted-foreground hidden sm:table-cell">{p.pipeline_stage_name ?? '—'}</td>
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell">{formatDate(p.sent_at)}</td>
+                  <td className="px-4 py-3 hidden md:table-cell">
+                    {(p.read_at || p.status_phase === 'read') ? (
+                      <CheckCircle2 className="w-4 h-4 text-blue-500" title={p.read_at ? formatDate(p.read_at) : ''} />
+                    ) : (
+                      <span className="text-muted-foreground text-xs">—</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell">{formatDate(p.replied_at)}</td>
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell" title={p.next_send_at ?? undefined}>
-                    {(p.status_phase === 'pending' || p.status_phase === 'scheduled') && p.next_send_at && new Date(p.next_send_at) > new Date()
+                    {p.status_phase === 'waiting' && p.next_send_at && new Date(p.next_send_at) > new Date()
                       ? formatDate(p.next_send_at)
                       : '—'}
                   </td>

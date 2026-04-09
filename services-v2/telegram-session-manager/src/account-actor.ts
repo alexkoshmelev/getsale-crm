@@ -199,6 +199,19 @@ export class AccountActor {
         this.log.info({ message: 'Marked messages as read', accountId: this.accountId, channelId, maxId, count: result.rowCount });
         await this.invalidateCampaignStatsForChannel(channelId);
       }
+
+      // Update campaign_sends.read_at for messages that are now read
+      await this.pool.query(
+        `UPDATE campaign_sends cs SET read_at = NOW()
+         FROM messages m
+         WHERE cs.message_id = m.id
+           AND m.bd_account_id = $1 AND m.channel_id = $2
+           AND m.telegram_message_id IS NOT NULL
+           AND m.telegram_message_id ~ '^[0-9]+$'
+           AND m.telegram_message_id::bigint <= $3
+           AND cs.read_at IS NULL`,
+        [this.accountId, channelId, maxId],
+      );
     } catch (err) {
       this.log.warn({ message: 'handleReadOutbox failed', channelId, maxId, error: String(err) });
     }
@@ -361,7 +374,7 @@ export class AccountActor {
           command_type: command.type,
           wait_ms: wait,
         });
-        await new Promise((r) => setTimeout(r, Math.min(wait, 30_000)));
+        await new Promise((r) => setTimeout(r, wait));
       }
     }
 
@@ -441,6 +454,15 @@ export class AccountActor {
           command_type: command.type,
         });
 
+        // Persist flood_wait_until in DB
+        const floodUntil = new Date(Date.now() + seconds * 1000);
+        await this.pool.query(
+          `UPDATE bd_accounts SET flood_wait_until = $1, flood_wait_seconds = $2,
+                  flood_reason = $3, flood_last_at = NOW()
+           WHERE id = $4`,
+          [floodUntil, seconds, command.type, this.accountId],
+        ).catch(() => {});
+
         this.rabbitmq.publishEvent({
           id: randomUUID(),
           type: 'bd_account.flood' as EventType,
@@ -455,12 +477,45 @@ export class AccountActor {
           ...command,
           priority: command.priority,
         });
+      } else if (isPeerFloodError(err)) {
+        this.log.warn({
+          message: `PEER_FLOOD for account ${this.accountId}, triggering auto SpamBot check`,
+          command_type: command.type,
+        });
+        // Auto SpamBot check on PEER_FLOOD
+        this.handleSpambotCheckWithBackoff().catch((e) => {
+          this.log.warn({ message: 'Auto SpamBot check after PEER_FLOOD failed', error: String(e) });
+        });
+
+        // Re-queue the command (will be deferred by send_blocked_until check)
+        await this.rabbitmq.publishCommand(this.commandQueue, {
+          ...command,
+          priority: command.priority,
+        });
       } else {
         this.log.error({
           message: `Command execution failed for ${this.accountId}`,
           command_type: command.type,
           error: String(err),
         });
+
+        if (command.type === CommandType.SEND_MESSAGE && (command.payload as any)?.participantId) {
+          const participantId = (command.payload as any).participantId;
+          const errorText = String(err).slice(0, 500);
+          await this.pool.query(
+            `UPDATE campaign_sends SET status = 'failed'
+             WHERE id = (
+               SELECT id FROM campaign_sends
+               WHERE campaign_participant_id = $1 AND status = 'queued'
+               ORDER BY sent_at DESC LIMIT 1
+             )`,
+            [participantId],
+          ).catch(() => {});
+          await this.pool.query(
+            "UPDATE campaign_participants SET status = 'failed', failed_at = NOW(), last_error = $2, updated_at = NOW() WHERE id = $1 AND status NOT IN ('replied', 'sent')",
+            [participantId, errorText],
+          ).catch(() => {});
+        }
       }
     }
   }
@@ -566,7 +621,7 @@ export class AccountActor {
     if ((payload as any).participantId) {
       try {
         await this.pool.query(
-          `UPDATE campaign_sends SET message_id = $1
+          `UPDATE campaign_sends SET message_id = $1, status = 'sent'
            WHERE id = (
              SELECT id FROM campaign_sends
              WHERE campaign_participant_id = $2 AND message_id IS NULL
@@ -1317,7 +1372,72 @@ export class AccountActor {
   }
 
   private async handleSpambotCheck(_payload: AccountLifecyclePayload): Promise<void> {
-    if (!this.client?.connected) return;
+    await this.doSpambotCheck();
+  }
+
+  private async handleSpambotCheckWithBackoff(): Promise<void> {
+    const result = await this.doSpambotCheck();
+    if (result === 'restricted') {
+      // Escalating backoff: 10m -> 30m -> 1h -> 2h (then stays at 2h)
+      const retryRow = await this.pool.query(
+        'SELECT spam_check_retry_count FROM bd_accounts WHERE id = $1',
+        [this.accountId],
+      );
+      const retryCount = retryRow.rows[0]?.spam_check_retry_count ?? 0;
+      const BACKOFF_SCHEDULE = [10 * 60, 30 * 60, 60 * 60, 2 * 60 * 60]; // seconds
+      const backoffSeconds = BACKOFF_SCHEDULE[Math.min(retryCount, BACKOFF_SCHEDULE.length - 1)]!;
+      const blockedUntil = new Date(Date.now() + backoffSeconds * 1000);
+
+      await this.pool.query(
+        `UPDATE bd_accounts
+         SET send_blocked_until = $1,
+             spam_check_retry_count = spam_check_retry_count + 1,
+             spam_restricted_at = COALESCE(spam_restricted_at, NOW()),
+             spam_restriction_source = 'auto_peer_flood'
+         WHERE id = $2`,
+        [blockedUntil, this.accountId],
+      );
+
+      this.log.info({
+        message: `Account spam-blocked with backoff`,
+        accountId: this.accountId,
+        backoffSeconds,
+        retryCount: retryCount + 1,
+        blockedUntil: blockedUntil.toISOString(),
+      });
+
+      this.rabbitmq.publishEvent({
+        id: randomUUID(),
+        type: EventType.BD_ACCOUNT_SPAM_RESTRICTED,
+        timestamp: new Date(),
+        organizationId: this.organizationId,
+        userId: '',
+        data: { bdAccountId: this.accountId, source: 'peer_flood_escalation' },
+      } as unknown as Event).catch(() => {});
+    } else if (result === 'free') {
+      await this.pool.query(
+        `UPDATE bd_accounts
+         SET spam_restricted_at = NULL,
+             send_blocked_until = NULL,
+             spam_check_retry_count = 0,
+             spam_restriction_source = NULL
+         WHERE id = $1`,
+        [this.accountId],
+      );
+
+      this.rabbitmq.publishEvent({
+        id: randomUUID(),
+        type: EventType.BD_ACCOUNT_SPAM_CLEARED,
+        timestamp: new Date(),
+        organizationId: this.organizationId,
+        userId: '',
+        data: { bdAccountId: this.accountId },
+      } as unknown as Event).catch(() => {});
+    }
+  }
+
+  private async doSpambotCheck(): Promise<'free' | 'restricted' | 'error'> {
+    if (!this.client?.connected) return 'error';
 
     const SPAMBOT = 'SpamBot';
 
@@ -1355,8 +1475,10 @@ export class AccountActor {
       }
 
       this.log.info({ message: `SpamBot check completed`, accountId: this.accountId, result: isFree ? 'free' : 'restricted' });
+      return isFree ? 'free' : 'restricted';
     } catch (err) {
       this.log.warn({ message: 'SpamBot check failed', accountId: this.accountId, error: String(err) });
+      return 'error';
     }
   }
 
@@ -1389,6 +1511,11 @@ function isFloodWaitError(err: unknown): boolean {
     return err.message.includes('FloodWait') || err.constructor.name === 'FloodWaitError';
   }
   return false;
+}
+
+function isPeerFloodError(err: unknown): boolean {
+  const msg = String(err);
+  return msg.includes('PEER_FLOOD') || msg.includes('PeerFloodError');
 }
 
 function getFloodWaitSeconds(err: unknown): number {

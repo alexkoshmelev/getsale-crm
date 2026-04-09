@@ -20,11 +20,12 @@ import {
   Calendar,
   Percent,
   UserPlus,
-  History,
   Pencil,
   Trash2,
   Copy,
   RotateCcw,
+  Download,
+  Upload,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { reportError, reportWarning } from '@/lib/error-reporter';
@@ -36,17 +37,17 @@ import {
   pauseCampaign,
   updateCampaign,
   addCampaignParticipants,
-  fetchCampaignSends,
   deleteCampaign,
   duplicateCampaign,
   resetCampaignProgress,
   checkCampaignAudienceConflicts,
   enrichContactsFromTelegram,
+  fetchCampaignParticipantsExport,
   type CampaignWithDetails,
   type CampaignStats,
   type CampaignAnalytics,
-  type CampaignSendsPage,
 } from '@/lib/api/campaigns';
+import { ImportParticipantsModal } from '@/components/campaigns/ImportParticipantsModal';
 import { postSpamBotCheck } from '@/lib/api/bd-accounts';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import { canManageCampaignLifecycle } from '@/lib/permissions';
@@ -72,7 +73,7 @@ import { safeGetItem, safeSetItem } from '@/lib/safe-storage';
 
 const PRELAUNCH_SEEN_KEY = 'getsale-campaign-prelaunch-seen';
 
-type Tab = 'overview' | 'participants' | 'sequence' | 'audience' | 'sends';
+type Tab = 'overview' | 'participants' | 'sequence' | 'audience' | 'settings';
 
 /** Форматирует длительность динамически: минуты, часы, дни, недели. */
 function formatDuration(start: string, end: string, t: (key: string, opts?: Record<string, unknown>) => string): string {
@@ -164,7 +165,9 @@ export default function CampaignDetailPage() {
   const id = (Array.isArray(rawId) ? rawId[0] : rawId) ?? '';
   const tabFromUrl = (searchParams?.get('tab') || 'overview') as Tab;
   const [tab, setTab] = useState<Tab>(
-    ['overview', 'sequence', 'audience', 'participants', 'sends'].includes(tabFromUrl) ? tabFromUrl : 'overview'
+    ['overview', 'sequence', 'audience', 'settings', 'participants'].includes(tabFromUrl)
+      ? (tabFromUrl === 'audience' ? 'settings' : tabFromUrl === 'sends' ? 'participants' : tabFromUrl)
+      : 'overview'
   );
   const [campaign, setCampaign] = useState<CampaignWithDetails | null>(null);
   const [stats, setStats] = useState<CampaignStats | null>(null);
@@ -177,9 +180,9 @@ export default function CampaignDetailPage() {
   const [showAddParticipantsModal, setShowAddParticipantsModal] = useState(false);
   const [addParticipantIdsText, setAddParticipantIdsText] = useState('');
   const [addParticipantsLoading, setAddParticipantsLoading] = useState(false);
-  const [sendsPage, setSendsPage] = useState(1);
-  const [sendsData, setSendsData] = useState<CampaignSendsPage | null>(null);
-  const [sendsLoading, setSendsLoading] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [participantsRefresh, setParticipantsRefresh] = useState(0);
   const user = useAuthStore((s) => s.user);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
@@ -229,29 +232,12 @@ export default function CampaignDetailPage() {
       tabParam === 'sequence' ||
       tabParam === 'overview' ||
       tabParam === 'audience' ||
+      tabParam === 'settings' ||
       tabParam === 'participants' ||
       tabParam === 'sends'
     )
-      setTab(tabParam);
+      setTab(tabParam === 'audience' ? 'settings' : tabParam === 'sends' ? 'participants' : tabParam);
   }, [searchParams]);
-
-  const loadSends = async () => {
-    if (!id) return;
-    setSendsLoading(true);
-    try {
-      const d = await fetchCampaignSends(id, { page: sendsPage, limit: 40 });
-      setSendsData(d);
-    } catch (e) {
-      reportError(e, { component: 'CampaignPage', action: 'loadSends' });
-      setSendsData(null);
-    } finally {
-      setSendsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (id && tab === 'sends') loadSends();
-  }, [id, tab, sendsPage]);
 
   useEffect(() => {
     load();
@@ -391,6 +377,54 @@ export default function CampaignDetailPage() {
     }
   };
 
+  const handleExportCSV = async () => {
+    if (!id) return;
+    setExportLoading(true);
+    try {
+      const rows = await fetchCampaignParticipantsExport(id);
+      const header = [
+        t('campaigns.exportFirstName', { defaultValue: 'Имя' }),
+        t('campaigns.exportLastName', { defaultValue: 'Фамилия' }),
+        'Username',
+        t('campaigns.exportPhone', { defaultValue: 'Телефон' }),
+        'Email',
+        t('campaigns.status', { defaultValue: 'Статус' }),
+        t('campaigns.exportSentAt', { defaultValue: 'Дата отправки' }),
+        t('campaigns.exportSender', { defaultValue: 'Аккаунт-отправитель' }),
+        t('campaigns.exportRead', { defaultValue: 'Прочитано' }),
+        t('campaigns.exportRepliedAt', { defaultValue: 'Дата ответа' }),
+        t('campaigns.exportFirstReply', { defaultValue: 'Текст первого ответа' }),
+      ].join(';');
+      const csvRows = rows.map((r) =>
+        [
+          r.first_name ?? '',
+          r.last_name ?? '',
+          r.username ?? '',
+          r.phone ?? '',
+          r.email ?? '',
+          r.display_status ?? r.status ?? '',
+          r.first_sent_at ? new Date(r.first_sent_at).toLocaleString() : '',
+          r.sender_account ?? '',
+          r.is_read ? t('common.yes', { defaultValue: 'да' }) : t('common.no', { defaultValue: 'нет' }),
+          r.replied_at ? new Date(r.replied_at).toLocaleString() : '',
+          (r.first_reply_text ?? '').replace(/[\r\n;]/g, ' '),
+        ].join(';'),
+      );
+      const csv = [header, ...csvRows].join('\r\n');
+      const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `campaign-${id.slice(0, 8)}-export.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'exportCSV' });
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
   if (loading && !campaign) {
     return (
       <div className="flex items-center justify-center min-h-[320px]">
@@ -435,8 +469,9 @@ export default function CampaignDetailPage() {
     try {
       const { conflicts } = await checkCampaignAudienceConflicts(id, ids);
       const risky = conflicts.filter((c) => !c.is_current_campaign || c.last_sent_at != null);
-      if (risky.length > 0) {
-        const ok = window.confirm(t('campaigns.audienceConflictsHint'));
+      const uniqueRiskyContacts = new Set(risky.map((c) => c.contact_id));
+      if (uniqueRiskyContacts.size > 0) {
+        const ok = window.confirm(t('campaigns.audienceConflictsHint', { count: uniqueRiskyContacts.size }));
         if (!ok) {
           setAddParticipantsLoading(false);
           return;
@@ -592,15 +627,15 @@ export default function CampaignDetailPage() {
         </button>
         <button
           type="button"
-          onClick={() => setTab('audience')}
+          onClick={() => setTab('settings')}
           className={clsx(
             'px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors',
-            tab === 'audience'
+            tab === 'settings'
               ? 'bg-card text-foreground border border-border border-b-0 -mb-px'
               : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
           )}
         >
-          {t('campaigns.audience')}
+          {t('campaigns.settings', { defaultValue: 'Settings' })}
         </button>
         <button
           type="button"
@@ -625,21 +660,6 @@ export default function CampaignDetailPage() {
           )}
         >
           {t('campaigns.sequence')}
-        </button>
-        <button
-          type="button"
-          onClick={() => setTab('sends')}
-          className={clsx(
-            'px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors',
-            tab === 'sends'
-              ? 'bg-card text-foreground border border-border border-b-0 -mb-px'
-              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-          )}
-        >
-          <span className="inline-flex items-center gap-1.5">
-            <History className="w-3.5 h-3.5" />
-            {t('campaigns.sendHistory', { defaultValue: 'Send history' })}
-          </span>
         </button>
       </nav>
 
@@ -703,9 +723,9 @@ export default function CampaignDetailPage() {
                 </div>
               )}
 
-              {(campaign?.status === 'active' && (stats.byStatus?.failed ?? 0) > 0) && (
+              {(campaign?.status === 'active' && (stats.byPhase?.failed ?? stats.byStatus?.failed ?? 0) > 0) && (
                 <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
-                  {t('campaigns.deliveryErrorsBanner', { count: stats.byStatus.failed })}
+                  {t('campaigns.deliveryErrorsBanner', { count: stats.byPhase?.failed ?? stats.byStatus?.failed ?? 0 })}
                   {stats.error_summary?.sample && (
                     <p className="mt-2 font-medium text-amber-900 dark:text-amber-100">{stats.error_summary.sample}</p>
                   )}
@@ -859,7 +879,7 @@ export default function CampaignDetailPage() {
                       </p>
                       <p className="text-sm text-muted-foreground mt-1">
                         {t('campaigns.conversionSubtitle', {
-                          replied: stats.byStatus?.replied ?? 0,
+                          replied: stats.byPhase?.replied ?? stats.byStatus?.replied ?? 0,
                           total: stats.total,
                         })}
                       </p>
@@ -880,19 +900,20 @@ export default function CampaignDetailPage() {
                   </div>
                   <div className="bg-card p-4">
                     <p className="text-xs text-muted-foreground mb-0.5">{t('campaigns.replied')}</p>
-                    <p className="text-xl font-semibold text-foreground">{stats.byStatus?.replied ?? 0}</p>
+                    <p className="text-xl font-semibold text-foreground">{stats.byPhase?.replied ?? stats.byStatus?.replied ?? 0}</p>
                   </div>
                 </div>
               </div>
 
-              {/* Доп. статусы: ожидает, остановлено — одна строка */}
               <div className="flex flex-wrap gap-3 text-sm">
                 <span className="text-muted-foreground">
-                  {t('campaigns.statusPending')}: <strong className="text-foreground">{stats.byStatus?.pending ?? 0}</strong>
+                  {t('campaigns.waiting')}: <strong className="text-foreground">{stats.byPhase?.waiting ?? stats.byStatus?.pending ?? 0}</strong>
                 </span>
-                <span className="text-muted-foreground">
-                  {t('campaigns.stopped')}: <strong className="text-foreground">{stats.byStatus?.stopped ?? 0}</strong>
-                </span>
+                {(stats.byPhase?.failed ?? stats.byStatus?.failed ?? 0) > 0 && (
+                  <span className="text-muted-foreground">
+                    {t('campaigns.statusFailed')}: <strong className="text-foreground">{stats.byPhase?.failed ?? stats.byStatus?.failed ?? 0}</strong>
+                  </span>
+                )}
               </div>
             </>
           )}
@@ -949,10 +970,24 @@ export default function CampaignDetailPage() {
       )}
 
       {tab === 'participants' && (
+        <div className="space-y-4">
+        <div className="flex flex-wrap gap-2 items-center">
+          {canAddParticipants && (
+            <Button variant="outline" onClick={() => setShowImportModal(true)} disabled={actionLoading}>
+              <Upload className="w-4 h-4 mr-2" />
+              {t('campaigns.importParticipants', { defaultValue: 'Import' })}
+            </Button>
+          )}
+          <Button variant="outline" onClick={handleExportCSV} disabled={exportLoading}>
+            {exportLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Download className="w-4 h-4 mr-2" />}
+            {t('campaigns.exportCSV', { defaultValue: 'Export CSV' })}
+          </Button>
+        </div>
         <CampaignParticipantsTable
           campaignId={id}
           campaign={campaign}
           isActive={isActive}
+          refreshSignal={participantsRefresh}
           onRefresh={load}
           onRemoveContact={
             id && (campaign?.status === 'draft' || campaign?.status === 'paused')
@@ -995,9 +1030,10 @@ export default function CampaignDetailPage() {
               : undefined
           }
         />
+        </div>
       )}
 
-      {tab === 'audience' && (
+      {tab === 'settings' && (
         <CampaignAudienceSchedule campaignId={id} campaign={campaign} onUpdate={load} />
       )}
 
@@ -1009,113 +1045,6 @@ export default function CampaignDetailPage() {
           sequences={campaign.sequences || []}
           onUpdate={load}
         />
-      )}
-
-      {tab === 'sends' && (
-        <div className="rounded-xl border border-border bg-card overflow-hidden">
-          <div className="p-4 border-b border-border flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h3 className="font-medium text-foreground">{t('campaigns.sendHistory', { defaultValue: 'Send history' })}</h3>
-              <p className="text-xs text-muted-foreground mt-0.5">{t('campaigns.sendHistoryChronological')}</p>
-            </div>
-            {sendsData && (
-              <span className="text-xs text-muted-foreground">
-                {t('campaigns.sendHistoryTotalAudit', {
-                  count: sendsData.pagination.total,
-                  sent: sendsData.pagination.sentTotal ?? sendsData.pagination.total,
-                  defaultValue: '{{count}} events ({{sent}} delivered)',
-                })}
-              </span>
-            )}
-          </div>
-          {sendsLoading ? (
-            <div className="flex justify-center py-16">
-              <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
-            </div>
-          ) : sendsData && sendsData.data.length === 0 ? (
-            <p className="p-6 text-sm text-muted-foreground">{t('common.noData')}</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border bg-muted/30 text-left text-muted-foreground">
-                    <th className="p-3 font-medium">{t('campaigns.sentAt', { defaultValue: 'Sent' })}</th>
-                    <th className="p-3 font-medium">{t('campaigns.contact', { defaultValue: 'Contact' })}</th>
-                    <th className="p-3 font-medium">{t('campaigns.step', { defaultValue: 'Step' })}</th>
-                    <th className="p-3 font-medium">{t('campaigns.status', { defaultValue: 'Status' })}</th>
-                    <th className="p-3 font-medium">{t('campaigns.message', { defaultValue: 'Message' })}</th>
-                    <th className="p-3 font-medium hidden lg:table-cell">{t('campaigns.sendHistoryMeta')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(sendsData?.data ?? []).map((row) => {
-                    const dir = (row as Record<string, unknown>).messageDirection as string | null;
-                    const pStatus = (row as Record<string, unknown>).participantStatus as string | null;
-                    const statusLabel = pStatus === 'replied' ? t('campaigns.replied')
-                      : row.messageStatus === 'read' ? t('campaigns.read')
-                      : row.messageStatus === 'delivered' ? t('campaigns.delivered', { defaultValue: 'Доставлено' })
-                      : row.status === 'sent' ? t('campaigns.sent')
-                      : row.status;
-                    const msgPreview = row.messageContent
-                      ? (dir === 'inbound' ? `← ${row.messageContent}` : row.messageContent)
-                      : '—';
-                    const metaStr = row.metadata && typeof row.metadata === 'object' && Object.keys(row.metadata).length > 0
-                      ? ('event' in row.metadata ? String((row.metadata as { event?: string }).event ?? '') : JSON.stringify(row.metadata).slice(0, 80))
-                      : null;
-                    return (
-                    <tr key={row.sendId} className="border-b border-border/80">
-                      <td className="p-3 whitespace-nowrap text-muted-foreground">{formatDateTime(row.sentAt)}</td>
-                      <td className="p-3 max-w-[140px] truncate" title={row.contactName}>
-                        {row.contactName}
-                      </td>
-                      <td className="p-3 tabular-nums">{row.sequenceStep + 1}</td>
-                      <td className="p-3">
-                        <span className={clsx('inline-flex px-2 py-0.5 rounded-full text-xs font-medium',
-                          pStatus === 'replied' && 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400',
-                          row.messageStatus === 'read' && pStatus !== 'replied' && 'bg-blue-500/15 text-blue-700 dark:text-blue-400',
-                          row.status === 'sent' && pStatus !== 'replied' && row.messageStatus !== 'read' && 'bg-muted text-muted-foreground',
-                          row.status === 'failed' && 'bg-destructive/15 text-destructive',
-                        )}>
-                          {statusLabel}
-                        </span>
-                      </td>
-                      <td className="p-3 max-w-md truncate text-muted-foreground" title={row.messageContent ?? ''}>
-                        {msgPreview}
-                      </td>
-                      <td className="p-3 max-w-[200px] text-xs text-muted-foreground hidden lg:table-cell truncate" title={metaStr ?? ''}>
-                        {metaStr || '—'}
-                      </td>
-                    </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {sendsData && sendsData.pagination.totalPages > 1 && (
-            <div className="p-3 flex justify-center gap-2 border-t border-border">
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={sendsPage <= 1}
-                onClick={() => setSendsPage((p) => Math.max(1, p - 1))}
-              >
-                {t('common.prev', { defaultValue: 'Previous' })}
-              </Button>
-              <span className="text-sm text-muted-foreground self-center px-2">
-                {sendsPage} / {sendsData.pagination.totalPages}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={sendsPage >= sendsData.pagination.totalPages}
-                onClick={() => setSendsPage((p) => p + 1)}
-              >
-                {t('common.next', { defaultValue: 'Next' })}
-              </Button>
-            </div>
-          )}
-        </div>
       )}
 
       <Modal
@@ -1148,6 +1077,13 @@ export default function CampaignDetailPage() {
           </div>
         </div>
       </Modal>
+
+      <ImportParticipantsModal
+        campaignId={id}
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onImported={() => { void load(); setParticipantsRefresh((n) => n + 1); }}
+      />
 
       <Modal
         isOpen={showPreLaunchModal}

@@ -319,13 +319,16 @@ export function registerStaticDataRoutes(app: FastifyInstance, deps: Deps): void
 
     const result = await db.read.query(
       `SELECT cp.contact_id::text AS contact_id,
+              COALESCE(NULLIF(TRIM(ct.display_name), ''), NULLIF(TRIM(CONCAT(COALESCE(ct.first_name,''), ' ', COALESCE(ct.last_name,''))), ''), ct.username, ct.telegram_id::text) AS contact_name,
+              ct.username AS contact_username,
               c.id::text AS campaign_id,
               c.name AS campaign_name,
               cp.status AS participant_status,
-              (SELECT MAX(cs.sent_at) FROM campaign_sends cs WHERE cs.campaign_participant_id = cp.id AND cs.status = 'sent') AS last_sent_at,
+              (SELECT MAX(cs.sent_at) FROM campaign_sends cs WHERE cs.campaign_participant_id = cp.id AND cs.status IN ('sent', 'queued')) AS last_sent_at,
               (c.id = $3::uuid) AS is_current_campaign
        FROM campaign_participants cp
        JOIN campaigns c ON c.id = cp.campaign_id
+       JOIN contacts ct ON ct.id = cp.contact_id
        WHERE cp.contact_id = ANY($1::uuid[])
          AND c.organization_id = $2
          AND c.deleted_at IS NULL
