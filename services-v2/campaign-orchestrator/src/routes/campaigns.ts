@@ -762,14 +762,96 @@ export function registerCampaignRoutes(app: FastifyInstance, deps: Deps): void {
         throw new AppError(400, 'No participants could be added. Ensure contacts have Telegram data and an active BD account is selected.', ErrorCodes.BAD_REQUEST);
       }
     } else {
-      log.info({ message: `Campaign ${id} already has ${existingParticipantCount} participants, skipping audience insertion` });
+      log.info({ message: `Campaign ${id} already has ${existingParticipantCount} participants, enriching missing data` });
+
+      const bdAccountIdsRaw = audience.bdAccountIds ?? (audience.bdAccountId ? [audience.bdAccountId] : []);
+      const bdAccountIdsFiltered = bdAccountIdsRaw.filter((x): x is string => typeof x === 'string');
+      let accountIds: string[] = [];
+      if (bdAccountIdsFiltered.length > 0) {
+        const check = await db.read.query(
+          'SELECT id FROM bd_accounts WHERE id = ANY($1::uuid[]) AND organization_id = $2 AND is_active = true',
+          [bdAccountIdsFiltered, user.organizationId],
+        );
+        const order = new Map(bdAccountIdsFiltered.map((x, i) => [x, i]));
+        accountIds = (check.rows as { id: string }[])
+          .map((r) => r.id)
+          .sort((a, b) => (order.get(a) ?? 999) - (order.get(b) ?? 999));
+      }
+      if (accountIds.length === 0) {
+        const fallback = await db.read.query(
+          'SELECT id FROM bd_accounts WHERE organization_id = $1 AND is_active = true LIMIT 1',
+          [user.organizationId],
+        );
+        accountIds = fallback.rows.length > 0 ? [(fallback.rows[0] as { id: string }).id] : [];
+      }
+
+      const incomplete = await db.read.query(
+        `SELECT cp.id, cp.contact_id, cp.bd_account_id, cp.channel_id
+         FROM campaign_participants cp
+         WHERE cp.campaign_id = $1
+           AND cp.status = 'pending'
+           AND (cp.channel_id IS NULL OR cp.bd_account_id IS NULL)`,
+        [id],
+      );
+
+      let enrichedCount = 0;
+      for (const row of incomplete.rows as { id: string; contact_id: string; bd_account_id: string | null; channel_id: string | null }[]) {
+        let bdAccountId = row.bd_account_id;
+        if (!bdAccountId && accountIds.length > 0) {
+          bdAccountId = accountIds[enrichedCount % accountIds.length]!;
+        }
+
+        let channelId = row.channel_id;
+        if (!channelId) {
+          const contactRes = await db.read.query(
+            'SELECT telegram_id, username FROM contacts WHERE id = $1',
+            [row.contact_id],
+          );
+          const ct = contactRes.rows[0] as { telegram_id: string | null; username: string | null } | undefined;
+          if (ct) {
+            const telegramIdNorm = ct.telegram_id != null && String(ct.telegram_id).trim() !== '' ? String(ct.telegram_id).trim() : null;
+            const usernameNorm = ct.username != null && ct.username.trim().replace(/^@/, '') !== '' ? ct.username.trim().replace(/^@/, '') : null;
+            channelId = telegramIdNorm ?? usernameNorm;
+
+            if (channelId && bdAccountId) {
+              const chatRes = await db.read.query(
+                'SELECT telegram_chat_id FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+                [bdAccountId, channelId],
+              );
+              if (chatRes.rows.length > 0) {
+                channelId = String((chatRes.rows[0] as { telegram_chat_id: string }).telegram_chat_id);
+              }
+            }
+          }
+        }
+
+        if (!channelId || !bdAccountId) {
+          await db.write.query(
+            "UPDATE campaign_participants SET status = 'skipped', last_error = 'No channel_id or bd_account_id could be resolved', updated_at = NOW() WHERE id = $1",
+            [row.id],
+          );
+          continue;
+        }
+
+        await db.write.query(
+          'UPDATE campaign_participants SET bd_account_id = $1, channel_id = $2, updated_at = NOW() WHERE id = $3',
+          [bdAccountId, channelId, row.id],
+        );
+        enrichedCount++;
+      }
+
+      log.info({ message: `Enriched ${enrichedCount}/${incomplete.rows.length} participants for campaign ${id}` });
     }
 
-    if (existingParticipantCount === 0 && insertedCount === 0) {
-      throw new AppError(400, 'No participants to send to. Import contacts first.', ErrorCodes.BAD_REQUEST);
+    const totalReady = await db.read.query(
+      "SELECT COUNT(*)::int AS c FROM campaign_participants WHERE campaign_id = $1 AND status = 'pending'",
+      [id],
+    );
+    if (Number((totalReady.rows[0] as { c?: number })?.c ?? 0) === 0) {
+      throw new AppError(400, 'No participants ready to send to. Ensure contacts have Telegram data and an active BD account is selected.', ErrorCodes.BAD_REQUEST);
     }
 
-    log.info({ message: `Campaign ${id}: ${insertedCount} new + ${existingParticipantCount} existing participants` });
+    log.info({ message: `Campaign ${id}: ready to schedule` });
 
     const scheduled = await scheduler.scheduleCampaign(id);
 

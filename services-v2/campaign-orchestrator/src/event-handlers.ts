@@ -5,6 +5,14 @@ import { type RabbitMQClient } from '@getsale/queue';
 import { RedisClient } from '@getsale/cache';
 import { JobQueue } from '@getsale/queue';
 import { type CampaignJobData } from './scheduler';
+import { randomUUID } from 'node:crypto';
+
+const TELEGRAM_SPAMBOT_USER_ID = '178220800';
+const IGNORED_BOT_IDS = new Set([
+  TELEGRAM_SPAMBOT_USER_ID,
+  '777000',    // Telegram service notifications
+]);
+const CHANNEL_TELEGRAM = 'telegram';
 
 interface Deps {
   pool: Pool;
@@ -38,8 +46,13 @@ export async function subscribeToCampaignEvents(deps: Deps): Promise<void> {
       const channelId = data.channelId ?? null;
       if (!bdAccountId || !channelId) return;
 
+      if (IGNORED_BOT_IDS.has(String(channelId))) return;
+
+      const senderTelegramId = (data as any).senderTelegramId ?? (data as any).telegramUserId ?? null;
+      if (senderTelegramId && IGNORED_BOT_IDS.has(String(senderTelegramId))) return;
+
       try {
-        await handleCampaignReply(pool, log, redis, jobQueue, {
+        await handleCampaignReply(pool, log, redis, jobQueue, rabbitmq, {
           organizationId: orgId,
           bdAccountId,
           channelId,
@@ -61,6 +74,7 @@ async function handleCampaignReply(
   log: Logger,
   redis: RedisClient,
   jobQueue: JobQueue<CampaignJobData>,
+  rabbitmq: RabbitMQClient,
   opts: { organizationId: string; bdAccountId: string; channelId: string; contactId: string | null },
 ): Promise<void> {
   const { organizationId, bdAccountId, channelId, contactId } = opts;
@@ -195,6 +209,109 @@ async function handleCampaignReply(
       });
     }
 
+    await tryCreateLeadOnReply(pool, log, rabbitmq, {
+      campaignId: p.campaign_id,
+      contactId: p.contact_id,
+      bdAccountId: opts.bdAccountId,
+      channelId: opts.channelId,
+    });
+
     await redis.del(`campaign:stats:${p.campaign_id}`);
+  }
+}
+
+async function tryCreateLeadOnReply(
+  pool: Pool,
+  log: Logger,
+  rabbitmq: RabbitMQClient,
+  opts: { campaignId: string; contactId: string; bdAccountId: string; channelId: string },
+): Promise<void> {
+  try {
+    const camp = await pool.query(
+      'SELECT organization_id, pipeline_id, lead_creation_settings FROM campaigns WHERE id = $1',
+      [opts.campaignId],
+    );
+    const c = camp.rows[0] as { organization_id: string; pipeline_id: string | null; lead_creation_settings: any } | undefined;
+    if (!c) return;
+
+    const lcs = c.lead_creation_settings as { trigger?: string; default_stage_id?: string; default_responsible_id?: string } | null;
+    if (!lcs || lcs.trigger !== 'on_reply' || !c.pipeline_id) return;
+
+    const existing = await pool.query(
+      'SELECT id FROM leads WHERE contact_id = $1 AND pipeline_id = $2 AND organization_id = $3 LIMIT 1',
+      [opts.contactId, c.pipeline_id, c.organization_id],
+    );
+    if (existing.rows.length > 0) return;
+
+    let stageId = lcs.default_stage_id || null;
+    if (!stageId) {
+      const stageRow = await pool.query(
+        'SELECT id FROM stages WHERE pipeline_id = $1 AND organization_id = $2 ORDER BY order_index ASC LIMIT 1',
+        [c.pipeline_id, c.organization_id],
+      );
+      stageId = (stageRow.rows[0] as { id: string } | undefined)?.id ?? null;
+    }
+    if (!stageId) return;
+
+    const userRow = await pool.query('SELECT id FROM users WHERE organization_id = $1 LIMIT 1', [c.organization_id]);
+    const systemUserId = (userRow.rows[0] as { id: string } | undefined)?.id ?? '';
+
+    const responsibleId = lcs.default_responsible_id || systemUserId;
+
+    const maxOrder = await pool.query(
+      'SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM leads WHERE stage_id = $1',
+      [stageId],
+    );
+    const orderIndex = (maxOrder.rows[0] as { next: number })?.next ?? 0;
+
+    const result = await pool.query(
+      `INSERT INTO leads (organization_id, contact_id, pipeline_id, stage_id, order_index, responsible_id)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [c.organization_id, opts.contactId, c.pipeline_id, stageId, orderIndex, responsibleId],
+    );
+    const leadId = (result.rows[0] as { id: string })?.id;
+    if (!leadId) return;
+
+    let conversationId: string | null = null;
+    if (opts.bdAccountId && opts.channelId) {
+      const conv = await pool.query(
+        `SELECT id FROM conversations WHERE organization_id = $1 AND bd_account_id = $2::uuid AND channel = $3 AND channel_id = $4 LIMIT 1`,
+        [c.organization_id, opts.bdAccountId, CHANNEL_TELEGRAM, opts.channelId],
+      );
+      conversationId = (conv.rows[0] as { id: string } | undefined)?.id ?? null;
+    }
+
+    const repliedAt = new Date();
+    await pool.query(
+      `INSERT INTO lead_activity_log (id, lead_id, type, metadata, created_at) VALUES (gen_random_uuid(), $1, 'campaign_reply_received', $2, $3)`,
+      [leadId, JSON.stringify({ campaign_id: opts.campaignId }), repliedAt],
+    ).catch((e) => log.warn({ message: 'Lead activity log insert error', error: String(e) }));
+
+    await pool.query(
+      `INSERT INTO lead_activity_log (id, lead_id, type, metadata, created_at) VALUES (gen_random_uuid(), $1, 'lead_created', $2, $3)`,
+      [leadId, JSON.stringify({ source: 'campaign', campaign_id: opts.campaignId, conversation_id: conversationId }), repliedAt],
+    ).catch((e) => log.warn({ message: 'Lead activity log insert error', error: String(e) }));
+
+    rabbitmq.publishEvent({
+      id: randomUUID(),
+      type: EventType.LEAD_CREATED_FROM_CAMPAIGN,
+      timestamp: repliedAt,
+      organizationId: c.organization_id,
+      userId: systemUserId,
+      data: {
+        leadId,
+        contactId: opts.contactId,
+        campaignId: opts.campaignId,
+        organizationId: c.organization_id,
+        conversationId: conversationId ?? undefined,
+        pipelineId: c.pipeline_id,
+        stageId,
+        repliedAt: repliedAt.toISOString(),
+      },
+    } as any).catch((e) => log.warn({ message: 'LEAD_CREATED_FROM_CAMPAIGN publish error', error: String(e) }));
+
+    log.info({ message: 'Lead created from campaign reply', leadId, campaignId: opts.campaignId, contactId: opts.contactId });
+  } catch (err) {
+    log.warn({ message: 'Lead creation on reply failed', error: String(err), campaignId: opts.campaignId });
   }
 }
