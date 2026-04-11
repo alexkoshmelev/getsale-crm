@@ -7,7 +7,7 @@ import { RabbitMQClient } from '@getsale/queue';
 import { RedisClient } from '@getsale/cache';
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
-import { NewMessage, type NewMessageEvent } from 'telegram/events';
+import { NewMessage, Raw, type NewMessageEvent } from 'telegram/events';
 import {
   decryptIfNeeded, encryptSession,
   buildTelegramProxy, buildGramJsClientOptions, destroyTelegramClient,
@@ -135,7 +135,11 @@ export class AccountActor {
     if (!me) throw new Error(`getMe() returned null for account ${this.accountId}`);
 
     this.registerInboundHandler();
+    this.registerOutboundHandler();
     this.registerReadReceiptHandler();
+    this.registerDeleteHandler();
+    this.registerEditHandler();
+    this.registerPresenceHandlers();
     await this.updateProfileInfo(me, row.phone_number);
     this.startSessionSaveLoop();
     this.startKeepaliveLoop();
@@ -180,6 +184,368 @@ export class AccountActor {
         this.log.warn({ message: 'Read receipt handler error', error: String(err) });
       }
     });
+  }
+
+  private async isChatAllowed(channelId: string): Promise<boolean> {
+    if (!channelId) return false;
+    const res = await this.pool.query(
+      'SELECT 1 FROM bd_account_sync_chats WHERE bd_account_id = $1 AND telegram_chat_id = $2 LIMIT 1',
+      [this.accountId, channelId],
+    );
+    return res.rows.length > 0;
+  }
+
+  private async tryMigrateSyncChatUsernameAliases(numericChatId: string, username: string | null | undefined): Promise<void> {
+    const u = (username || '').trim();
+    if (!u) return;
+    const aliases = [`@${u}`, u];
+    try {
+      await this.pool.query(
+        `UPDATE bd_account_sync_chats SET telegram_chat_id = $3, sync_list_origin = 'outbound_send'
+         WHERE bd_account_id = $1 AND telegram_chat_id = ANY($2::text[])`,
+        [this.accountId, aliases, numericChatId],
+      );
+      await this.pool.query(
+        `UPDATE messages SET channel_id = $3, updated_at = NOW()
+         WHERE bd_account_id = $1 AND channel = 'telegram' AND channel_id = ANY($2::text[])`,
+        [this.accountId, aliases, numericChatId],
+      );
+      await this.pool.query(
+        `UPDATE conversations SET channel_id = $3, updated_at = NOW()
+         WHERE bd_account_id IS NOT DISTINCT FROM $1::uuid AND channel = 'telegram' AND channel_id = ANY($2::text[])
+           AND NOT EXISTS (
+             SELECT 1 FROM conversations c2
+             WHERE c2.organization_id = conversations.organization_id
+               AND c2.bd_account_id IS NOT DISTINCT FROM $1::uuid
+               AND c2.channel = 'telegram' AND c2.channel_id = $3
+           )`,
+        [this.accountId, aliases, numericChatId],
+      );
+    } catch (err) {
+      this.log.warn({ message: 'tryMigrateSyncChatUsernameAliases failed', numericChatId, username: u, error: String(err) });
+    }
+  }
+
+  private async isChatAllowedWithMigration(chatId: string, event: any): Promise<boolean> {
+    let allowed = await this.isChatAllowed(chatId);
+    if (!allowed && /^[0-9]+$/.test(chatId) && this.client?.connected) {
+      try {
+        const ent = await this.client.getEntity(parseInt(chatId, 10));
+        if (ent && (ent as { className?: string }).className === 'User') {
+          await this.tryMigrateSyncChatUsernameAliases(chatId, (ent as Api.User).username ?? undefined);
+          allowed = await this.isChatAllowed(chatId);
+        }
+      } catch {}
+    }
+    return allowed;
+  }
+
+  private registerOutboundHandler(): void {
+    try {
+      this.client!.addEventHandler(
+        async (event: NewMessageEvent) => {
+          try {
+            await this.handleOutboundMessage(event);
+          } catch (err) {
+            this.log.warn({ message: 'Outbound message handler error', error: String(err) });
+          }
+        },
+        new NewMessage({ incoming: false }),
+      );
+    } catch (err) {
+      this.log.warn({ message: `Could not register outbound handler for ${this.accountId}`, error: String(err) });
+    }
+  }
+
+  private async handleOutboundMessage(event: NewMessageEvent): Promise<void> {
+    const msg = event.message;
+    if (!msg) return;
+
+    const chatId = msg.chatId?.toString() ?? '';
+    if (!chatId) return;
+
+    const text = msg.text ?? '';
+    const messageId = randomUUID();
+    const serialized = serializeMessage(msg);
+
+    await this.pool.query(
+      `INSERT INTO messages
+        (id, organization_id, content, direction, bd_account_id, channel_id, channel, telegram_message_id,
+         telegram_entities, telegram_media, reply_to_msg_id, created_at)
+       VALUES ($1, $2, $3, 'outbound', $4, $5, 'telegram', $6, $7, $8, $9, NOW())
+       ON CONFLICT DO NOTHING`,
+      [messageId, this.organizationId, text, this.accountId, chatId, msg.id,
+       serialized.telegram_entities, serialized.telegram_media, serialized.reply_to_msg_id],
+    );
+
+    await this.ensureConversation({
+      organizationId: this.organizationId,
+      bdAccountId: this.accountId,
+      channel: 'telegram',
+      channelId: chatId,
+      contactId: null,
+    });
+
+    await this.rabbitmq.publishEvent({
+      id: randomUUID(),
+      type: EventType.MESSAGE_SENT,
+      timestamp: new Date(),
+      organizationId: this.organizationId,
+      userId: '',
+      data: {
+        messageId,
+        channel: 'telegram',
+        channelId: chatId,
+        bdAccountId: this.accountId,
+        content: text,
+        direction: 'outbound',
+        telegramMessageId: msg.id,
+      },
+    } as unknown as Event);
+  }
+
+  private registerDeleteHandler(): void {
+    try {
+      this.client!.addEventHandler(
+        async (event: any) => {
+          try {
+            if (!this.client?.connected) return;
+            const ids = event?.messages ?? [];
+            if (!Array.isArray(ids) || ids.length === 0) return;
+            const telegramIds = ids.map((id: any) => Number(id)).filter((id: number) => id > 0);
+            if (telegramIds.length === 0) return;
+
+            const deleted = await this.pool.query(
+              `DELETE FROM messages
+               WHERE bd_account_id = $1 AND organization_id = $2
+                 AND telegram_message_id::text = ANY($3::text[])
+               RETURNING id, organization_id, channel_id, telegram_message_id`,
+              [this.accountId, this.organizationId, telegramIds.map(String)],
+            );
+
+            for (const row of deleted.rows as { id: string; organization_id: string; channel_id: string; telegram_message_id: string }[]) {
+              await this.rabbitmq.publishEvent({
+                id: randomUUID(),
+                type: EventType.MESSAGE_DELETED,
+                timestamp: new Date(),
+                organizationId: row.organization_id,
+                data: { messageId: row.id, bdAccountId: this.accountId, channelId: row.channel_id, telegramMessageId: row.telegram_message_id },
+              } as unknown as Event);
+            }
+          } catch (err) {
+            this.log.warn({ message: 'Delete handler error', error: String(err) });
+          }
+        },
+        new Raw({ types: [Api.UpdateDeleteMessages], func: () => true }),
+      );
+    } catch (err) {
+      this.log.warn({ message: `Could not register delete handler for ${this.accountId}`, error: String(err) });
+    }
+
+    try {
+      const UpdateDeleteChannelMessages = (Api as any).UpdateDeleteChannelMessages;
+      if (UpdateDeleteChannelMessages) {
+        this.client!.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!this.client?.connected) return;
+              const channelIdRaw = event?.channelId;
+              const ids = event?.messages ?? [];
+              if (channelIdRaw == null || !Array.isArray(ids) || ids.length === 0) return;
+              const channelIdStr = String(channelIdRaw.value ?? channelIdRaw);
+              const telegramIds = ids.map((id: any) => Number(id)).filter((id: number) => id > 0);
+              if (telegramIds.length === 0) return;
+
+              const deleted = await this.pool.query(
+                `DELETE FROM messages
+                 WHERE bd_account_id = $1 AND organization_id = $2 AND channel_id = $3
+                   AND telegram_message_id::text = ANY($4::text[])
+                 RETURNING id, organization_id, channel_id, telegram_message_id`,
+                [this.accountId, this.organizationId, channelIdStr, telegramIds.map(String)],
+              );
+
+              for (const row of deleted.rows as { id: string; organization_id: string; channel_id: string; telegram_message_id: string }[]) {
+                await this.rabbitmq.publishEvent({
+                  id: randomUUID(),
+                  type: EventType.MESSAGE_DELETED,
+                  timestamp: new Date(),
+                  organizationId: row.organization_id,
+                  data: { messageId: row.id, bdAccountId: this.accountId, channelId: row.channel_id, telegramMessageId: row.telegram_message_id },
+                } as unknown as Event);
+              }
+            } catch (err) {
+              this.log.warn({ message: 'Delete channel handler error', error: String(err) });
+            }
+          },
+          new Raw({ types: [UpdateDeleteChannelMessages], func: () => true }),
+        );
+      }
+    } catch {
+      // UpdateDeleteChannelMessages may not exist in some GramJS versions
+    }
+  }
+
+  private registerEditHandler(): void {
+    try {
+      const EditTypes = [Api.UpdateEditMessage, (Api as any).UpdateEditChannelMessage].filter(Boolean);
+      if (EditTypes.length === 0) return;
+
+      this.client!.addEventHandler(
+        async (update: any) => {
+          try {
+            if (!this.client?.connected) return;
+            const message = update?.message;
+            if (!message?.id) return;
+
+            let channelId = '';
+            if (message.peerId) {
+              if (message.peerId instanceof Api.PeerUser) channelId = String(message.peerId.userId);
+              else if (message.peerId instanceof Api.PeerChat) channelId = String(message.peerId.chatId);
+              else if (message.peerId instanceof Api.PeerChannel) channelId = String(message.peerId.channelId);
+            }
+
+            const content = getMessageText(message) || '';
+            const telegramEntities = message.entities ? JSON.stringify(message.entities) : null;
+            const telegramMedia = message.media ? JSON.stringify((message.media as any).toJSON?.() ?? message.media) : null;
+
+            const result = await this.pool.query(
+              `UPDATE messages
+               SET content = $1, telegram_entities = $2, telegram_media = $3, updated_at = NOW()
+               WHERE bd_account_id = $4 AND organization_id = $5
+                 AND channel_id = $6 AND telegram_message_id = $7::text
+               RETURNING id, organization_id`,
+              [content, telegramEntities, telegramMedia, this.accountId, this.organizationId, channelId, String(message.id)],
+            );
+
+            if (result.rows.length > 0) {
+              const row = result.rows[0] as { id: string; organization_id: string };
+              await this.rabbitmq.publishEvent({
+                id: randomUUID(),
+                type: EventType.MESSAGE_EDITED,
+                timestamp: new Date(),
+                organizationId: row.organization_id,
+                data: { messageId: row.id, bdAccountId: this.accountId, channelId, content, telegramMessageId: message.id },
+              } as unknown as Event);
+            }
+          } catch (err) {
+            this.log.warn({ message: 'Edit handler error', error: String(err) });
+          }
+        },
+        new Raw({ types: EditTypes, func: () => true }),
+      );
+    } catch (err) {
+      this.log.warn({ message: `Could not register edit handler for ${this.accountId}`, error: String(err) });
+    }
+  }
+
+  private registerPresenceHandlers(): void {
+    const ApiAny = Api as any;
+    const publishUpdate = async (data: Record<string, any>) => {
+      await this.rabbitmq.publishEvent({
+        id: randomUUID(),
+        type: EventType.BD_ACCOUNT_TELEGRAM_UPDATE,
+        timestamp: new Date(),
+        organizationId: this.organizationId,
+        data: { ...data, bdAccountId: this.accountId, organizationId: this.organizationId },
+      } as unknown as Event);
+    };
+
+    // User typing
+    if (ApiAny.UpdateUserTyping) {
+      try {
+        this.client!.addEventHandler(async (event: any) => {
+          try {
+            const userId = event?.userId ?? event?.user_id;
+            const channelId = userId != null ? String(userId.value ?? userId) : '';
+            if (!channelId) return;
+            const action = event?.action?.className ?? '';
+            await publishUpdate({ updateKind: 'typing', channelId, userId: channelId, action: action || undefined });
+          } catch {}
+        }, new Raw({ types: [ApiAny.UpdateUserTyping], func: () => true }));
+      } catch {}
+    }
+
+    // Chat typing
+    if (ApiAny.UpdateChatUserTyping) {
+      try {
+        this.client!.addEventHandler(async (event: any) => {
+          try {
+            const chatIdRaw = event?.chatId ?? event?.chat_id;
+            const channelId = chatIdRaw != null ? String(chatIdRaw.value ?? chatIdRaw) : '';
+            if (!channelId) return;
+            const fromId = event?.fromId ?? event?.from_id;
+            let userId: string | undefined;
+            if (fromId?.userId != null) userId = String(fromId.userId.value ?? fromId.userId);
+            const action = event?.action?.className ?? '';
+            await publishUpdate({ updateKind: 'typing', channelId, userId, action: action || undefined });
+          } catch {}
+        }, new Raw({ types: [ApiAny.UpdateChatUserTyping], func: () => true }));
+      } catch {}
+    }
+
+    // User status (online/offline)
+    if (ApiAny.UpdateUserStatus) {
+      try {
+        this.client!.addEventHandler(async (event: any) => {
+          try {
+            const userId = event?.userId ?? event?.user_id;
+            if (userId == null) return;
+            const status = event?.status?.className ?? '';
+            const expires = event?.status?.expires ?? event?.status?.until ?? undefined;
+            await publishUpdate({ updateKind: 'user_status', userId: String(userId.value ?? userId), status: status || undefined, expires: typeof expires === 'number' ? expires : undefined });
+          } catch {}
+        }, new Raw({ types: [ApiAny.UpdateUserStatus], func: () => true }));
+      } catch {}
+    }
+
+    // Read inbox
+    if (ApiAny.UpdateReadHistoryInbox) {
+      try {
+        this.client!.addEventHandler(async (event: any) => {
+          try {
+            const peer = event?.peer;
+            let channelId = '';
+            if (peer?.userId != null) channelId = String(peer.userId.value ?? peer.userId);
+            else if (peer?.chatId != null) channelId = String(peer.chatId.value ?? peer.chatId);
+            else if (peer?.channelId != null) channelId = String(peer.channelId.value ?? peer.channelId);
+            if (!channelId) return;
+            const maxId = event?.maxId ?? event?.max_id ?? 0;
+            await publishUpdate({ updateKind: 'read_inbox', channelId, maxId });
+          } catch {}
+        }, new Raw({ types: [ApiAny.UpdateReadHistoryInbox], func: () => true }));
+      } catch {}
+    }
+
+    // Read channel inbox
+    if (ApiAny.UpdateReadChannelInbox) {
+      try {
+        this.client!.addEventHandler(async (event: any) => {
+          try {
+            const channelIdRaw = event?.channelId ?? event?.channel_id;
+            const channelId = channelIdRaw != null ? String(channelIdRaw.value ?? channelIdRaw) : '';
+            if (!channelId) return;
+            const maxId = event?.maxId ?? event?.max_id ?? 0;
+            await publishUpdate({ updateKind: 'read_channel_inbox', channelId, maxId });
+          } catch {}
+        }, new Raw({ types: [ApiAny.UpdateReadChannelInbox], func: () => true }));
+      } catch {}
+    }
+
+    // Draft messages
+    if (ApiAny.UpdateDraftMessage) {
+      try {
+        this.client!.addEventHandler(async (event: any) => {
+          try {
+            const peer = event?.peer;
+            let channelId = '';
+            if (peer?.userId != null) channelId = String(peer.userId.value ?? peer.userId);
+            else if (peer?.chatId != null) channelId = String(peer.chatId.value ?? peer.chatId);
+            if (!channelId) return;
+            await publishUpdate({ updateKind: 'draft', channelId });
+          } catch {}
+        }, new Raw({ types: [ApiAny.UpdateDraftMessage], func: () => true }));
+      } catch {}
+    }
   }
 
   private async handleReadOutbox(channelId: string, maxId: number): Promise<void> {
@@ -236,15 +602,37 @@ export class AccountActor {
     if (!msg) return;
 
     const chatId = msg.chatId?.toString() ?? '';
+    if (!chatId) return;
+
     const text = msg.text ?? '';
     const messageId = randomUUID();
 
+    let senderId = '';
+    if (msg.fromId && (msg.fromId as any).userId != null) {
+      senderId = String((msg.fromId as any).userId);
+    }
+    const contactTelegramId = senderId || chatId;
+    const contactId = await this.ensureContactEnrichedFromTelegram(this.organizationId, contactTelegramId);
+
+    const serialized = serializeMessage(msg);
+
     await this.pool.query(
       `INSERT INTO messages
-        (id, organization_id, content, direction, bd_account_id, channel_id, channel, telegram_message_id, created_at)
-       VALUES ($1, $2, $3, 'inbound', $4, $5, 'telegram', $6, NOW())`,
-      [messageId, this.organizationId, text, this.accountId, chatId, msg.id],
+        (id, organization_id, content, direction, bd_account_id, channel_id, channel,
+         telegram_message_id, contact_id, telegram_entities, telegram_media, reply_to_msg_id, created_at)
+       VALUES ($1, $2, $3, 'inbound', $4, $5, 'telegram', $6, $7, $8, $9, $10, NOW())
+       ON CONFLICT DO NOTHING`,
+      [messageId, this.organizationId, text, this.accountId, chatId, msg.id,
+       contactId, serialized.telegram_entities, serialized.telegram_media, serialized.reply_to_msg_id],
     );
+
+    await this.ensureConversation({
+      organizationId: this.organizationId,
+      bdAccountId: this.accountId,
+      channel: 'telegram',
+      channelId: chatId,
+      contactId,
+    });
 
     await this.rabbitmq.publishEvent({
       id: randomUUID(),
@@ -257,9 +645,11 @@ export class AccountActor {
         channel: 'telegram',
         channelId: chatId,
         bdAccountId: this.accountId,
+        contactId: contactId ?? undefined,
         content: text,
         direction: 'inbound',
         telegramMessageId: msg.id,
+        senderTelegramId: contactTelegramId,
       },
     } as unknown as Event);
   }
@@ -444,6 +834,28 @@ export class AccountActor {
         default:
           this.log.warn({ message: `Unknown command type: ${command.type}` });
       }
+
+      if (this.state === 'flood_wait') {
+        this.state = 'connected';
+        const cleared = await this.pool.query(
+          `UPDATE bd_accounts
+           SET flood_wait_until = NULL, flood_wait_seconds = NULL, flood_reason = NULL
+           WHERE id = $1 AND flood_wait_until IS NOT NULL
+           RETURNING id`,
+          [this.accountId],
+        ).catch(() => ({ rows: [] }));
+        if (cleared.rows.length > 0) {
+          this.rabbitmq.publishEvent({
+            id: randomUUID(),
+            type: EventType.BD_ACCOUNT_FLOOD_CLEARED,
+            timestamp: new Date(),
+            organizationId: this.organizationId,
+            userId: '',
+            data: { bdAccountId: this.accountId },
+          } as unknown as Event).catch(() => {});
+          this.log.info({ message: `Flood cleared for account ${this.accountId}` });
+        }
+      }
     } catch (err: unknown) {
       if (isFloodWaitError(err)) {
         const seconds = getFloodWaitSeconds(err);
@@ -583,6 +995,7 @@ export class AccountActor {
     );
 
     const telegramMessageId = sentMessage?.id ?? null;
+    const resolvedChatId = sentMessage?.chatId?.toString() ?? chatId;
     const messageId = payload.messageId || randomUUID();
 
     if (payload.messageId) {
@@ -602,7 +1015,7 @@ export class AccountActor {
           `INSERT INTO messages
             (id, organization_id, content, direction, bd_account_id, channel_id, channel, telegram_message_id, status, created_at)
            VALUES ($1, $2, $3, 'outbound', $4, $5, 'telegram', $6, 'delivered', NOW())`,
-          [messageId, payload.organizationId, payload.text, this.accountId, chatId, telegramMessageId],
+          [messageId, payload.organizationId, payload.text, this.accountId, resolvedChatId, telegramMessageId],
         );
       } catch (insertErr) {
         this.log.warn({ message: 'Message insert failed (possible duplicate)', error: String(insertErr), messageId });
@@ -618,7 +1031,7 @@ export class AccountActor {
       data: {
         messageId,
         channel: 'telegram',
-        channelId: chatId,
+        channelId: resolvedChatId,
         bdAccountId: this.accountId,
         content: payload.text,
         direction: 'outbound',
@@ -639,6 +1052,29 @@ export class AccountActor {
         );
       } catch (linkErr) {
         this.log.warn({ message: 'Failed to link message to campaign_sends', error: String(linkErr), messageId });
+      }
+
+      try {
+        await this.pool.query(
+          `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, peer_type, sync_list_origin)
+           VALUES ($1, $2, 'user', 'outbound_send')
+           ON CONFLICT (bd_account_id, telegram_chat_id) DO NOTHING`,
+          [this.accountId, resolvedChatId],
+        );
+      } catch (syncErr) {
+        this.log.warn({ message: 'Failed to add chat to sync_chats', error: String(syncErr), resolvedChatId });
+      }
+
+      if (resolvedChatId !== chatId) {
+        try {
+          await this.pool.query(
+            `UPDATE campaign_participants SET channel_id = $1, updated_at = NOW()
+             WHERE id = $2 AND (channel_id IS NULL OR channel_id <> $1)`,
+            [resolvedChatId, (payload as any).participantId],
+          );
+        } catch (chErr) {
+          this.log.warn({ message: 'Failed to update participant channel_id', error: String(chErr) });
+        }
       }
     }
 
@@ -1444,6 +1880,13 @@ export class AccountActor {
           userId: '',
           data: { bdAccountId: this.accountId },
         } as unknown as Event).catch(() => {});
+      } else if (result === 'unknown') {
+        const blockedUntil = new Date(Date.now() + 30 * 60 * 1000);
+        await this.pool.query(
+          `UPDATE bd_accounts SET send_blocked_until = GREATEST(send_blocked_until, $1) WHERE id = $2`,
+          [blockedUntil, this.accountId],
+        );
+        this.log.info({ message: 'SpamBot reply unrecognized, conservative 30min block', accountId: this.accountId });
       } else if (result === 'error') {
         const blockedUntil = new Date(Date.now() + 10 * 60 * 1000);
         await this.pool.query(
@@ -1457,7 +1900,34 @@ export class AccountActor {
     }
   }
 
-  private async doSpambotCheck(): Promise<'free' | 'restricted' | 'error'> {
+  private classifySpamBotReply(text: string): 'free' | 'restricted' | 'unknown' {
+    const t = text.toLowerCase();
+    if (
+      t.includes('ваш аккаунт свободен') ||
+      t.includes('no limits') ||
+      t.includes('good news') ||
+      t.includes('your account is free') ||
+      t.includes('нет ограничений') ||
+      t.includes('not limited') ||
+      t.includes('is not limited')
+    ) {
+      return 'free';
+    }
+    if (
+      t.includes('ограничен') ||
+      t.includes('limited') ||
+      t.includes('restrict') ||
+      t.includes('spam') ||
+      t.includes('ваш аккаунт ограничен') ||
+      t.includes('your account is limited') ||
+      t.includes('limits are applied')
+    ) {
+      return 'restricted';
+    }
+    return 'unknown';
+  }
+
+  private async doSpambotCheck(): Promise<'free' | 'restricted' | 'unknown' | 'error'> {
     if (!this.client?.connected) return 'error';
 
     if (this.rateLimiter.getFloodWaitRemaining() > 0) {
@@ -1486,22 +1956,22 @@ export class AccountActor {
 
       const msgs = history?.messages ?? [];
       const botReply = msgs.find((m: any) => !m.out && m.message)?.message ?? '';
-      const isFree = /free|no limits|good news|нет ограничений/i.test(botReply);
+      const classification = this.classifySpamBotReply(botReply);
 
       await this.pool.query(
         `UPDATE bd_accounts SET last_spambot_check_at = NOW(), last_spambot_result = $1 WHERE id = $2`,
-        [isFree ? 'free' : 'restricted', this.accountId],
+        [classification, this.accountId],
       );
 
-      if (!isFree) {
+      if (classification === 'restricted') {
         await this.pool.query(
           `UPDATE bd_accounts SET spam_restricted_at = COALESCE(spam_restricted_at, NOW()), spam_restriction_source = 'spambot_check' WHERE id = $1`,
           [this.accountId],
         );
       }
 
-      this.log.info({ message: `SpamBot check completed`, accountId: this.accountId, result: isFree ? 'free' : 'restricted' });
-      return isFree ? 'free' : 'restricted';
+      this.log.info({ message: `SpamBot check completed`, accountId: this.accountId, result: classification, rawReply: botReply.slice(0, 200) });
+      return classification;
     } catch (err) {
       this.log.warn({ message: 'SpamBot check failed', accountId: this.accountId, error: String(err) });
       return 'error';

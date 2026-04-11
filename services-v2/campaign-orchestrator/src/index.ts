@@ -9,6 +9,7 @@ import { registerExecutionRoutes } from './routes/execution';
 import { registerParticipantRoutes } from './routes/participants';
 import { registerStaticDataRoutes } from './routes/static-data';
 import { subscribeToCampaignEvents } from './event-handlers';
+import { subscribeToSpamFloodEvents } from './spam-flood-handlers';
 
 async function main() {
   const redis = new RedisClient({ url: process.env.REDIS_URL || 'redis://localhost:6380' });
@@ -44,10 +45,11 @@ async function main() {
   registerStaticDataRoutes(app, { db, log });
   registerTemplateRoutes(app, { db, log });
   registerSequenceRoutes(app, { db, log });
-  registerExecutionRoutes(app, { db, rabbitmq, log });
+  registerExecutionRoutes(app, { db, rabbitmq, log, redis, jobQueue });
   registerParticipantRoutes(app, { db, log });
 
   await subscribeToCampaignEvents({ pool: db.write, rabbitmq, log, redis, jobQueue });
+  await subscribeToSpamFloodEvents({ pool: db.write, rabbitmq, log, redis, jobQueue });
 
   await ctx.start();
 }

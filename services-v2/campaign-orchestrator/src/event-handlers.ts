@@ -93,6 +93,7 @@ async function handleCampaignReply(
     [organizationId, bdAccountId, channelId],
   );
 
+  let usedContactFallback = false;
   if (participantsRes.rows.length === 0 && contactId) {
     participantsRes = await pool.query(
       `SELECT cp.id, cp.campaign_id, cp.current_step, cp.status, cp.contact_id,
@@ -106,9 +107,20 @@ async function handleCampaignReply(
          AND cp.status IN ('pending', 'sent', 'in_progress', 'awaiting_reply')`,
       [contactId, organizationId, bdAccountId],
     );
+    usedContactFallback = participantsRes.rows.length > 0;
   }
 
   if (participantsRes.rows.length === 0) return;
+
+  // Reconcile channel_id if found via contact_id fallback
+  if (usedContactFallback && channelId) {
+    for (const p of participantsRes.rows as { id: string }[]) {
+      await pool.query(
+        'UPDATE campaign_participants SET channel_id = $1, updated_at = NOW() WHERE id = $2 AND (channel_id IS NULL OR channel_id <> $1)',
+        [channelId, p.id],
+      ).catch(() => {});
+    }
+  }
 
   for (const p of participantsRes.rows as {
     id: string;
@@ -167,7 +179,7 @@ async function handleCampaignReply(
             },
             opts: {
               delay: effectiveDelay,
-              jobId: `campaign:${p.campaign_id}:${p.id}:step${stepIndex}:reply-${Date.now()}`,
+              jobId: `campaign-${p.campaign_id}-${p.id}-step${stepIndex}-reply-${Date.now()}`,
               attempts: 3,
               backoff: { type: 'exponential', delay: 5000 },
               removeOnComplete: 1000,

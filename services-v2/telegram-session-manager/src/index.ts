@@ -80,8 +80,47 @@ async function main() {
     actors: coordinator.getActorStates(),
   }));
 
+  const SPAMBOT_CHECK_INTERVAL_MS = parseInt(process.env.SPAMBOT_CHECK_INTERVAL_HOURS || '6', 10) * 3600 * 1000;
+  let spambotSweepLoop: ReturnType<typeof setInterval> | null = null;
+
+  app.addHook('onClose', () => {
+    if (spambotSweepLoop) clearInterval(spambotSweepLoop);
+  });
+
   await ctx.start();
   await coordinator.start();
+
+  spambotSweepLoop = setInterval(async () => {
+    try {
+      const jitterMs = Math.random() * 10 * 60 * 1000;
+      await new Promise((r) => setTimeout(r, jitterMs));
+
+      const staleAccounts = await db.write.query(
+        `SELECT id FROM bd_accounts
+         WHERE is_active = true
+           AND connection_state = 'connected'
+           AND (last_spambot_check_at IS NULL OR last_spambot_check_at < NOW() - make_interval(hours => $1))
+         LIMIT 10`,
+        [parseInt(process.env.SPAMBOT_CHECK_INTERVAL_HOURS || '6', 10)],
+      );
+
+      for (const row of staleAccounts.rows as { id: string }[]) {
+        const commandQueue = `telegram:commands:${row.id}`;
+        await rabbitmq.publishCommand(commandQueue, {
+          id: randomUUID(),
+          type: 'SPAMBOT_CHECK',
+          priority: 2,
+          payload: {},
+        });
+      }
+
+      if (staleAccounts.rows.length > 0) {
+        log.info({ message: `Periodic SpamBot sweep: queued ${staleAccounts.rows.length} checks` });
+      }
+    } catch (err) {
+      log.warn({ message: 'SpamBot sweep loop error', error: String(err) });
+    }
+  }, SPAMBOT_CHECK_INTERVAL_MS);
 
   log.info({ message: `TSM started (instance: ${instanceId})` });
 }

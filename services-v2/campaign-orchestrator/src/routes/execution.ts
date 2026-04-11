@@ -3,13 +3,18 @@ import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { EventType, type Event } from '@getsale/events';
 import { AppError, ErrorCodes, requireUser, DatabasePools } from '@getsale/service-framework';
-import { RabbitMQClient } from '@getsale/queue';
+import { RabbitMQClient, JobQueue } from '@getsale/queue';
+import { RedisClient } from '@getsale/cache';
 import { Logger } from '@getsale/logger';
+import { recalculatePendingForCampaignsUsingBdAccount } from '../spam-flood-handlers';
+import { type CampaignJobData } from '../scheduler';
 
 interface Deps {
   db: DatabasePools;
   rabbitmq: RabbitMQClient;
   log: Logger;
+  redis?: RedisClient;
+  jobQueue?: JobQueue<CampaignJobData>;
 }
 
 function getBdAccountIdsFromTargetAudience(aud: unknown): string[] {
@@ -96,9 +101,15 @@ export function registerExecutionRoutes(app: FastifyInstance, deps: Deps): void 
     }
 
     await db.write.query(
-      'UPDATE bd_accounts SET send_blocked_until = NULL, updated_at = NOW() WHERE id = $1 AND organization_id = $2',
+      'UPDATE bd_accounts SET send_blocked_until = NULL, spam_restricted_at = NULL, spam_check_retry_count = 0, spam_restriction_source = NULL, updated_at = NOW() WHERE id = $1 AND organization_id = $2',
       [accountId, user.organizationId],
     );
+
+    if (deps.redis && deps.jobQueue) {
+      recalculatePendingForCampaignsUsingBdAccount(db.write, log, deps.redis, deps.jobQueue, accountId).catch((e) => {
+        log.warn({ message: 'recalculatePending after resume failed', error: String(e) });
+      });
+    }
 
     return { ok: true };
   });

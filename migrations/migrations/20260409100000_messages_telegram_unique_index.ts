@@ -13,6 +13,19 @@ export async function up(knex: Knex): Promise<void> {
   const hasMessages = await knex.schema.hasTable('messages');
   if (!hasMessages) return;
 
+  // Remove duplicate messages before creating the unique index.
+  // Keeps the row with the earliest created_at for each unique combination.
+  await knex.raw(`
+    DELETE FROM messages m
+    WHERE m.telegram_message_id IS NOT NULL
+      AND m.id NOT IN (
+        SELECT DISTINCT ON (bd_account_id, channel_id, telegram_message_id, organization_id) id
+        FROM messages
+        WHERE telegram_message_id IS NOT NULL
+        ORDER BY bd_account_id, channel_id, telegram_message_id, organization_id, created_at ASC
+      )
+  `);
+
   await knex.raw(`
     CREATE UNIQUE INDEX IF NOT EXISTS messages_telegram_unique
     ON messages (bd_account_id, channel_id, telegram_message_id, organization_id)

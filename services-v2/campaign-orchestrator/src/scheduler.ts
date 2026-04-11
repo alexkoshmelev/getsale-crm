@@ -102,7 +102,7 @@ export class CampaignScheduler {
         },
         opts: {
           delay,
-          jobId: `campaign:${campaignId}:${p.id}`,
+          jobId: `campaign-${campaignId}-${p.id}`,
           attempts: 3,
           backoff: { type: 'exponential' as const, delay: 5000 },
           removeOnComplete: 1000,

@@ -124,7 +124,7 @@ export function internalMessagingRouter({ pool, log }: Deps): Router {
         organization_id, bd_account_id, contact_id, channel, channel_id, direction, content, status, unread,
         metadata, telegram_message_id, telegram_date, loaded_at, reply_to_telegram_id, telegram_entities, telegram_media, telegram_extra, reactions, our_reactions
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13, $14, $15, $16, $17, $18)
-      ON CONFLICT (bd_account_id, channel_id, telegram_message_id) WHERE (telegram_message_id IS NOT NULL)
+      ON CONFLICT (bd_account_id, channel_id, telegram_message_id, organization_id) WHERE (telegram_message_id IS NOT NULL)
       DO UPDATE SET
         content = EXCLUDED.content,
         reply_to_telegram_id = COALESCE(EXCLUDED.reply_to_telegram_id, messages.reply_to_telegram_id),
