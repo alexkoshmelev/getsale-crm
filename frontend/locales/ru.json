@@ -519,6 +519,7 @@
     "statusActive": "Запущена",
     "statusPaused": "На паузе",
     "statusCompleted": "Завершена",
+    "statusSkipped": "Пропущен",
     "overview": "Обзор",
     "sequence": "Последовательность",
     "audience": "Аудитория",

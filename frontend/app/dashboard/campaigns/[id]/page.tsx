@@ -37,6 +37,8 @@ import {
   pauseCampaign,
   updateCampaign,
   addCampaignParticipants,
+  removeCampaignParticipant,
+  removeAllCampaignParticipants,
   deleteCampaign,
   duplicateCampaign,
   resetCampaignProgress,
@@ -255,9 +257,9 @@ export default function CampaignDetailPage() {
     setActionLoading(true);
     try {
       const aud = campaign.target_audience || {};
-      const contactIds = Array.isArray(aud.contactIds) ? aud.contactIds : [];
-      if (aud.enrichContactsBeforeStart && contactIds.length > 0) {
+      if (aud.enrichContactsBeforeStart && campaign.selected_contacts && campaign.selected_contacts.length > 0) {
         try {
+          const contactIds = campaign.selected_contacts.map((c) => c.id);
           await enrichContactsFromTelegram(contactIds, aud.bdAccountIds?.[0] ?? aud.bdAccountId);
         } catch (e) {
           reportWarning('Enrich contacts before start failed', { component: 'CampaignPage', error: e });
@@ -992,18 +994,10 @@ export default function CampaignDetailPage() {
           onRemoveContact={
             id && (campaign?.status === 'draft' || campaign?.status === 'paused')
               ? async (contactId) => {
-                  const c = campaignRef.current;
-                  if (!c?.target_audience) return;
                   try {
-                    const current = Array.isArray(c.target_audience.contactIds) ? c.target_audience.contactIds : [];
-                    const next = current.filter((cid) => cid !== contactId);
-                    await updateCampaign(id, {
-                      targetAudience: {
-                        ...c.target_audience,
-                        contactIds: next.length > 0 ? next : [],
-                      },
-                    });
+                    await removeCampaignParticipant(id, contactId);
                     await load();
+                    setParticipantsRefresh((n) => n + 1);
                   } catch (e) {
                     reportError(e, { component: 'CampaignPage', action: 'removeParticipant' });
                   }
@@ -1011,18 +1005,12 @@ export default function CampaignDetailPage() {
               : undefined
           }
           onRemoveAll={
-            id && (campaign?.status === 'draft' || campaign?.status === 'paused') && (campaign.target_audience?.contactIds?.length ?? 0) > 0
+            id && (campaign?.status === 'draft' || campaign?.status === 'paused')
               ? async () => {
-                  const c = campaignRef.current;
-                  if (!c?.target_audience) return;
                   try {
-                    await updateCampaign(id, {
-                      targetAudience: {
-                        ...c.target_audience,
-                        contactIds: [],
-                      },
-                    });
+                    await removeAllCampaignParticipants(id);
                     await load();
+                    setParticipantsRefresh((n) => n + 1);
                   } catch (e) {
                     reportError(e, { component: 'CampaignPage', action: 'removeAllParticipants' });
                   }

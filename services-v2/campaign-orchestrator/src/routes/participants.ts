@@ -22,10 +22,11 @@ export function registerParticipantRoutes(app: FastifyInstance, deps: Deps): voi
     const query = request.query as Record<string, unknown>;
 
     const campaign = await db.read.query(
-      'SELECT id FROM campaigns WHERE id = $1 AND organization_id = $2',
+      'SELECT id, status FROM campaigns WHERE id = $1 AND organization_id = $2',
       [id, user.organizationId],
     );
     if (!campaign.rows.length) throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+    const campaignFinished = ['completed', 'paused'].includes(String((campaign.rows[0] as { status: string }).status));
 
     const { page, limit, offset } = parsePageLimit(query, 50, 100);
     const statusParam = (query.status || query.filter) as string | undefined;
@@ -72,6 +73,7 @@ export function registerParticipantRoutes(app: FastifyInstance, deps: Deps): voi
          cp.bd_account_id,
          cp.channel_id,
          cp.status AS participant_status,
+         cp.last_error AS participant_last_error,
          cp.metadata AS participant_metadata,
          cp.current_step,
          cp.next_send_at,
@@ -79,11 +81,14 @@ export function registerParticipantRoutes(app: FastifyInstance, deps: Deps): voi
          cp.created_at AS participant_created_at,
          cp.updated_at AS participant_updated_at,
          COALESCE(NULLIF(TRIM(c.display_name), ''), NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,''))), ''), c.username, c.telegram_id::text) AS contact_name,
+         c.username AS contact_username,
+         c.telegram_id AS contact_telegram_id,
          COALESCE(NULLIF(TRIM(ba.display_name), ''), NULLIF(TRIM(CONCAT(COALESCE(ba.first_name,''), ' ', COALESCE(ba.last_name,''))), ''), ba.phone_number, ba.telegram_id::text, cp.bd_account_id::text) AS bd_account_display_name,
          conv.id AS conversation_id,
          conv.shared_chat_created_at,
          st.name AS pipeline_stage_name,
          fs.first_sent_at AS sent_at,
+         fs.first_send_status,
          COALESCE(cp.replied_at, CASE WHEN cp.status = 'replied' THEN cp.updated_at ELSE NULL END) AS replied_at,
          (m_first.status = 'read') AS first_message_read,
          cs_read.read_at AS campaign_send_read_at
@@ -113,26 +118,32 @@ export function registerParticipantRoutes(app: FastifyInstance, deps: Deps): voi
       const st = String(r.participant_status ?? '');
       const hasSent = r.sent_at != null;
       const isDelivered = hasSent && r.first_send_status === 'sent';
-      const phase = (() => {
-        if (st === 'failed' || st === 'skipped' || st === 'completed') return 'failed';
-        if (st === 'replied') return 'replied';
-        if (isDelivered && r.first_message_read) return 'read';
-        if (isDelivered) return 'sent';
-        return 'waiting';
-      })();
 
-      let last_error: string | null = null;
-      if (r.participant_metadata != null) {
+      let last_error: string | null = r.participant_last_error != null ? String(r.participant_last_error) : null;
+      if (!last_error && r.participant_metadata != null) {
         try {
           const meta = typeof r.participant_metadata === 'string' ? JSON.parse(r.participant_metadata as string) : r.participant_metadata;
           if (meta && typeof meta.lastError === 'string') last_error = meta.lastError;
         } catch { /* ignore */ }
       }
 
+      const phase = (() => {
+        if (st === 'failed') return 'failed';
+        if (st === 'skipped') return last_error ? 'failed' : 'skipped';
+        if (st === 'replied') return 'replied';
+        if (st === 'completed') return hasSent ? 'sent' : 'completed';
+        if (isDelivered && r.first_message_read) return 'read';
+        if (isDelivered) return 'sent';
+        if (campaignFinished && !hasSent) return last_error ? 'failed' : 'skipped';
+        return 'waiting';
+      })();
+
       return {
         participant_id: r.participant_id,
         contact_id: r.contact_id,
         contact_name: r.contact_name ?? '',
+        username: r.contact_username ?? null,
+        telegram_id: r.contact_telegram_id != null ? String(r.contact_telegram_id) : null,
         conversation_id: r.conversation_id,
         bd_account_id: r.bd_account_id ?? null,
         bd_account_display_name: r.bd_account_display_name ?? null,

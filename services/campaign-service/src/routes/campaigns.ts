@@ -426,8 +426,6 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
       throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
     }
     const campaign = campaignRes.rows[0];
-    const aud = (campaign.target_audience || {}) as { contactIds?: string[] };
-    const contactIds = Array.isArray(aud.contactIds) ? aud.contactIds : [];
     const isDraftOrPaused = campaign.status === 'draft' || campaign.status === 'paused';
     const [templatesRes, sequencesRes, selectedContactsRes] = await Promise.all([
       pool.query(
@@ -438,10 +436,14 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
         'SELECT cs.*, ct.name as template_name, ct.channel, ct.content FROM campaign_sequences cs JOIN campaign_templates ct ON ct.id = cs.template_id WHERE cs.campaign_id = $1 ORDER BY cs.order_index',
         [id]
       ),
-      isDraftOrPaused && contactIds.length > 0
+      isDraftOrPaused
         ? pool.query(
-            'SELECT id, first_name, last_name, display_name, username, telegram_id, email, phone FROM contacts WHERE id = ANY($1) AND organization_id = $2',
-            [contactIds, organizationId]
+            `SELECT c.id, c.first_name, c.last_name, c.display_name, c.username, c.telegram_id, c.email, c.phone
+             FROM campaign_participants cp
+             JOIN contacts c ON c.id = cp.contact_id
+             WHERE cp.campaign_id = $1
+             ORDER BY cp.enqueue_order ASC NULLS LAST, cp.created_at ASC`,
+            [id]
           )
         : Promise.resolve({ rows: [] }),
     ]);
@@ -500,6 +502,14 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
     const rawName = `Copy of ${src.name}`;
     const newName = rawName.length > 255 ? `${rawName.slice(0, 252)}...` : rawName;
 
+    // Strip contactIds from target_audience — contacts are now in campaign_participants
+    let cleanedAudience = src.target_audience;
+    if (cleanedAudience && typeof cleanedAudience === 'object') {
+      const aud = { ...(cleanedAudience as Record<string, unknown>) };
+      delete aud.contactIds;
+      cleanedAudience = aud;
+    }
+
     await withOrgContext(pool, organizationId, async (client) => {
       await client.query(
         `INSERT INTO campaigns (id, organization_id, company_id, pipeline_id, name, status, target_audience, schedule, lead_creation_settings, created_by_user_id)
@@ -511,7 +521,7 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
           src.pipeline_id,
           newName,
           CampaignStatus.DRAFT,
-          src.target_audience,
+          JSON.stringify(cleanedAudience),
           src.schedule,
           src.lead_creation_settings,
           userId ?? null,
@@ -557,8 +567,14 @@ export function campaignsRouter({ pool, rabbitmq, log }: Deps): Router {
         );
       }
 
-      // Do not copy campaign_participants: audience stays in target_audience (contactIds).
-      // On Start, bulkInsertCampaignParticipants creates rows with next_send_at (standard path).
+      // Copy campaign_participants from source to new campaign (reset runtime state)
+      await client.query(
+        `INSERT INTO campaign_participants (id, campaign_id, contact_id, bd_account_id, status, enqueue_order, created_at, updated_at)
+         SELECT gen_random_uuid(), $1, contact_id, bd_account_id, 'pending', enqueue_order, NOW(), NOW()
+         FROM campaign_participants
+         WHERE campaign_id = $2`,
+        [newId, sourceId]
+      );
     });
 
     const out = await pool.query('SELECT * FROM campaigns WHERE id = $1', [newId]);

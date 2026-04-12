@@ -519,6 +519,7 @@
     "statusActive": "Active",
     "statusPaused": "Paused",
     "statusCompleted": "Completed",
+    "statusSkipped": "Skipped",
     "overview": "Overview",
     "sequence": "Sequence",
     "audience": "Audience",

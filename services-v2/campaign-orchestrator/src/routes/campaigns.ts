@@ -367,8 +367,6 @@ export function registerCampaignRoutes(app: FastifyInstance, deps: Deps): void {
     if (!campaignRes.rows.length) throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
 
     const campaign = campaignRes.rows[0] as Record<string, unknown>;
-    const aud = (campaign.target_audience || {}) as { contactIds?: string[] };
-    const contactIds = Array.isArray(aud.contactIds) ? aud.contactIds : [];
     const isDraftOrPaused = campaign.status === 'draft' || campaign.status === 'paused';
 
     const [templatesRes, sequencesRes, selectedContactsRes] = await Promise.all([
@@ -384,11 +382,14 @@ export function registerCampaignRoutes(app: FastifyInstance, deps: Deps): void {
          ORDER BY cs.order_index`,
         [id],
       ),
-      isDraftOrPaused && contactIds.length > 0
+      isDraftOrPaused
         ? db.read.query(
-            `SELECT id, first_name, last_name, display_name, username, telegram_id, email, phone
-             FROM contacts WHERE id = ANY($1::uuid[]) AND organization_id = $2`,
-            [contactIds, user.organizationId],
+            `SELECT c.id, c.first_name, c.last_name, c.display_name, c.username, c.telegram_id, c.email, c.phone
+             FROM campaign_participants cp
+             JOIN contacts c ON c.id = cp.contact_id
+             WHERE cp.campaign_id = $1
+             ORDER BY cp.enqueue_order ASC NULLS LAST, cp.created_at ASC`,
+            [id],
           )
         : Promise.resolve({ rows: [] }),
     ]);

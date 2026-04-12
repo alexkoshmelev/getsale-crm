@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/Button';
 import {
   updateCampaign,
   fetchCampaignAgents,
-  checkCampaignAudienceConflicts,
   type Campaign,
   type CampaignAgent,
 } from '@/lib/api/campaigns';
@@ -64,9 +63,8 @@ export function CampaignAudienceSchedule({
   const [pipelineId, setPipelineId] = useState<string>(() =>
     (campaign.target_audience?.filters as { pipelineId?: string })?.pipelineId ?? ''
   );
-  const [contactIds, setContactIds] = useState<string[]>(() =>
-    Array.isArray(campaign.target_audience?.contactIds) ? campaign.target_audience!.contactIds! : []
-  );
+  // contactIds are now stored in campaign_participants, not in target_audience
+  const contactIds: string[] = [];
   const [bdAccountIds, setBdAccountIds] = useState<string[]>(() => {
     const ids = campaign.target_audience?.bdAccountIds;
     if (Array.isArray(ids) && ids.length > 0) return ids.filter((x) => typeof x === 'string');
@@ -183,7 +181,6 @@ export function CampaignAudienceSchedule({
 
   type LeadOverrides = { leadTrigger?: string; leadPipelineId?: string; leadStageId?: string; leadResponsibleId?: string };
   const saveAudience = useCallback(async (overrides?: {
-    contactIds?: string[];
     audienceSource?: AudienceSource;
     bdAccountId?: string;
     bdAccountIds?: string[];
@@ -192,10 +189,8 @@ export function CampaignAudienceSchedule({
     sendDelaySeconds?: number;
     sendDelayMinSeconds?: number;
     sendDelayMaxSeconds?: number;
-    /** Omit from payload when null (clear stored value). */
     dailySendTarget?: number | null;
   } & LeadOverrides) => {
-    const ids = overrides?.contactIds ?? contactIds;
     const src = overrides?.audienceSource ?? audienceSource;
     const accIds = overrides?.bdAccountIds ?? (overrides?.bdAccountId !== undefined ? [overrides.bdAccountId!] : bdAccountIds);
     const randomizeAI = overrides?.randomizeWithAI ?? randomizeWithAI;
@@ -220,17 +215,6 @@ export function CampaignAudienceSchedule({
     const responsible = overrides?.leadResponsibleId ?? leadResponsibleId;
     setSaving(true);
     try {
-      if (overrides && 'contactIds' in overrides && Array.isArray(overrides.contactIds) && overrides.contactIds.length > 0) {
-        const { conflicts } = await checkCampaignAudienceConflicts(campaignId, overrides.contactIds);
-        const risky = conflicts.filter((c) => !c.is_current_campaign || c.last_sent_at != null);
-        if (risky.length > 0) {
-          const ok = window.confirm(t('campaigns.audienceConflictsHint'));
-          if (!ok) {
-            setSaving(false);
-            return;
-          }
-        }
-      }
       await updateCampaign(campaignId, {
         targetAudience: {
           filters: {
@@ -239,10 +223,9 @@ export function CampaignAudienceSchedule({
             audienceSource: src,
           },
           limit: 10000,
-          contactIds: ids.length > 0 ? ids : undefined,
           bdAccountId: accIds.length === 1 ? accIds[0] : undefined,
           bdAccountIds: accIds.length > 0 ? accIds : undefined,
-          sendDelaySeconds: delayMin, // legacy compatibility for old workers/reads
+          sendDelaySeconds: delayMin,
           sendDelayMinSeconds: delayMin,
           sendDelayMaxSeconds: delayMax,
           randomizeWithAI: randomizeAI,
@@ -267,7 +250,7 @@ export function CampaignAudienceSchedule({
     } finally {
       setSaving(false);
     }
-  }, [campaignId, contactIds, audienceSource, bdAccountIds, companyId, pipelineId, sendDelayMinSeconds, sendDelayMaxSeconds, dailySendTarget, randomizeWithAI, leadTrigger, leadPipelineId, leadStageId, leadResponsibleId, onUpdate, t]);
+  }, [campaignId, audienceSource, bdAccountIds, companyId, pipelineId, sendDelayMinSeconds, sendDelayMaxSeconds, dailySendTarget, randomizeWithAI, leadTrigger, leadPipelineId, leadStageId, leadResponsibleId, onUpdate, t]);
 
   const percentFromSeconds = (seconds: number): number =>
     ((seconds - DELAY_MIN_SECONDS) / (DELAY_MAX_SECONDS - DELAY_MIN_SECONDS)) * 100;

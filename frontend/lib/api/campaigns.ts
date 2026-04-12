@@ -138,7 +138,7 @@ export interface SelectedContactInfo {
 export interface CampaignWithDetails extends Campaign {
   templates: CampaignTemplate[];
   sequences: CampaignSequenceStep[];
-  /** For draft/paused: contacts selected in audience (from target_audience.contactIds). */
+  /** For draft/paused: contacts added as campaign participants (from campaign_participants table). */
   selected_contacts?: SelectedContactInfo[];
 }
 
@@ -158,18 +158,22 @@ export interface CampaignParticipant {
   updated_at: string;
 }
 
-/** Simplified participant phase for UI display (5 statuses). */
+/** Simplified participant phase for UI display. */
 export type CampaignParticipantPhase =
   | 'waiting'
   | 'sent'
   | 'read'
   | 'replied'
+  | 'completed'
+  | 'skipped'
   | 'failed';
 
 export interface CampaignParticipantRow {
   participant_id: string;
   contact_id: string;
   contact_name: string;
+  username: string | null;
+  telegram_id: string | null;
   conversation_id: string | null;
   bd_account_id: string | null;
   /** Display name of the BD account that sends to this participant. */
@@ -632,6 +636,16 @@ export async function addCampaignParticipants(campaignId: string, contactIds: st
   const { data } = await apiClient.post<AddCampaignParticipantsResult>(`/api/campaigns/${campaignId}/participants/add`, {
     contactIds,
   });
+  return data;
+}
+
+export async function removeCampaignParticipant(campaignId: string, contactId: string): Promise<{ deleted: number }> {
+  const { data } = await apiClient.delete<{ deleted: number }>(`/api/campaigns/${campaignId}/participants/${contactId}`);
+  return data;
+}
+
+export async function removeAllCampaignParticipants(campaignId: string): Promise<{ deleted: number }> {
+  const { data } = await apiClient.delete<{ deleted: number }>(`/api/campaigns/${campaignId}/participants`);
   return data;
 }
 

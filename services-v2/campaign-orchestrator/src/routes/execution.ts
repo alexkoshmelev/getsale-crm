@@ -256,6 +256,14 @@ export function registerExecutionRoutes(app: FastifyInstance, deps: Deps): void 
     const rawName = `Copy of ${src.name}`;
     const newName = rawName.length > 255 ? `${rawName.slice(0, 252)}...` : rawName;
 
+    // Strip contactIds from target_audience — participants are now stored in campaign_participants
+    let cleanedAudience = src.target_audience;
+    if (cleanedAudience && typeof cleanedAudience === 'object') {
+      const aud = { ...(cleanedAudience as Record<string, unknown>) };
+      delete aud.contactIds;
+      cleanedAudience = aud;
+    }
+
     const client = await db.write.connect();
     try {
       await client.query('BEGIN');
@@ -263,7 +271,7 @@ export function registerExecutionRoutes(app: FastifyInstance, deps: Deps): void 
       await client.query(
         `INSERT INTO campaigns (id, organization_id, company_id, pipeline_id, name, status, target_audience, schedule, lead_creation_settings, created_by_user_id)
          VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7, $8, $9)`,
-        [newId, user.organizationId, src.company_id, src.pipeline_id, newName, src.target_audience, src.schedule, src.lead_creation_settings, user.id],
+        [newId, user.organizationId, src.company_id, src.pipeline_id, newName, JSON.stringify(cleanedAudience), src.schedule, src.lead_creation_settings, user.id],
       );
 
       const tmpls = await client.query(
@@ -295,6 +303,15 @@ export function registerExecutionRoutes(app: FastifyInstance, deps: Deps): void 
         );
       }
 
+      // Copy campaign_participants from source to new campaign (reset runtime state)
+      await client.query(
+        `INSERT INTO campaign_participants (id, campaign_id, contact_id, bd_account_id, status, enqueue_order, created_at, updated_at)
+         SELECT gen_random_uuid(), $1, contact_id, bd_account_id, 'pending', enqueue_order, NOW(), NOW()
+         FROM campaign_participants
+         WHERE campaign_id = $2`,
+        [newId, sourceId],
+      );
+
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
@@ -306,6 +323,50 @@ export function registerExecutionRoutes(app: FastifyInstance, deps: Deps): void 
     const out = await db.read.query('SELECT * FROM campaigns WHERE id = $1', [newId]);
     reply.code(201);
     return out.rows[0];
+  });
+
+  app.delete('/api/campaigns/:id/participants/:contactId', { preHandler: [requireUser] }, async (request) => {
+    const user = request.user!;
+    const { id, contactId } = request.params as { id: string; contactId: string };
+
+    const camp = await db.read.query(
+      'SELECT id, status FROM campaigns WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL',
+      [id, user.organizationId],
+    );
+    if (!camp.rows.length) throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+
+    const status = (camp.rows[0] as { status: string }).status;
+    if (status !== 'draft' && status !== 'paused') {
+      throw new AppError(400, 'Can only remove participants from draft or paused campaigns', ErrorCodes.BAD_REQUEST);
+    }
+
+    const result = await db.write.query(
+      'DELETE FROM campaign_participants WHERE campaign_id = $1 AND contact_id = $2',
+      [id, contactId],
+    );
+    return { deleted: result.rowCount ?? 0 };
+  });
+
+  app.delete('/api/campaigns/:id/participants', { preHandler: [requireUser] }, async (request) => {
+    const user = request.user!;
+    const { id } = request.params as { id: string };
+
+    const camp = await db.read.query(
+      'SELECT id, status FROM campaigns WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL',
+      [id, user.organizationId],
+    );
+    if (!camp.rows.length) throw new AppError(404, 'Campaign not found', ErrorCodes.NOT_FOUND);
+
+    const status = (camp.rows[0] as { status: string }).status;
+    if (status !== 'draft' && status !== 'paused') {
+      throw new AppError(400, 'Can only remove participants from draft or paused campaigns', ErrorCodes.BAD_REQUEST);
+    }
+
+    const result = await db.write.query(
+      'DELETE FROM campaign_participants WHERE campaign_id = $1',
+      [id],
+    );
+    return { deleted: result.rowCount ?? 0 };
   });
 
   app.post('/api/campaigns/:id/reset-progress', { preHandler: [requireUser] }, async (request) => {
