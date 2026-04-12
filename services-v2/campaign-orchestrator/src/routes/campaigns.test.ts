@@ -2,15 +2,16 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createTestApp, createMockDb, createMockRabbitMQ } from '@getsale/test-utils-v2';
 import { registerCampaignRoutes } from './campaigns';
 
-const TEST_ORG_ID = '11111111-1111-1111-1111-111111111111';
-const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
+const TEST_ORG_ID = '11111111-1111-4111-8111-111111111111';
+const TEST_USER_ID = '22222222-2222-4222-8222-222222222222';
 
 const authHeaders = {
   'x-user-id': TEST_USER_ID,
   'x-organization-id': TEST_ORG_ID,
   'x-user-role': 'owner',
-  'content-type': 'application/json',
 };
+
+const jsonAuthHeaders = { ...authHeaders, 'content-type': 'application/json' };
 
 const mockScheduler = {
   scheduleCampaign: vi.fn().mockResolvedValue(0),
@@ -59,7 +60,7 @@ describe('Campaigns Routes (v2 Fastify)', () => {
   describe('POST /api/campaigns', () => {
     it('creates a campaign', async () => {
       const created = {
-        id: '33333333-3333-3333-3333-333333333333',
+        id: '33333333-3333-4333-a333-333333333333',
         organization_id: TEST_ORG_ID,
         name: 'Test Campaign',
         status: 'draft',
@@ -81,7 +82,7 @@ describe('Campaigns Routes (v2 Fastify)', () => {
       const res = await inject({
         method: 'POST',
         url: '/api/campaigns',
-        headers: authHeaders,
+        headers: jsonAuthHeaders,
         payload: { name: 'Test Campaign' },
       });
 
@@ -98,7 +99,7 @@ describe('Campaigns Routes (v2 Fastify)', () => {
 
       const res = await inject({
         method: 'DELETE',
-        url: '/api/campaigns/33333333-3333-3333-3333-333333333333',
+        url: '/api/campaigns/33333333-3333-4333-a333-333333333333',
         headers: authHeaders,
       });
 
@@ -113,7 +114,7 @@ describe('Campaigns Routes (v2 Fastify)', () => {
 
       const res = await inject({
         method: 'DELETE',
-        url: '/api/campaigns/33333333-3333-3333-3333-333333333333',
+        url: '/api/campaigns/33333333-3333-4333-a333-333333333333',
         headers: authHeaders,
       });
 
@@ -123,10 +124,12 @@ describe('Campaigns Routes (v2 Fastify)', () => {
     });
 
     it('deletes a draft campaign', async () => {
-      db.read.query.mockResolvedValueOnce({
-        rows: [{ status: 'draft', created_by_user_id: TEST_USER_ID }],
-        rowCount: 1,
-      });
+      db.read.query
+        .mockResolvedValueOnce({
+          rows: [{ status: 'draft', created_by_user_id: TEST_USER_ID }],
+          rowCount: 1,
+        })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 });
 
       (db.withOrgContext as any).mockImplementation(async (_target: string, _orgId: string, fn: any) => {
         const client = await db.write.connect();
@@ -136,11 +139,10 @@ describe('Campaigns Routes (v2 Fastify)', () => {
           client.release();
         }
       });
-      db.write.query.mockResolvedValueOnce(undefined);
 
       const res = await inject({
         method: 'DELETE',
-        url: '/api/campaigns/33333333-3333-3333-3333-333333333333',
+        url: '/api/campaigns/33333333-3333-4333-a333-333333333333',
         headers: authHeaders,
       });
 
@@ -154,7 +156,7 @@ describe('Campaigns Routes (v2 Fastify)', () => {
 
       const res = await inject({
         method: 'POST',
-        url: '/api/campaigns/33333333-3333-3333-3333-333333333333/pause',
+        url: '/api/campaigns/33333333-3333-4333-a333-333333333333/pause',
         headers: authHeaders,
       });
 
@@ -169,7 +171,7 @@ describe('Campaigns Routes (v2 Fastify)', () => {
 
       const res = await inject({
         method: 'POST',
-        url: '/api/campaigns/33333333-3333-3333-3333-333333333333/pause',
+        url: '/api/campaigns/33333333-3333-4333-a333-333333333333/pause',
         headers: authHeaders,
       });
 

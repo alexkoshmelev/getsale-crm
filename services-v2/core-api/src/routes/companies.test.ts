@@ -2,15 +2,16 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createTestApp, createMockDb, createMockRabbitMQ } from '@getsale/test-utils-v2';
 import { registerCompanyRoutes } from './companies';
 
-const TEST_ORG_ID = '11111111-1111-1111-1111-111111111111';
-const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
+const TEST_ORG_ID = '11111111-1111-4111-8111-111111111111';
+const TEST_USER_ID = '22222222-2222-4222-8222-222222222222';
 
 const authHeaders = {
   'x-user-id': TEST_USER_ID,
   'x-organization-id': TEST_ORG_ID,
   'x-user-role': 'owner',
-  'content-type': 'application/json',
 };
+
+const jsonAuthHeaders = { ...authHeaders, 'content-type': 'application/json' };
 
 describe('Companies Routes (v2 Fastify)', () => {
   let inject: Awaited<ReturnType<typeof createTestApp>>['inject'];
@@ -43,7 +44,7 @@ describe('Companies Routes (v2 Fastify)', () => {
 
     it('returns paginated companies', async () => {
       const mockCompanies = [{
-        id: '33333333-3333-3333-3333-333333333333',
+        id: '33333333-3333-4333-a333-333333333333',
         organization_id: TEST_ORG_ID,
         name: 'Acme Corp',
         industry: 'Tech',
@@ -70,7 +71,7 @@ describe('Companies Routes (v2 Fastify)', () => {
   describe('POST /api/crm/companies', () => {
     it('creates a company', async () => {
       const created = {
-        id: '44444444-4444-4444-4444-444444444444',
+        id: '44444444-4444-4444-8444-444444444444',
         organization_id: TEST_ORG_ID,
         name: 'New Company',
         industry: 'Retail',
@@ -80,7 +81,7 @@ describe('Companies Routes (v2 Fastify)', () => {
       const res = await inject({
         method: 'POST',
         url: '/api/crm/companies',
-        headers: authHeaders,
+        headers: jsonAuthHeaders,
         payload: { name: 'New Company', industry: 'Retail' },
       });
 
@@ -95,7 +96,7 @@ describe('Companies Routes (v2 Fastify)', () => {
 
   describe('PUT /api/crm/companies/:id', () => {
     it('updates a company', async () => {
-      const companyId = '55555555-5555-5555-5555-555555555555';
+      const companyId = '55555555-5555-4555-a555-555555555555';
       const existing = { id: companyId, organization_id: TEST_ORG_ID, name: 'Old Name', industry: 'Tech' };
       const updated = { ...existing, name: 'Updated Name' };
 
@@ -105,7 +106,7 @@ describe('Companies Routes (v2 Fastify)', () => {
       const res = await inject({
         method: 'PUT',
         url: `/api/crm/companies/${companyId}`,
-        headers: authHeaders,
+        headers: jsonAuthHeaders,
         payload: { name: 'Updated Name' },
       });
 
@@ -120,26 +121,28 @@ describe('Companies Routes (v2 Fastify)', () => {
 
       const res = await inject({
         method: 'PUT',
-        url: '/api/crm/companies/55555555-5555-5555-5555-555555555555',
-        headers: authHeaders,
+        url: '/api/crm/companies/55555555-5555-4555-a555-555555555555',
+        headers: jsonAuthHeaders,
         payload: { name: 'Updated' },
       });
 
       expect(res.statusCode).toBe(404);
       const body = JSON.parse(res.body);
-      expect(body.error).toContain('not found');
+      expect(body.error).toMatch(/not found/i);
     });
   });
 
   describe('DELETE /api/crm/companies/:id', () => {
     it('deletes a company', async () => {
-      const companyId = '66666666-6666-6666-6666-666666666666';
-      db.read.query
-        .mockResolvedValueOnce({ rows: [{ id: companyId }], rowCount: 1 })
-        .mockResolvedValueOnce({ rows: [{ c: 0 }], rowCount: 1 });
-      db.write.query
-        .mockResolvedValueOnce(undefined)
-        .mockResolvedValueOnce(undefined);
+      const companyId = '66666666-6666-4666-a666-666666666666';
+      let q = 0;
+      db.read.query.mockImplementation(async () => {
+        q += 1;
+        if (q === 1) return { rows: [{ id: companyId }], rowCount: 1 };
+        if (q === 2) return { rows: [{ c: 0 }], rowCount: 1 };
+        if (q === 3) return { rows: [], rowCount: 0 };
+        return { rows: [], rowCount: 0 };
+      });
 
       const res = await inject({
         method: 'DELETE',
@@ -155,7 +158,7 @@ describe('Companies Routes (v2 Fastify)', () => {
 
       const res = await inject({
         method: 'DELETE',
-        url: '/api/crm/companies/66666666-6666-6666-6666-666666666666',
+        url: '/api/crm/companies/66666666-6666-4666-a666-666666666666',
         headers: authHeaders,
       });
 
@@ -163,10 +166,14 @@ describe('Companies Routes (v2 Fastify)', () => {
     });
 
     it('returns 409 when company has deals', async () => {
-      const companyId = '66666666-6666-6666-6666-666666666666';
-      db.read.query
-        .mockResolvedValueOnce({ rows: [{ id: companyId }], rowCount: 1 })
-        .mockResolvedValueOnce({ rows: [{ c: 3 }], rowCount: 1 });
+      const companyId = '66666666-6666-4666-a666-666666666666';
+      let q = 0;
+      db.read.query.mockImplementation(async () => {
+        q += 1;
+        if (q === 1) return { rows: [{ id: companyId }], rowCount: 1 };
+        if (q === 2) return { rows: [{ c: 3 }], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      });
 
       const res = await inject({
         method: 'DELETE',

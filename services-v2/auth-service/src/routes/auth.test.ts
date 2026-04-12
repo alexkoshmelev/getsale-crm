@@ -5,8 +5,8 @@ import { signAccessToken, signRefreshToken, hashRefreshToken } from '../helpers'
 import { AUTH_COOKIE_ACCESS, AUTH_COOKIE_REFRESH } from '../cookies';
 import { registerAuthRoutes } from './auth';
 
-const TEST_ORG_ID = '11111111-1111-1111-1111-111111111111';
-const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
+const TEST_ORG_ID = '11111111-1111-4111-8111-111111111111';
+const TEST_USER_ID = '22222222-2222-4222-8222-222222222222';
 
 describe('Auth Router (v2 Fastify)', () => {
   let inject: Awaited<ReturnType<typeof createTestApp>>['inject'];
@@ -310,7 +310,6 @@ describe('Auth Router (v2 Fastify)', () => {
       const res = await inject({
         method: 'POST',
         url: '/api/auth/refresh',
-        headers: { 'content-type': 'application/json' },
       });
 
       expect(res.statusCode).toBe(400);
@@ -342,8 +341,9 @@ describe('Auth Router (v2 Fastify)', () => {
       const res = await inject({
         method: 'POST',
         url: '/api/auth/refresh',
-        headers: { 'content-type': 'application/json' },
-        cookies: { [AUTH_COOKIE_REFRESH]: refreshToken },
+        headers: {
+          cookie: `${AUTH_COOKIE_REFRESH}=${encodeURIComponent(refreshToken)}`,
+        },
       });
 
       expect(res.statusCode).toBe(200);

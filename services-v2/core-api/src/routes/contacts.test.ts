@@ -2,15 +2,16 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createTestApp, createMockDb, createMockRabbitMQ } from '@getsale/test-utils-v2';
 import { registerContactRoutes } from './contacts';
 
-const TEST_ORG_ID = '11111111-1111-1111-1111-111111111111';
-const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
+const TEST_ORG_ID = '11111111-1111-4111-8111-111111111111';
+const TEST_USER_ID = '22222222-2222-4222-8222-222222222222';
 
 const authHeaders = {
   'x-user-id': TEST_USER_ID,
   'x-organization-id': TEST_ORG_ID,
   'x-user-role': 'owner',
-  'content-type': 'application/json',
 };
+
+const jsonAuthHeaders = { ...authHeaders, 'content-type': 'application/json' };
 
 const mockContactsCache = {
   get: vi.fn().mockResolvedValue(null),
@@ -25,6 +26,9 @@ describe('Contacts Routes (v2 Fastify)', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockContactsCache.get.mockResolvedValue(null);
+    mockContactsCache.set.mockResolvedValue(undefined);
+    mockContactsCache.invalidatePattern.mockResolvedValue(undefined);
     db = createMockDb();
     rabbitmq = createMockRabbitMQ();
 
@@ -41,7 +45,7 @@ describe('Contacts Routes (v2 Fastify)', () => {
 
   describe('GET /api/crm/contacts/:id', () => {
     it('returns contact with telegramGroups when present', async () => {
-      const contactId = '33333333-3333-3333-3333-333333333333';
+      const contactId = '33333333-3333-4333-a333-333333333333';
       const contactRow = {
         id: contactId,
         organization_id: TEST_ORG_ID,
@@ -81,13 +85,13 @@ describe('Contacts Routes (v2 Fastify)', () => {
 
       const res = await inject({
         method: 'GET',
-        url: '/api/crm/contacts/33333333-3333-3333-3333-333333333333',
+        url: '/api/crm/contacts/33333333-3333-4333-a333-333333333333',
         headers: authHeaders,
       });
 
       expect(res.statusCode).toBe(404);
       const body = JSON.parse(res.body);
-      expect(body.error).toContain('not found');
+      expect(body.error).toMatch(/not found/i);
     });
   });
 
@@ -98,9 +102,9 @@ describe('Contacts Routes (v2 Fastify)', () => {
       const res = await inject({
         method: 'POST',
         url: '/api/crm/contacts/import-from-telegram-group',
-        headers: authHeaders,
+        headers: jsonAuthHeaders,
         payload: {
-          bdAccountId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+          bdAccountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
           telegramChatId: '-100123',
           telegramChatTitle: 'Test Group',
         },
@@ -108,18 +112,18 @@ describe('Contacts Routes (v2 Fastify)', () => {
 
       expect(res.statusCode).toBe(404);
       const body = JSON.parse(res.body);
-      expect(body.error).toContain('not found');
+      expect(body.error).toMatch(/not found/i);
     });
 
     it('returns queued status when BD account is valid', async () => {
-      db.read.query.mockResolvedValueOnce({ rows: [{ id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }], rowCount: 1 });
+      db.read.query.mockResolvedValueOnce({ rows: [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }], rowCount: 1 });
 
       const res = await inject({
         method: 'POST',
         url: '/api/crm/contacts/import-from-telegram-group',
-        headers: authHeaders,
+        headers: jsonAuthHeaders,
         payload: {
-          bdAccountId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+          bdAccountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
           telegramChatId: '-100123',
         },
       });

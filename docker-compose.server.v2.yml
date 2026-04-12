@@ -3,7 +3,7 @@
 # All app images are pulled from the DigitalOcean registry.
 # Set REGISTRY in .env to override (default: registry.digitalocean.com/regestry-getsale-ai)
 #
-# Required in .env (copy from env.server.v2.example): POSTGRES_PASSWORD, REDIS_PASSWORD,
+# Required in .env (copy from .env.example §2 — production): POSTGRES_PASSWORD, REDIS_PASSWORD,
 # RABBITMQ_PASSWORD, JWT_SECRET, JWT_REFRESH_SECRET, INTERNAL_AUTH_SECRET. Services use
 # RABBITMQ_URL built from RABBITMQ_PASSWORD (amqp://getsale:${RABBITMQ_PASSWORD}@rabbitmq:5672).
 #
@@ -109,6 +109,8 @@ services:
     container_name: getsale-crm-v2-migrations
     environment:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@getsale-crm-v2-postgres:5432/postgres
+      - NODE_ENV=production
+      # Optional: RUN_SEEDS=true to load demo seeds on deploy (default skips seeds in production)
     depends_on:
       postgres: { condition: service_healthy }
     networks:

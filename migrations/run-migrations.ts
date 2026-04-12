@@ -3,7 +3,7 @@ import knex from 'knex';
 import knexConfig from './knexfile';
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5433/postgres`,
+  connectionString: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5434/postgres`,
 });
 
 async function waitForDatabase(maxRetries = 60, delay = 2000) {
@@ -71,15 +71,21 @@ async function runMigrations() {
     
     console.log('\n✅ Migrations completed successfully');
 
-    // Демо-данные создаются сидами (001_initial_data, 002_demo_access), не миграциями.
-    // Сиды идемпотентны: 001 — merge; 002 — создаёт демо только если demo-workspace ещё нет.
-    console.log('\n🌱 Running database seeds (001, 002 demo + chats, 003 extra demo deals)...');
-    try {
-      await db.seed.run();
-      console.log('✅ Seeds completed successfully');
-    } catch (error: any) {
-      console.error('⚠️  Error running seeds:', error.message || error);
-      // Don't fail the whole process if seeds fail
+    const shouldSeed =
+      process.env.RUN_SEEDS === 'true' ||
+      (process.env.NODE_ENV !== 'production' && process.env.RUN_SEEDS !== 'false');
+
+    if (!shouldSeed) {
+      console.log('\n⏭️  Skipping seeds (production: set RUN_SEEDS=true to run)');
+    } else {
+      console.log('\n🌱 Running database seeds...');
+      try {
+        await db.seed.run();
+        console.log('✅ Seeds completed successfully');
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error('⚠️  Error running seeds:', msg);
+      }
     }
   } catch (error: any) {
     console.error('❌ Error running migrations:', error.message || error);

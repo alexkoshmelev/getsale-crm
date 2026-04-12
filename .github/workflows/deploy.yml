@@ -86,7 +86,7 @@ jobs:
           context: ./frontend
           file: ./docker/frontend/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/getsale-crm:frontend
+          tags: ${{ env.REGISTRY }}/getsale-crm-v2:frontend
           build-args: |
             NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL || 'https://api-crm.getsale.ai' }}
             NEXT_PUBLIC_WS_URL=${{ vars.NEXT_PUBLIC_WS_URL || 'wss://ws-crm.getsale.ai' }}
@@ -119,7 +119,7 @@ jobs:
           context: .
           file: ./docker/migrations/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/getsale-crm:migrations
+          tags: ${{ env.REGISTRY }}/getsale-crm-v2:migrations
           build-args: BUILDKIT_INLINE_CACHE=1
 
   deploy:
@@ -162,6 +162,6 @@ jobs:
             docker compose -f docker-compose.server.v2.yml pull
             docker compose -f docker-compose.server.v2.yml up -d postgres redis rabbitmq
             sleep 30
-            docker compose -f docker-compose.server.v2.yml run --rm migrations || true
+            docker compose -f docker-compose.server.v2.yml run --rm migrations
             docker compose -f docker-compose.server.v2.yml up -d
             docker compose -f docker-compose.server.v2.yml ps

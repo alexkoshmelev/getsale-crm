@@ -26,18 +26,20 @@ Point your shell at minikube's Docker daemon so images are available inside the 
 eval $(minikube docker-env)
 ```
 
-Build each service (run from the repo root):
+Build each service (run from the repo root) using the shared v2 Dockerfile:
 
 ```bash
-docker build -t getsale/gateway:latest         -f services-v2/gateway/Dockerfile .
-docker build -t getsale/core-api:latest         -f services-v2/core-api/Dockerfile .
-docker build -t getsale/messaging-api:latest    -f services-v2/messaging-api/Dockerfile .
-docker build -t getsale/campaign-worker:latest  -f services-v2/campaign-worker/Dockerfile .
-docker build -t getsale/notification-hub:latest -f services-v2/notification-hub/Dockerfile .
-docker build -t getsale/auth-service:latest     -f services-v2/auth-service/Dockerfile .
-docker build -t getsale/telegram-sm:latest      -f services-v2/telegram-sm/Dockerfile .
-docker build -t getsale/frontend:latest         -f services-v2/frontend/Dockerfile .
+docker build --build-arg SERVICE=gateway -t getsale/gateway:latest -f services-v2/Dockerfile.template .
+docker build --build-arg SERVICE=core-api -t getsale/core-api:latest -f services-v2/Dockerfile.template .
+docker build --build-arg SERVICE=messaging-api -t getsale/messaging-api:latest -f services-v2/Dockerfile.template .
+docker build --build-arg SERVICE=campaign-worker -t getsale/campaign-worker:latest -f services-v2/Dockerfile.template .
+docker build --build-arg SERVICE=notification-hub -t getsale/notification-hub:latest -f services-v2/Dockerfile.template .
+docker build --build-arg SERVICE=auth-service -t getsale/auth-service:latest -f services-v2/Dockerfile.template .
+docker build --build-arg SERVICE=telegram-session-manager -t getsale/telegram-sm:latest -f services-v2/Dockerfile.template .
+docker build -t getsale/frontend:latest -f docker/frontend/Dockerfile ./frontend
 ```
+
+Production deployments use [docker-compose.server.v2.yml](../docker-compose.server.v2.yml) and the DigitalOcean registry (see [.github/workflows/deploy.yml](../.github/workflows/deploy.yml)).
 
 ### 3. Deploy infrastructure
 

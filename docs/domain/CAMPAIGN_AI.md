@@ -10,7 +10,7 @@
 
 Пул `openrouter/free` может отдать **reasoning/thinking** модели. Они часто заполняют `choices[0].message.reasoning` и оставляют `message.content: null`, особенно при ограниченном `max_tokens` → 502 «empty response». В запросе к OpenRouter для репрайза передаётся `reasoning: { effort: "none" }`, чтобы по возможности отключить выделение бюджета на reasoning; если всё равно пусто — задайте конкретную не-reasoning модель или пресет (`@preset/...`), не полагайтесь на случайный free-маршрут.
 
-**Дефолт для репрайза кампании:** пресет OpenRouter `@preset/copyright` (константа `DEFAULT_OPENROUTER_CAMPAIGN_PRESET` в [`openrouter-models.ts`](../../services/ai-service/src/openrouter-models.ts)): запрос идёт в Chat Completions с `model: @preset/...` и одним сообщением `user` с текстом кампании. Переопределение: **`OPENROUTER_CAMPAIGN_MODEL`**. Устаревший **`OPENROUTER_MODEL`** используется только как fallback, если feature-specific переменная пуста. Auto-respond и саммаризация чата задаются отдельно: **`OPENROUTER_AUTO_RESPOND_MODEL`**, **`OPENROUTER_CHAT_SUMMARIZE_MODEL`** (см. `.env.example`).
+**Дефолт для репрайза кампании:** пресет OpenRouter `@preset/copyright` (константа `DEFAULT_OPENROUTER_CAMPAIGN_PRESET` в [`openrouter-models.ts`](../../services-v2/ai-service/src/openrouter-models.ts)): запрос идёт в Chat Completions с `model: @preset/...` и одним сообщением `user` с текстом кампании. Переопределение: **`OPENROUTER_CAMPAIGN_MODEL`**. Устаревший **`OPENROUTER_MODEL`** используется только как fallback, если feature-specific переменная пуста. Auto-respond и саммаризация чата задаются отдельно: **`OPENROUTER_AUTO_RESPOND_MODEL`**, **`OPENROUTER_CHAT_SUMMARIZE_MODEL`** (см. `.env.example`).
 
 ## Обогащение контактов и FLOOD_WAIT
 

@@ -27,6 +27,21 @@ export function createErrorHandler(log: Logger) {
       return;
     }
 
+    const fstCode = (error as FastifyError).code;
+    if (
+      typeof (error as FastifyError).statusCode === 'number' &&
+      (error as FastifyError).statusCode! >= 400 &&
+      (error as FastifyError).statusCode! < 500 &&
+      typeof fstCode === 'string' &&
+      fstCode.startsWith('FST_ERR')
+    ) {
+      reply.code((error as FastifyError).statusCode!).send({
+        error: error.message,
+        code: ErrorCodes.VALIDATION,
+      });
+      return;
+    }
+
     if (error.name === 'ZodError' || (error as any).issues) {
       reply.code(400).send({
         error: 'Validation failed',

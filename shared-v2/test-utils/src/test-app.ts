@@ -1,6 +1,13 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
-import { extractUserHook } from '@getsale/service-framework';
+import type { Logger } from '@getsale/logger';
+import { createErrorHandler, extractUserHook } from '@getsale/service-framework';
+
+const silentTestLogger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+} as unknown as Logger;
 
 export interface TestAppOptions {
   cookieParser?: boolean;
@@ -25,6 +32,7 @@ export async function createTestApp(
   options: TestAppOptions = {},
 ): Promise<{ app: FastifyInstance; inject: InjectFn }> {
   const app = Fastify({ logger: false });
+  app.setErrorHandler(createErrorHandler(silentTestLogger));
 
   if (options.cookieParser !== false) {
     await app.register(cookie);

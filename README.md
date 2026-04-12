@@ -42,8 +42,6 @@
 
 ```bash
 npm install
-make dev
-# или
 docker compose -f docker-compose.v2.yml up -d
 
 # Фронтенд: http://localhost:5173
@@ -81,7 +79,7 @@ kubectl apply -f k8s/
 
 ```
 getsale-crm/
-├── services-v2/             # Микросервисы v2 (12 сервисов, Fastify)
+├── services-v2/             # Микросервисы (12 сервисов, Fastify)
 │   ├── gateway/             # API Gateway + WS proxy
 │   ├── auth-service/        # Identity & Access Management
 │   ├── core-api/            # CRM + Pipeline + Teams + Activity
@@ -94,7 +92,7 @@ getsale-crm/
 │   ├── user-service/        # Профили, подписки
 │   ├── ai-service/          # AI Agents & Drafts
 │   └── analytics-worker/    # Аналитика (background)
-├── shared-v2/               # Общие библиотеки v2
+├── shared-v2/               # Общие библиотеки (@getsale/*)
 │   ├── types/               # TypeScript типы
 │   ├── events/              # Event definitions
 │   ├── logger/              # Структурированное логирование
@@ -102,8 +100,6 @@ getsale-crm/
 │   ├── queue/               # RabbitMQ клиент
 │   ├── service-framework/   # Fastify фреймворк сервисов
 │   └── telegram/            # Telegram GramJS обёртка
-├── services/                # [Legacy v1] Микросервисы (14 сервисов, Express)
-├── shared/                  # [Legacy v1] Общие библиотеки
 ├── frontend/                # Next.js App Router
 ├── migrations/              # Knex миграции БД
 ├── infrastructure/          # Prometheus конфигурация
@@ -118,8 +114,8 @@ getsale-crm/
 │   ├── operations/          # Развёртывание и инфра
 │   ├── runbooks/            # Операционные runbooks
 │   └── adr/                 # Architecture Decision Records
-├── docker-compose.v2.yml    # Docker Compose v2 (active)
-├── docker-compose.yml       # Docker Compose v1 (legacy)
+├── docker-compose.v2.yml    # Локальная разработка (v2)
+├── docker-compose.server.v2.yml  # Продакшн-сервер (v2)
 └── Makefile                 # Команды для разработки
 ```
 

@@ -1,39 +1,28 @@
-# Порядок сборки shared-пакетов (monorepo)
+# Порядок сборки shared-пакетов (v2)
 
-**Дата:** 2026-03-16
+**Дата:** 2026-04-12
 
 ## Назначение
 
-В монорепозитории пакеты `shared/types`, `shared/events`, `shared/logger`, `shared/utils`, `shared/service-core` собираются через `tsc`. Порядок сборки должен соответствовать графу зависимостей: каждый пакет собирается только после того, как собраны все его зависимости (чтобы были доступны `dist/*.js` и `dist/*.d.ts`).
+Пакеты в `shared-v2/*` собираются через `tsc`. Порядок должен соответствовать графу зависимостей: у каждого пакета уже есть собранные `dist/` у зависимостей.
 
-## Канонический порядок
+## Канонический порядок (v2)
 
-1. **shared/types** — нет зависимостей от других shared
-2. **shared/events** — зависит от `@getsale/types`
-3. **shared/logger** — не зависит от других shared
-4. **shared/utils** — зависит от `@getsale/events`, `@getsale/logger`
-5. **shared/service-core** — зависит от `@getsale/events`, `@getsale/logger`, `@getsale/utils`
+См. [`services-v2/Dockerfile.template`](../../services-v2/Dockerfile.template) и скрипт **`build:v2`** в корневом [`package.json`](../../package.json):
 
-Кратко: **types → events → logger → utils → service-core**.
+**types → logger → events → cache → queue → service-framework → telegram**
+
+Затем собирается нужный сервис в `services-v2/<name>`.
 
 ## Где соблюдать порядок
 
-- **docker/Dockerfile.service** — prod-сборка бэкенд-сервисов
-- **docker/services/Dockerfile.dev** — dev-образы бэкенд-сервисов
-- **docker-entrypoint.sh** — сборка shared при старте dev-контейнера
+- **`services-v2/Dockerfile.template`** — прод-образы бэкендов
+- **`npm run build:v2`** — локальная полная сборка
 
-При добавлении нового shared-пакета или новой зависимости между пакетами нужно обновить порядок во всех трёх местах и в этой документации.
+При добавлении пакета или новой зависимости обновите порядок в этих местах и здесь.
 
 ## Проверка локально
 
-Из корня репозитория:
-
 ```bash
-npm run build --workspace=shared/types && \
-npm run build --workspace=shared/events && \
-npm run build --workspace=shared/logger && \
-npm run build --workspace=shared/utils && \
-npm run build --workspace=shared/service-core
+npm run build:v2
 ```
-
-Успешное выполнение подтверждает, что порядок и код shared-пакетов корректны.

@@ -3,8 +3,8 @@ import { createTestApp } from '@getsale/test-utils-v2';
 import { registerCampaignRephraseRoutes } from './campaign-rephrase';
 import { DEFAULT_OPENROUTER_CAMPAIGN_PRESET } from '../openrouter-models';
 
-const TEST_ORG_ID = '11111111-1111-1111-1111-111111111111';
-const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
+const TEST_ORG_ID = '11111111-1111-4111-8111-111111111111';
+const TEST_USER_ID = '22222222-2222-4222-8222-222222222222';
 
 const authHeaders = {
   'x-user-id': TEST_USER_ID,
@@ -111,10 +111,10 @@ describe('Campaign Rephrase Routes (v2 Fastify)', () => {
     });
 
     it('returns 502 when OpenRouter returns non-ok', async () => {
-      fetchMock.mockResolvedValueOnce({
+      fetchMock.mockResolvedValue({
         ok: false,
-        status: 429,
-        text: () => Promise.resolve('Rate limited'),
+        status: 500,
+        text: () => Promise.resolve('upstream error'),
       } as any);
 
       const res = await inject({

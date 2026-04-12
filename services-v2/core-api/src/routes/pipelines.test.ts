@@ -2,15 +2,16 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createTestApp, createMockDb } from '@getsale/test-utils-v2';
 import { registerPipelineRoutes } from './pipelines';
 
-const TEST_ORG_ID = '11111111-1111-1111-1111-111111111111';
-const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
+const TEST_ORG_ID = '11111111-1111-4111-8111-111111111111';
+const TEST_USER_ID = '22222222-2222-4222-8222-222222222222';
 
 const authHeaders = {
   'x-user-id': TEST_USER_ID,
   'x-organization-id': TEST_ORG_ID,
   'x-user-role': 'owner',
-  'content-type': 'application/json',
 };
+
+const jsonAuthHeaders = { ...authHeaders, 'content-type': 'application/json' };
 
 const mockPipelineCache = {
   get: vi.fn().mockResolvedValue(null),
@@ -24,6 +25,9 @@ describe('Pipelines Routes (v2 Fastify)', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockPipelineCache.get.mockResolvedValue(null);
+    mockPipelineCache.set.mockResolvedValue(undefined);
+    mockPipelineCache.invalidatePattern.mockResolvedValue(undefined);
     db = createMockDb();
 
     const { inject: inj } = await createTestApp((app) =>
@@ -48,7 +52,7 @@ describe('Pipelines Routes (v2 Fastify)', () => {
 
     it('returns pipelines list', async () => {
       const mockPipelines = [{
-        id: '33333333-3333-3333-3333-333333333333',
+        id: '33333333-3333-4333-a333-333333333333',
         organization_id: TEST_ORG_ID,
         name: 'Sales Pipeline',
         description: 'Main sales flow',
@@ -68,7 +72,7 @@ describe('Pipelines Routes (v2 Fastify)', () => {
   describe('POST /api/pipeline', () => {
     it('creates pipeline with default stages', async () => {
       const created = {
-        id: '44444444-4444-4444-4444-444444444444',
+        id: '44444444-4444-4444-8444-444444444444',
         organization_id: TEST_ORG_ID,
         name: 'New Pipeline',
         description: null,
@@ -85,7 +89,7 @@ describe('Pipelines Routes (v2 Fastify)', () => {
       const res = await inject({
         method: 'POST',
         url: '/api/pipeline',
-        headers: authHeaders,
+        headers: jsonAuthHeaders,
         payload: { name: 'New Pipeline' },
       });
 
@@ -97,7 +101,7 @@ describe('Pipelines Routes (v2 Fastify)', () => {
 
     it('creates pipeline with custom name and description', async () => {
       const created = {
-        id: '55555555-5555-5555-5555-555555555555',
+        id: '55555555-5555-4555-a555-555555555555',
         organization_id: TEST_ORG_ID,
         name: 'Custom Pipeline',
         description: 'For testing',
@@ -114,7 +118,7 @@ describe('Pipelines Routes (v2 Fastify)', () => {
       const res = await inject({
         method: 'POST',
         url: '/api/pipeline',
-        headers: authHeaders,
+        headers: jsonAuthHeaders,
         payload: { name: 'Custom Pipeline', description: 'For testing', isDefault: true },
       });
 
@@ -132,7 +136,7 @@ describe('Pipelines Routes (v2 Fastify)', () => {
 
       const res = await inject({
         method: 'DELETE',
-        url: '/api/pipeline/44444444-4444-4444-4444-444444444444',
+        url: '/api/pipeline/44444444-4444-4444-8444-444444444444',
         headers: authHeaders,
       });
 
@@ -140,7 +144,7 @@ describe('Pipelines Routes (v2 Fastify)', () => {
     });
 
     it('deletes a pipeline', async () => {
-      db.read.query.mockResolvedValueOnce({ rows: [{ id: '44444444-4444-4444-4444-444444444444' }], rowCount: 1 });
+      db.read.query.mockResolvedValueOnce({ rows: [{ id: '44444444-4444-4444-8444-444444444444' }], rowCount: 1 });
       db.write.query
         .mockResolvedValueOnce(undefined) // DELETE leads
         .mockResolvedValueOnce(undefined) // DELETE stages
@@ -148,7 +152,7 @@ describe('Pipelines Routes (v2 Fastify)', () => {
 
       const res = await inject({
         method: 'DELETE',
-        url: '/api/pipeline/44444444-4444-4444-4444-444444444444',
+        url: '/api/pipeline/44444444-4444-4444-8444-444444444444',
         headers: authHeaders,
       });
 

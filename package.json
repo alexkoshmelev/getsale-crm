@@ -4,9 +4,7 @@
   "description": "AI CRM SaaS - Enterprise Microservices Platform",
   "private": true,
   "workspaces": [
-    "services/*",
     "services-v2/*",
-    "shared/*",
     "shared-v2/*",
     "shared-v2/telegram"
   ],
@@ -17,7 +15,7 @@
     "dev:logs": "docker compose -f docker-compose.v2.yml logs -f",
     "dev:down": "docker compose -f docker-compose.v2.yml down",
     "dev:clean": "docker compose -f docker-compose.v2.yml down -v",
-    "build": "npm run build --workspaces",
+    "build": "npm run build:v2",
     "build:v2": "npm run build -w shared-v2/types -w shared-v2/logger -w shared-v2/events && npm run build -w shared-v2/cache -w shared-v2/queue -w shared-v2/service-framework -w shared-v2/telegram && npm run build -w services-v2/gateway -w services-v2/auth-service -w services-v2/core-api -w services-v2/messaging-api -w services-v2/telegram-session-manager -w services-v2/campaign-orchestrator -w services-v2/campaign-worker -w services-v2/automation-engine -w services-v2/notification-hub -w services-v2/analytics-worker -w services-v2/user-service -w services-v2/ai-service",
     "lint": "npm run lint --workspaces",
     "typecheck": "npm run typecheck --workspaces",
@@ -25,10 +23,7 @@
     "migrate:rollback": "cd migrations && npm run migrate:rollback",
     "migrate:status": "cd migrations && npm run migrate:status",
     "migrate:make": "cd migrations && npm run migrate:make",
-    "seed": "cd migrations && npm run seed",
-    "stage2-closure": "node scripts/stage2-closure-check.mjs",
-    "stage3-ids": "node scripts/print-stage3-ids.mjs",
-    "stage3-e2e": "node scripts/stage3-e2e-test.mjs"
+    "seed": "cd migrations && npm run seed"
   },
   "engines": {
     "node": ">=22.0.0",

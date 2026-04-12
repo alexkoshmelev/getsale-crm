@@ -3,7 +3,7 @@ import type { Knex } from 'knex';
 const config: { [key: string]: Knex.Config } = {
   development: {
     client: 'postgresql',
-    connection: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5433/postgres`,
+    connection: process.env.DATABASE_URL || `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5434/postgres`,
     pool: {
       min: 2,
       max: 10,
