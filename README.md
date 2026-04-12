@@ -2,7 +2,7 @@
 
 > **Event-driven, Microservices-based, AI-first CRM Platform**
 
-## Архитектура (v2 — active)
+## Архитектура (active stack)
 
 ### Микросервисы (12 сервисов)
 
@@ -19,7 +19,7 @@
 11. **ai-service** — AI Agents System (Draft generation, summarize, campaign rephrase) (port 4010)
 12. **analytics-worker** — Метрики конверсии, аналитика воронки (background worker)
 
-### Общие библиотеки (shared-v2/)
+### Общие библиотеки (shared/)
 
 - **@getsale/types** — TypeScript типы
 - **@getsale/events** — Event definitions
@@ -42,7 +42,7 @@
 
 ```bash
 npm install
-docker compose -f docker-compose.v2.yml up -d
+docker compose -f docker-compose.yml up -d
 
 # Фронтенд: http://localhost:5173
 # API Gateway: http://localhost:8000
@@ -79,7 +79,7 @@ kubectl apply -f k8s/
 
 ```
 getsale-crm/
-├── services-v2/             # Микросервисы (12 сервисов, Fastify)
+├── services/             # Микросервисы (12 сервисов, Fastify)
 │   ├── gateway/             # API Gateway + WS proxy
 │   ├── auth-service/        # Identity & Access Management
 │   ├── core-api/            # CRM + Pipeline + Teams + Activity
@@ -92,7 +92,7 @@ getsale-crm/
 │   ├── user-service/        # Профили, подписки
 │   ├── ai-service/          # AI Agents & Drafts
 │   └── analytics-worker/    # Аналитика (background)
-├── shared-v2/               # Общие библиотеки (@getsale/*)
+├── shared/               # Общие библиотеки (@getsale/*)
 │   ├── types/               # TypeScript типы
 │   ├── events/              # Event definitions
 │   ├── logger/              # Структурированное логирование
@@ -114,8 +114,8 @@ getsale-crm/
 │   ├── operations/          # Развёртывание и инфра
 │   ├── runbooks/            # Операционные runbooks
 │   └── adr/                 # Architecture Decision Records
-├── docker-compose.v2.yml    # Локальная разработка (v2)
-├── docker-compose.server.v2.yml  # Продакшн-сервер (v2)
+├── docker-compose.yml    # Локальная разработка
+├── docker-compose.server.yml  # Продакшн-сервер (Docker)
 └── Makefile                 # Команды для разработки
 ```
 

@@ -4,19 +4,19 @@
   "description": "AI CRM SaaS - Enterprise Microservices Platform",
   "private": true,
   "workspaces": [
-    "services-v2/*",
-    "shared-v2/*",
-    "shared-v2/telegram"
+    "services/*",
+    "shared/*",
+    "shared/telegram"
   ],
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev": "docker compose -f docker-compose.v2.yml up -d",
-    "dev:logs": "docker compose -f docker-compose.v2.yml logs -f",
-    "dev:down": "docker compose -f docker-compose.v2.yml down",
-    "dev:clean": "docker compose -f docker-compose.v2.yml down -v",
-    "build": "npm run build:v2",
-    "build:v2": "npm run build -w shared-v2/types -w shared-v2/logger -w shared-v2/events && npm run build -w shared-v2/cache -w shared-v2/queue -w shared-v2/service-framework -w shared-v2/telegram && npm run build -w services-v2/gateway -w services-v2/auth-service -w services-v2/core-api -w services-v2/messaging-api -w services-v2/telegram-session-manager -w services-v2/campaign-orchestrator -w services-v2/campaign-worker -w services-v2/automation-engine -w services-v2/notification-hub -w services-v2/analytics-worker -w services-v2/user-service -w services-v2/ai-service",
+    "dev": "docker compose -f docker-compose.yml up -d",
+    "dev:logs": "docker compose -f docker-compose.yml logs -f",
+    "dev:down": "docker compose -f docker-compose.yml down",
+    "dev:clean": "docker compose -f docker-compose.yml down -v",
+    "build": "npm run build:stack",
+    "build:stack": "npm run build -w shared/types -w shared/logger -w shared/events && npm run build -w shared/cache -w shared/queue -w shared/service-framework -w shared/telegram && npm run build -w services/gateway -w services/auth-service -w services/core-api -w services/messaging-api -w services/telegram-session-manager -w services/campaign-orchestrator -w services/campaign-worker -w services/automation-engine -w services/notification-hub -w services/analytics-worker -w services/user-service -w services/ai-service",
     "lint": "npm run lint --workspaces",
     "typecheck": "npm run typecheck --workspaces",
     "migrate": "cd migrations && npm run migrate",

@@ -2,7 +2,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: gateway-hpa
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app.kubernetes.io/part-of: getsale
 spec:
@@ -27,7 +27,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: core-api-hpa
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app.kubernetes.io/part-of: getsale
 spec:
@@ -49,7 +49,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: messaging-api-hpa
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app.kubernetes.io/part-of: getsale
 spec:
@@ -81,7 +81,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: campaign-worker-hpa
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app.kubernetes.io/part-of: getsale
 spec:
@@ -103,7 +103,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: notification-hub-hpa
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app.kubernetes.io/part-of: getsale
 spec:
@@ -125,7 +125,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: telegram-sm-hpa
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app.kubernetes.io/part-of: getsale
 spec:

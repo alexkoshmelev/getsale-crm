@@ -1,18 +1,18 @@
 ---
 description: Backend service coding standards for all microservices
-globs: services-v2/*/src/**/*.ts, shared-v2/*/src/**/*.ts, services/*/src/**/*.ts, shared/*/src/**/*.ts
+globs: services/*/src/**/*.ts, shared/*/src/**/*.ts
 alwaysApply: false
 ---
 
 # Backend Service Standards
 
-> **v2 is the active architecture.** All new development targets `services-v2/` using Fastify and `@getsale/service-framework`. The v1 `services/` directory (Express-based) is legacy and maintained only for reference.
+> **Backend services** live under `services/` using Fastify and `@getsale/service-framework`. The legacy Express monolith was removed; this tree is the only backend layout.
 
 ## Service Structure
 
 Every service MUST follow this file structure:
 ```
-services-v2/<name>/src/
+services/<name>/src/
   index.ts          — app setup, listen (≤60 lines)
   routes/           — one file per resource (companies.ts, leads.ts)
   middleware/        — service-specific middleware (if any)

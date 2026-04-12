@@ -8,7 +8,7 @@
 
 1. **До старта** вкладка «Участники» показывает не запись из БД, а **выбранную аудиторию**: `campaign.target_audience.contactIds` (127 id). Для черновика/паузы фронт берёт `campaign.selected_contacts` и рисует по ним таблицу — поэтому видно 127 строк. Колонка «Telegram ID» пустая, потому что у этих контактов в БД действительно нет `telegram_id` (или он пустой).
 
-2. **При старте** бэкенд ([execution.ts](../../services-v2/campaign-orchestrator/src/routes/execution.ts)) делает выборку контактов **с обязательным условием** `c.telegram_id IS NOT NULL AND c.telegram_id != ''`. То есть в участники попадают только контакты, у которых уже есть Telegram ID.
+2. **При старте** бэкенд ([execution.ts](../../services/campaign-orchestrator/src/routes/execution.ts)) делает выборку контактов **с обязательным условием** `c.telegram_id IS NOT NULL AND c.telegram_id != ''`. То есть в участники попадают только контакты, у которых уже есть Telegram ID.
 
 3. Если ни у одного из 127 выбранных контактов нет `telegram_id`, запрос возвращает **0 строк**. В цикле ни один контакт не добавляется в `campaign_participants` (`insertedCount = 0`).
 
@@ -85,7 +85,7 @@ sequenceDiagram
 "messaging-service circuit breaker tripped"
 ```
 
-В коде уже стоит фикс (varchar vs bigint): в `services-v2/messaging-api` (internal routes) используется согласованная типизация ID. Если на проде всё ещё 500, проверьте версию образа `messaging-api` и логи.
+В коде уже стоит фикс (varchar vs bigint): в `services/messaging-api` (internal routes) используется согласованная типизация ID. Если на проде всё ещё 500, проверьте версию образа `messaging-api` и логи.
 
 ### 2.2. «Chat not in sync list, skipping message»
 

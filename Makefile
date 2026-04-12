@@ -4,31 +4,31 @@ help: ## Показать справку
 	@echo "Доступные команды:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-dev: ## Запустить все сервисы v2 в Docker
-	docker compose -f docker-compose.v2.yml up -d --build 
+dev: ## Запустить все сервисы в Docker (docker-compose.yml)
+	docker compose -f docker-compose.yml up -d --build 
 
-dev-logs: ## Показать логи всех сервисов v2
-	docker compose -f docker-compose.v2.yml logs -f
+dev-logs: ## Показать логи всех сервисов (docker-compose.yml)
+	docker compose -f docker-compose.yml logs -f
 
-dev-down: ## Остановить все сервисы v2
-	docker compose -f docker-compose.v2.yml down
+dev-down: ## Остановить все сервисы
+	docker compose -f docker-compose.yml down
 
-dev-clean: ## Остановить v2 и удалить volumes
-	docker compose -f docker-compose.v2.yml down -v
+dev-clean: ## Остановить стек и удалить volumes
+	docker compose -f docker-compose.yml down -v
 
 # Observability stack (Prometheus, Grafana, Loki)
-obs: ## Запустить v2 + observability (Prometheus, Grafana, Loki)
-	docker compose -f docker-compose.v2.yml -f docker-compose.observability.yml up -d --build 
+obs: ## Запустить приложение + observability (Prometheus, Grafana, Loki)
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build 
 # --scale core-api=3 --scale messaging-api=2 --scale gateway=2
 
-obs-down: ## Остановить v2 + observability
-	docker compose -f docker-compose.v2.yml -f docker-compose.observability.yml down
+obs-down: ## Остановить приложение + observability
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml down
 
-obs-logs: ## Логи prometheus, grafana, loki (v2 + observability)
-	docker compose -f docker-compose.v2.yml -f docker-compose.observability.yml logs -f prometheus grafana loki
+obs-logs: ## Логи prometheus, grafana, loki (app + observability)
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml logs -f prometheus grafana loki
 
-obs-clean: ## Остановить v2 + observability и удалить volumes
-	docker compose -f docker-compose.v2.yml -f docker-compose.observability.yml down -v
+obs-clean: ## Остановить приложение + observability и удалить volumes
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml down -v
 
 # Load testing (k6 via Docker — no local install needed)
 K6_COMMON = docker run --rm -i --network getsale-crm_default \
@@ -39,7 +39,7 @@ K6_COMMON = docker run --rm -i --network getsale-crm_default \
 
 k6-reset: ## Сбросить rate limit ключи перед нагрузочным тестом
 	@echo "Flushing rate-limit keys in Redis..."
-	@docker compose -f docker-compose.v2.yml exec -T redis redis-cli EVAL "local c=0; for _,k in pairs(redis.call('KEYS','auth:*')) do redis.call('DEL',k); c=c+1 end; for _,k in pairs(redis.call('KEYS','rl:*')) do redis.call('DEL',k); c=c+1 end; return c" 0 || true
+	@docker compose -f docker-compose.yml exec -T redis redis-cli EVAL "local c=0; for _,k in pairs(redis.call('KEYS','auth:*')) do redis.call('DEL',k); c=c+1 end; for _,k in pairs(redis.call('KEYS','rl:*')) do redis.call('DEL',k); c=c+1 end; return c" 0 || true
 
 k6: k6-reset ## Запустить k6 smoke-тест (метрики → Prometheus → Grafana)
 	$(K6_COMMON) \
@@ -119,4 +119,4 @@ k8s-delete: ## Удалить все Kubernetes ресурсы
 	kubectl delete -f k8s/
 
 k8s-logs: ## Показать логи всех подов
-	kubectl logs -f -l app -n getsale-v2
+	kubectl logs -f -l app -n getsale

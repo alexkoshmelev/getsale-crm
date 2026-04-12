@@ -26,20 +26,20 @@ Point your shell at minikube's Docker daemon so images are available inside the 
 eval $(minikube docker-env)
 ```
 
-Build each service (run from the repo root) using the shared v2 Dockerfile:
+Build each service (run from the repo root) using the shared Dockerfile:
 
 ```bash
-docker build --build-arg SERVICE=gateway -t getsale/gateway:latest -f services-v2/Dockerfile.template .
-docker build --build-arg SERVICE=core-api -t getsale/core-api:latest -f services-v2/Dockerfile.template .
-docker build --build-arg SERVICE=messaging-api -t getsale/messaging-api:latest -f services-v2/Dockerfile.template .
-docker build --build-arg SERVICE=campaign-worker -t getsale/campaign-worker:latest -f services-v2/Dockerfile.template .
-docker build --build-arg SERVICE=notification-hub -t getsale/notification-hub:latest -f services-v2/Dockerfile.template .
-docker build --build-arg SERVICE=auth-service -t getsale/auth-service:latest -f services-v2/Dockerfile.template .
-docker build --build-arg SERVICE=telegram-session-manager -t getsale/telegram-sm:latest -f services-v2/Dockerfile.template .
+docker build --build-arg SERVICE=gateway -t getsale/gateway:latest -f services/Dockerfile.template .
+docker build --build-arg SERVICE=core-api -t getsale/core-api:latest -f services/Dockerfile.template .
+docker build --build-arg SERVICE=messaging-api -t getsale/messaging-api:latest -f services/Dockerfile.template .
+docker build --build-arg SERVICE=campaign-worker -t getsale/campaign-worker:latest -f services/Dockerfile.template .
+docker build --build-arg SERVICE=notification-hub -t getsale/notification-hub:latest -f services/Dockerfile.template .
+docker build --build-arg SERVICE=auth-service -t getsale/auth-service:latest -f services/Dockerfile.template .
+docker build --build-arg SERVICE=telegram-session-manager -t getsale/telegram-sm:latest -f services/Dockerfile.template .
 docker build -t getsale/frontend:latest -f docker/frontend/Dockerfile ./frontend
 ```
 
-Production deployments use [docker-compose.server.v2.yml](../docker-compose.server.v2.yml) and the DigitalOcean registry (see [.github/workflows/deploy.yml](../.github/workflows/deploy.yml)).
+Production deployments use [docker-compose.server.yml](../docker-compose.server.yml) and the DigitalOcean registry (see [.github/workflows/deploy.yml](../.github/workflows/deploy.yml)).
 
 ### 3. Deploy infrastructure
 
@@ -55,16 +55,16 @@ kubectl apply -f k8s/rabbitmq.yaml
 Wait for infrastructure pods to be ready:
 
 ```bash
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgres  -n getsale-v2 --timeout=120s
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=redis     -n getsale-v2 --timeout=120s
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=rabbitmq  -n getsale-v2 --timeout=120s
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgres  -n getsale --timeout=120s
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=redis     -n getsale --timeout=120s
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=rabbitmq  -n getsale --timeout=120s
 ```
 
 ### 4. Run migrations
 
 ```bash
 kubectl apply -f k8s/migrations-job.yaml
-kubectl wait --for=condition=complete job/migrations -n getsale-v2 --timeout=120s
+kubectl wait --for=condition=complete job/migrations -n getsale --timeout=120s
 ```
 
 ### 5. Deploy application services
@@ -80,7 +80,7 @@ This applies all remaining manifests (deployments, services, ingress, HPAs).
 Access the gateway locally without an Ingress controller:
 
 ```bash
-kubectl port-forward svc/gateway 8000:8000 -n getsale-v2
+kubectl port-forward svc/gateway 8000:8000 -n getsale
 ```
 
 Then open <http://localhost:8000>.
@@ -89,16 +89,16 @@ Then open <http://localhost:8000>.
 
 ```bash
 # Pod status
-kubectl get pods -n getsale-v2
+kubectl get pods -n getsale
 
 # Follow gateway logs
-kubectl logs -f deploy/gateway -n getsale-v2
+kubectl logs -f deploy/gateway -n getsale
 
 # HPA status
-kubectl get hpa -n getsale-v2
+kubectl get hpa -n getsale
 
 # Describe a specific pod
-kubectl describe pod <pod-name> -n getsale-v2
+kubectl describe pod <pod-name> -n getsale
 ```
 
 ## Scaling
@@ -106,7 +106,7 @@ kubectl describe pod <pod-name> -n getsale-v2
 HPAs are defined in `hpa.yaml`. To manually override replica count:
 
 ```bash
-kubectl scale deploy/gateway --replicas=4 -n getsale-v2
+kubectl scale deploy/gateway --replicas=4 -n getsale
 ```
 
 > **Note**: manual scaling is overridden once the HPA reconciles. Edit the HPA
@@ -116,9 +116,9 @@ kubectl scale deploy/gateway --replicas=4 -n getsale-v2
 
 | Symptom | Command |
 |---|---|
-| Pod stuck in `Pending` | `kubectl describe pod <name> -n getsale-v2` — check Events for scheduling issues |
-| CrashLoopBackOff | `kubectl logs <pod> -n getsale-v2 --previous` — inspect the previous container's logs |
-| Service unreachable | `kubectl get svc -n getsale-v2` — verify ClusterIP / port mappings |
-| Ingress 502/504 | `kubectl describe ingress getsale-ingress -n getsale-v2` — check backend health |
-| Migrations failed | `kubectl logs job/migrations -n getsale-v2` — read migration output |
+| Pod stuck in `Pending` | `kubectl describe pod <name> -n getsale` — check Events for scheduling issues |
+| CrashLoopBackOff | `kubectl logs <pod> -n getsale --previous` — inspect the previous container's logs |
+| Service unreachable | `kubectl get svc -n getsale` — verify ClusterIP / port mappings |
+| Ingress 502/504 | `kubectl describe ingress getsale-ingress -n getsale` — check backend health |
+| Migrations failed | `kubectl logs job/migrations -n getsale` — read migration output |
 | OOMKilled | Increase memory limits in the deployment manifest and re-apply |

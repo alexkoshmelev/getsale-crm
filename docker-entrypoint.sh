@@ -5,17 +5,17 @@ set -e
 ORIGINAL_DIR=$(pwd)
 
 # Check if shared packages need to be built using absolute paths
-# types, events, logger are in shared-v2/ after v1→v2 migration; utils and service-core remain in shared/
-if [ ! -d "/app/shared-v2/types/dist" ] || [ ! -d "/app/shared-v2/events/dist" ] || [ ! -d "/app/shared/utils/dist" ] || [ ! -d "/app/shared-v2/logger/dist" ] || [ ! -d "/app/shared/service-core/dist" ]; then
+# Primary packages live under shared/; legacy references to shared/utils and shared/service-core may remain below.
+if [ ! -d "/app/shared/types/dist" ] || [ ! -d "/app/shared/events/dist" ] || [ ! -d "/app/shared/utils/dist" ] || [ ! -d "/app/shared/logger/dist" ] || [ ! -d "/app/shared/service-core/dist" ]; then
   echo "Building shared packages..."
   
   # Change to /app for workspace commands
   cd /app
   
   echo "Building @getsale/types..."
-  if ! npm run build --workspace=shared-v2/types; then
+  if ! npm run build --workspace=shared/types; then
     echo "⚠️  Warning: Failed to build @getsale/types"
-    if [ ! -d "/app/shared-v2/types/dist" ]; then
+    if [ ! -d "/app/shared/types/dist" ]; then
       echo "❌ Error: @getsale/types dist directory missing and build failed"
       exit 1
     else
@@ -24,9 +24,9 @@ if [ ! -d "/app/shared-v2/types/dist" ] || [ ! -d "/app/shared-v2/events/dist" ]
   fi
   
   echo "Building @getsale/events..."
-  if ! npm run build --workspace=shared-v2/events; then
+  if ! npm run build --workspace=shared/events; then
     echo "⚠️  Warning: Failed to build @getsale/events"
-    if [ ! -d "/app/shared-v2/events/dist" ]; then
+    if [ ! -d "/app/shared/events/dist" ]; then
       echo "❌ Error: @getsale/events dist directory missing and build failed"
       exit 1
     else
@@ -35,9 +35,9 @@ if [ ! -d "/app/shared-v2/types/dist" ] || [ ! -d "/app/shared-v2/events/dist" ]
   fi
   
   echo "Building @getsale/logger..."
-  if ! npm run build --workspace=shared-v2/logger; then
+  if ! npm run build --workspace=shared/logger; then
     echo "⚠️  Warning: Failed to build @getsale/logger"
-    if [ ! -d "/app/shared-v2/logger/dist" ]; then
+    if [ ! -d "/app/shared/logger/dist" ]; then
       echo "❌ Error: @getsale/logger dist directory missing and build failed"
       exit 1
     else

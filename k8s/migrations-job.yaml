@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: migrations
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app: migrations
     app.kubernetes.io/part-of: getsale
@@ -23,7 +23,7 @@ spec:
             - sh
             - -c
             - |
-              until pg_isready -h postgres.getsale-v2.svc.cluster.local -p 5432 -U postgres; do
+              until pg_isready -h postgres.getsale.svc.cluster.local -p 5432 -U postgres; do
                 echo "Waiting for PostgreSQL..."
                 sleep 2
               done

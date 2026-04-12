@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: prometheus-config
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app: prometheus
     app.kubernetes.io/part-of: getsale
@@ -17,7 +17,7 @@ data:
           - role: pod
             namespaces:
               names:
-                - getsale-v2
+                - getsale
         relabel_configs:
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_part_of]
             action: keep
@@ -37,7 +37,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: prometheus
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app: prometheus
     app.kubernetes.io/part-of: getsale
@@ -88,7 +88,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: prometheus-data
-  namespace: getsale-v2
+  namespace: getsale
 spec:
   accessModes:
     - ReadWriteOnce
@@ -100,7 +100,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: prometheus
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app: prometheus
     app.kubernetes.io/part-of: getsale
@@ -117,7 +117,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: prometheus
-  namespace: getsale-v2
+  namespace: getsale
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -139,13 +139,13 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: prometheus
-    namespace: getsale-v2
+    namespace: getsale
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: grafana
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app: grafana
     app.kubernetes.io/part-of: getsale
@@ -191,7 +191,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: grafana-data
-  namespace: getsale-v2
+  namespace: getsale
 spec:
   accessModes:
     - ReadWriteOnce
@@ -203,7 +203,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: grafana
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app: grafana
     app.kubernetes.io/part-of: getsale
@@ -220,7 +220,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: loki
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app: loki
     app.kubernetes.io/part-of: getsale
@@ -262,7 +262,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: loki-data
-  namespace: getsale-v2
+  namespace: getsale
 spec:
   accessModes:
     - ReadWriteOnce
@@ -274,7 +274,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: loki
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app: loki
     app.kubernetes.io/part-of: getsale

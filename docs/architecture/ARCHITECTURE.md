@@ -53,7 +53,7 @@ MongoDB и Elasticsearch **не используются**.
 | **Campaign Service** | Cold outreach: кампании, последовательности, участники, воркер отправок |
 | **Activity Service** | Лента активности организации |
 
-Детальное описание API — в [CRM_API](../api/CRM_API.md), [INTERNAL_API](../api/INTERNAL_API.md) и в коде маршрутов `services-v2/<name>/src/routes/`.
+Детальное описание API — в [CRM_API](../api/CRM_API.md), [INTERNAL_API](../api/INTERNAL_API.md) и в коде маршрутов `services/<name>/src/routes/`.
 
 ---
 

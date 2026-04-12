@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: messaging-api
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app.kubernetes.io/name: messaging-api
     app.kubernetes.io/part-of: getsale
@@ -60,7 +60,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: messaging-api
-  namespace: getsale-v2
+  namespace: getsale
   labels:
     app.kubernetes.io/name: messaging-api
     app.kubernetes.io/part-of: getsale

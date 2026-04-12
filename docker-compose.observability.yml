@@ -1,5 +1,5 @@
-# Observability stack for v2 services
-# Usage: docker compose -f docker-compose.v2.yml -f docker-compose.observability.yml up -d
+# Observability stack (Prometheus, Grafana, Loki) for local dev
+# Usage: docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 #
 # Endpoints:
 #   Grafana:    http://localhost:3100 (admin / admin)

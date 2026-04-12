@@ -52,9 +52,9 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./services-v2/Dockerfile.template
+          file: ./services/Dockerfile.template
           push: true
-          tags: ${{ env.REGISTRY }}/getsale-crm-v2:${{ matrix.service }}
+          tags: ${{ env.REGISTRY }}/getsale-crm:${{ matrix.service }}
           build-args: |
             SERVICE=${{ matrix.service }}
             BUILDKIT_INLINE_CACHE=1
@@ -86,7 +86,7 @@ jobs:
           context: ./frontend
           file: ./docker/frontend/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/getsale-crm-v2:frontend
+          tags: ${{ env.REGISTRY }}/getsale-crm:frontend
           build-args: |
             NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL || 'https://api-crm.getsale.ai' }}
             NEXT_PUBLIC_WS_URL=${{ vars.NEXT_PUBLIC_WS_URL || 'wss://ws-crm.getsale.ai' }}
@@ -119,7 +119,7 @@ jobs:
           context: .
           file: ./docker/migrations/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/getsale-crm-v2:migrations
+          tags: ${{ env.REGISTRY }}/getsale-crm:migrations
           build-args: BUILDKIT_INLINE_CACHE=1
 
   deploy:
@@ -139,8 +139,8 @@ jobs:
       - name: 'Install dependencies'
         run: npm install
 
-      - name: 'Build v2 (TypeScript)'
-        run: npm run build:v2
+      - name: 'Build backend (TypeScript)'
+        run: npm run build:stack
 
       - name: 'Deploy to Prod Server'
         uses: appleboy/ssh-action@v1.0.3
@@ -157,11 +157,11 @@ jobs:
             echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" >> .env
             echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
             echo "${{ secrets.DO_REGISTRY_PASSWORD }}" | docker login registry.digitalocean.com -u "${{ secrets.DO_REGISTRY_USERNAME }}" --password-stdin
-            docker compose -f docker-compose.server.v2.yml down
+            docker compose -f docker-compose.server.yml down
             docker image prune -f
-            docker compose -f docker-compose.server.v2.yml pull
-            docker compose -f docker-compose.server.v2.yml up -d postgres redis rabbitmq
+            docker compose -f docker-compose.server.yml pull
+            docker compose -f docker-compose.server.yml up -d postgres redis rabbitmq
             sleep 30
-            docker compose -f docker-compose.server.v2.yml run --rm migrations
-            docker compose -f docker-compose.server.v2.yml up -d
-            docker compose -f docker-compose.server.v2.yml ps
+            docker compose -f docker-compose.server.yml run --rm migrations
+            docker compose -f docker-compose.server.yml up -d
+            docker compose -f docker-compose.server.yml ps
