@@ -34,3 +34,5 @@ export { correlationIdHook } from './middleware/correlation';
 export { createErrorHandler } from './middleware/error-handler';
 export { createRateLimiter, type RateLimitConfig } from './middleware/rate-limit';
 export { validate } from './middleware/validation';
+
+export { withTransactionalPublish } from './transactional-publish';

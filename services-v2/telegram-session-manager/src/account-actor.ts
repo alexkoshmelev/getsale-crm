@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 import { EventType, type Event } from '@getsale/events';
@@ -12,6 +11,7 @@ import {
   decryptIfNeeded, encryptSession,
   buildTelegramProxy, buildGramJsClientOptions, destroyTelegramClient,
   telegramInvokeWithFloodRetry,
+  isFloodWaitError, getFloodWaitSeconds,
 } from '@getsale/telegram';
 import { serializeMessage, getMessageText, type SerializedTelegramMessage } from './telegram-serialize';
 import { AccountRateLimiter } from './rate-limiter';
@@ -23,6 +23,9 @@ import {
   ForwardMessagePayload, SendBulkPayload, LoadOlderHistoryPayload,
   AccountLifecyclePayload, SyncHistoryPayload,
 } from './command-types';
+import { doSpambotCheck, handleSpambotCheckWithBackoff } from './spambot-checker';
+
+export { handleSyncHistory, type SyncHandlerDeps } from './sync-handler';
 
 const FATAL_AUTH_ERRORS = [
   'AUTH_KEY_UNREGISTERED',
@@ -63,7 +66,7 @@ export class AccountActor {
   private sessionSaveInterval: NodeJS.Timeout | null = null;
   private keepaliveInterval: NodeJS.Timeout | null = null;
   private keepaliveFailures = 0;
-  private _spambotCheckInFlight = false;
+  private _spambotCheckInFlight = { current: false };
 
   constructor(config: AccountActorConfig) {
     this.accountId = config.accountId;
@@ -271,11 +274,11 @@ export class AccountActor {
     await this.pool.query(
       `INSERT INTO messages
         (id, organization_id, content, direction, bd_account_id, channel_id, channel, telegram_message_id,
-         telegram_entities, telegram_media, reply_to_msg_id, created_at)
+         telegram_entities, telegram_media, reply_to_telegram_id, created_at)
        VALUES ($1, $2, $3, 'outbound', $4, $5, 'telegram', $6, $7, $8, $9, NOW())
        ON CONFLICT DO NOTHING`,
       [messageId, this.organizationId, text, this.accountId, chatId, msg.id,
-       serialized.telegram_entities, serialized.telegram_media, serialized.reply_to_msg_id],
+       serialized.telegram_entities, serialized.telegram_media, serialized.reply_to_telegram_id],
     );
 
     await this.ensureConversation({
@@ -619,11 +622,11 @@ export class AccountActor {
     await this.pool.query(
       `INSERT INTO messages
         (id, organization_id, content, direction, bd_account_id, channel_id, channel,
-         telegram_message_id, contact_id, telegram_entities, telegram_media, reply_to_msg_id, created_at)
+         telegram_message_id, contact_id, telegram_entities, telegram_media, reply_to_telegram_id, created_at)
        VALUES ($1, $2, $3, 'inbound', $4, $5, 'telegram', $6, $7, $8, $9, $10, NOW())
        ON CONFLICT DO NOTHING`,
       [messageId, this.organizationId, text, this.accountId, chatId, msg.id,
-       contactId, serialized.telegram_entities, serialized.telegram_media, serialized.reply_to_msg_id],
+       contactId, serialized.telegram_entities, serialized.telegram_media, serialized.reply_to_telegram_id],
     );
 
     await this.ensureConversation({
@@ -982,17 +985,57 @@ export class AccountActor {
       peer = await this.resolvePeer(chatId);
     }
 
-    const params: Record<string, unknown> = { message: payload.text };
-    if (payload.replyTo) {
-      params.replyTo = payload.replyTo;
-    }
+    let sentMessage: any;
 
-    const sentMessage = await telegramInvokeWithFloodRetry(
-      this.log,
-      this.accountId,
-      'SendMessage',
-      () => this.client!.sendMessage(peer, params),
-    );
+    if (payload.fileBase64 && payload.mediaType) {
+      const fileBuffer = Buffer.from(payload.fileBase64, 'base64');
+      const sendFileParams: Record<string, unknown> = {
+        file: new Api.InputFile({
+          id: BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)) as any,
+          parts: 1,
+          name: payload.fileName || 'file',
+          md5Checksum: '',
+        }),
+        caption: payload.text || '',
+        forceDocument: false,
+      };
+      if (payload.replyTo) sendFileParams.replyTo = payload.replyTo;
+
+      if (payload.mediaType === 'voice') {
+        sendFileParams.voiceNote = true;
+        sendFileParams.attributes = [new Api.DocumentAttributeAudio({
+          voice: true,
+          duration: payload.mediaDuration || 0,
+        })];
+      } else if (payload.mediaType === 'video_note') {
+        sendFileParams.videoNote = true;
+        sendFileParams.attributes = [new Api.DocumentAttributeVideo({
+          roundMessage: true,
+          duration: payload.mediaDuration || 0,
+          w: 384,
+          h: 384,
+        })];
+      }
+
+      sentMessage = await telegramInvokeWithFloodRetry(
+        this.log,
+        this.accountId,
+        'SendFile',
+        () => this.client!.sendFile(peer, { ...sendFileParams, file: fileBuffer }),
+      );
+    } else {
+      const params: Record<string, unknown> = { message: payload.text };
+      if (payload.replyTo) {
+        params.replyTo = payload.replyTo;
+      }
+
+      sentMessage = await telegramInvokeWithFloodRetry(
+        this.log,
+        this.accountId,
+        'SendMessage',
+        () => this.client!.sendMessage(peer, params),
+      );
+    }
 
     const telegramMessageId = sentMessage?.id ?? null;
     const resolvedChatId = sentMessage?.chatId?.toString() ?? chatId;
@@ -1255,6 +1298,10 @@ export class AccountActor {
     );
   }
 
+  /**
+   * Full implementation lives here; future refactor should delegate to `handleSyncHistory` in
+   * `./sync-handler.ts` with a populated `SyncHandlerDeps`.
+   */
   public async syncHistory(organizationId: string): Promise<void> {
     const SYNC_DELAY_MS = 1100;
     const SYNC_INITIAL_MESSAGES_PER_CHAT = parseInt(process.env.SYNC_INITIAL_MESSAGES_PER_CHAT || '100', 10) || 100;
@@ -1339,7 +1386,7 @@ export class AccountActor {
                     addOffset: 0,
                     maxId: 0,
                     minId: 0,
-                    hash: BigInt(0),
+                    hash: BigInt(0) as any,
                   }),
                 ),
               );
@@ -1540,7 +1587,7 @@ export class AccountActor {
           filter: new Api.ChannelParticipantsRecent(),
           offset,
           limit,
-          hash: BigInt(0),
+          hash: BigInt(0) as any,
         }),
       ),
     ) as any;
@@ -1670,7 +1717,7 @@ export class AccountActor {
         fromPeer,
         toPeer,
         id: [payload.telegramMessageId],
-        randomId: [BigInt(Math.floor(Math.random() * 2 ** 52))],
+        randomId: [BigInt(Math.floor(Math.random() * 2 ** 52)) as any],
       })),
     );
 
@@ -1718,7 +1765,7 @@ export class AccountActor {
         limit: 50,
         maxId: 0,
         minId: 0,
-        hash: BigInt(0),
+        hash: BigInt(0) as any,
       })),
     ) as any;
 
@@ -1816,166 +1863,32 @@ export class AccountActor {
   }
 
   private async handleSpambotCheck(_payload: AccountLifecyclePayload): Promise<void> {
-    await this.doSpambotCheck();
+    await doSpambotCheck({
+      client: this.client,
+      pool: this.pool,
+      log: this.log,
+      accountId: this.accountId,
+      rateLimiter: this.rateLimiter,
+    });
   }
 
   private async handleSpambotCheckWithBackoff(): Promise<void> {
-    if (this._spambotCheckInFlight) return;
-    this._spambotCheckInFlight = true;
-    try {
-      const result = await this.doSpambotCheck();
-      if (result === 'restricted') {
-        const retryRow = await this.pool.query(
-          'SELECT spam_check_retry_count FROM bd_accounts WHERE id = $1',
-          [this.accountId],
-        );
-        const retryCount = retryRow.rows[0]?.spam_check_retry_count ?? 0;
-        const BACKOFF_SCHEDULE = [10 * 60, 30 * 60, 60 * 60, 2 * 60 * 60];
-        const backoffSeconds = BACKOFF_SCHEDULE[Math.min(retryCount, BACKOFF_SCHEDULE.length - 1)]!;
-        const blockedUntil = new Date(Date.now() + backoffSeconds * 1000);
-
-        await this.pool.query(
-          `UPDATE bd_accounts
-           SET send_blocked_until = $1,
-               spam_check_retry_count = spam_check_retry_count + 1,
-               spam_restricted_at = COALESCE(spam_restricted_at, NOW()),
-               spam_restriction_source = 'auto_peer_flood'
-           WHERE id = $2`,
-          [blockedUntil, this.accountId],
-        );
-
-        this.log.info({
-          message: `Account spam-blocked with backoff`,
+    await handleSpambotCheckWithBackoff({
+      pool: this.pool,
+      log: this.log,
+      accountId: this.accountId,
+      organizationId: this.organizationId,
+      rabbitmq: this.rabbitmq,
+      doSpambotCheck: () =>
+        doSpambotCheck({
+          client: this.client,
+          pool: this.pool,
+          log: this.log,
           accountId: this.accountId,
-          backoffSeconds,
-          retryCount: retryCount + 1,
-          blockedUntil: blockedUntil.toISOString(),
-        });
-
-        this.rabbitmq.publishEvent({
-          id: randomUUID(),
-          type: EventType.BD_ACCOUNT_SPAM_RESTRICTED,
-          timestamp: new Date(),
-          organizationId: this.organizationId,
-          userId: '',
-          data: { bdAccountId: this.accountId, source: 'peer_flood_escalation' },
-        } as unknown as Event).catch(() => {});
-      } else if (result === 'free') {
-        const cooldown = new Date(Date.now() + 5 * 60 * 1000);
-        await this.pool.query(
-          `UPDATE bd_accounts
-           SET spam_restricted_at = NULL,
-               spam_check_retry_count = 0,
-               spam_restriction_source = NULL,
-               send_blocked_until = GREATEST(send_blocked_until, $1)
-           WHERE id = $2`,
-          [cooldown, this.accountId],
-        );
-
-        this.rabbitmq.publishEvent({
-          id: randomUUID(),
-          type: EventType.BD_ACCOUNT_SPAM_CLEARED,
-          timestamp: new Date(),
-          organizationId: this.organizationId,
-          userId: '',
-          data: { bdAccountId: this.accountId },
-        } as unknown as Event).catch(() => {});
-      } else if (result === 'unknown') {
-        const blockedUntil = new Date(Date.now() + 30 * 60 * 1000);
-        await this.pool.query(
-          `UPDATE bd_accounts SET send_blocked_until = GREATEST(send_blocked_until, $1) WHERE id = $2`,
-          [blockedUntil, this.accountId],
-        );
-        this.log.info({ message: 'SpamBot reply unrecognized, conservative 30min block', accountId: this.accountId });
-      } else if (result === 'error') {
-        const blockedUntil = new Date(Date.now() + 10 * 60 * 1000);
-        await this.pool.query(
-          `UPDATE bd_accounts SET send_blocked_until = $1 WHERE id = $2 AND (send_blocked_until IS NULL OR send_blocked_until < $1)`,
-          [blockedUntil, this.accountId],
-        );
-        this.log.info({ message: `SpamBot check error, blocking for 10min`, accountId: this.accountId });
-      }
-    } finally {
-      this._spambotCheckInFlight = false;
-    }
-  }
-
-  private classifySpamBotReply(text: string): 'free' | 'restricted' | 'unknown' {
-    const t = text.toLowerCase();
-    if (
-      t.includes('ваш аккаунт свободен') ||
-      t.includes('no limits') ||
-      t.includes('good news') ||
-      t.includes('your account is free') ||
-      t.includes('нет ограничений') ||
-      t.includes('not limited') ||
-      t.includes('is not limited')
-    ) {
-      return 'free';
-    }
-    if (
-      t.includes('ограничен') ||
-      t.includes('limited') ||
-      t.includes('restrict') ||
-      t.includes('spam') ||
-      t.includes('ваш аккаунт ограничен') ||
-      t.includes('your account is limited') ||
-      t.includes('limits are applied')
-    ) {
-      return 'restricted';
-    }
-    return 'unknown';
-  }
-
-  private async doSpambotCheck(): Promise<'free' | 'restricted' | 'unknown' | 'error'> {
-    if (!this.client?.connected) return 'error';
-
-    if (this.rateLimiter.getFloodWaitRemaining() > 0) {
-      this.log.warn({ message: 'SpamBot check skipped: FloodWait active', accountId: this.accountId });
-      return 'error';
-    }
-
-    const SPAMBOT = 'SpamBot';
-
-    try {
-      const entity = await this.client.getInputEntity(SPAMBOT);
-      await this.client.sendMessage(entity, { message: '/start' });
-
-      await new Promise((r) => setTimeout(r, 3000));
-
-      const history = await this.client.invoke(new Api.messages.GetHistory({
-        peer: entity,
-        offsetId: 0,
-        offsetDate: 0,
-        addOffset: 0,
-        limit: 3,
-        maxId: 0,
-        minId: 0,
-        hash: BigInt(0),
-      })) as any;
-
-      const msgs = history?.messages ?? [];
-      const botReply = msgs.find((m: any) => !m.out && m.message)?.message ?? '';
-      const classification = this.classifySpamBotReply(botReply);
-
-      await this.pool.query(
-        `UPDATE bd_accounts SET last_spambot_check_at = NOW(), last_spambot_result = $1 WHERE id = $2`,
-        [classification, this.accountId],
-      );
-
-      if (classification === 'restricted') {
-        await this.pool.query(
-          `UPDATE bd_accounts SET spam_restricted_at = COALESCE(spam_restricted_at, NOW()), spam_restriction_source = 'spambot_check' WHERE id = $1`,
-          [this.accountId],
-        );
-      }
-
-      this.log.info({ message: `SpamBot check completed`, accountId: this.accountId, result: classification, rawReply: botReply.slice(0, 200) });
-      return classification;
-    } catch (err) {
-      this.log.warn({ message: 'SpamBot check failed', accountId: this.accountId, error: String(err) });
-      return 'error';
-    }
+          rateLimiter: this.rateLimiter,
+        }),
+      spambotCheckInFlight: this._spambotCheckInFlight,
+    });
   }
 
   async stop(): Promise<void> {
@@ -2002,22 +1915,7 @@ export class AccountActor {
   }
 }
 
-function isFloodWaitError(err: unknown): boolean {
-  if (err instanceof Error) {
-    return err.message.includes('FloodWait') || err.constructor.name === 'FloodWaitError';
-  }
-  return false;
-}
-
 function isPeerFloodError(err: unknown): boolean {
   const msg = String(err);
   return msg.includes('PEER_FLOOD') || msg.includes('PeerFloodError');
-}
-
-function getFloodWaitSeconds(err: unknown): number {
-  if (err && typeof err === 'object' && 'seconds' in err) {
-    return (err as { seconds: number }).seconds;
-  }
-  const match = String(err).match(/(\d+)\s*seconds?/i);
-  return match ? parseInt(match[1], 10) : 60;
 }

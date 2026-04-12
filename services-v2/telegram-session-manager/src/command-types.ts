@@ -46,6 +46,8 @@ export interface TelegramCommand<T = unknown> {
   timestamp?: number;
 }
 
+export type MediaType = 'voice' | 'video_note' | 'photo' | 'video' | 'document';
+
 export interface SendMessagePayload {
   conversationId: string;
   text: string;
@@ -60,6 +62,9 @@ export interface SendMessagePayload {
   messageId?: string;
   fileBase64?: string;
   fileName?: string;
+  mediaType?: MediaType;
+  mediaDuration?: number;
+  mimeType?: string;
 }
 
 export interface TypingPayload {

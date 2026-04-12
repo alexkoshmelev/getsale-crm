@@ -158,12 +158,39 @@ export class RabbitMQClient {
    * Publish a command to a specific queue (not the topic exchange).
    * Used for direct command routing (e.g. telegram:commands:{account_id}).
    */
+  private static readonly COMMAND_QUEUE_ARGS = {
+    'x-dead-letter-exchange': 'commands.dlx',
+    'x-message-ttl': 3600000,
+    'x-max-length': 1000,
+    'x-overflow': 'reject-publish',
+  } as const;
+
+  private commandQueueOptions(queueName: string): amqp.Options.AssertQueue {
+    return {
+      durable: true,
+      maxPriority: 10,
+      arguments: {
+        ...RabbitMQClient.COMMAND_QUEUE_ARGS,
+        'x-dead-letter-routing-key': queueName,
+      },
+    };
+  }
+
+  private async ensureCommandDlx(ch: Channel | ConfirmChannel, queueName: string): Promise<void> {
+    const dlxExchange = 'commands.dlx';
+    const dlqName = `${queueName}.dlq`;
+    await ch.assertExchange(dlxExchange, 'direct', { durable: true });
+    await ch.assertQueue(dlqName, { durable: true });
+    await ch.bindQueue(dlqName, dlxExchange, queueName);
+  }
+
   async publishCommand<T>(queueName: string, command: { type: string; payload: T; id?: string; priority?: number }): Promise<void> {
     if (!this.publishChannel) {
       this.log.warn({ message: 'Publish channel not ready, command dropped', queue: queueName, command_type: command.type });
       return;
     }
-    await this.publishChannel.assertQueue(queueName, { durable: true, maxPriority: 10 });
+    await this.ensureCommandDlx(this.publishChannel, queueName);
+    await this.publishChannel.assertQueue(queueName, this.commandQueueOptions(queueName));
     this.publishChannel.sendToQueue(
       queueName,
       Buffer.from(JSON.stringify(command)),
@@ -248,7 +275,8 @@ export class RabbitMQClient {
     if (!this.consumeChannel) throw new Error('RabbitMQ consume channel not initialized');
 
     const cons = this.consumeChannel;
-    await cons.assertQueue(queueName, { durable: true, maxPriority: 10 });
+    await this.ensureCommandDlx(cons, queueName);
+    await cons.assertQueue(queueName, this.commandQueueOptions(queueName));
     cons.prefetch(prefetch ?? 1);
 
     await cons.consume(queueName, async (msg) => {

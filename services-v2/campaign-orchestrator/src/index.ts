@@ -10,6 +10,9 @@ import { registerParticipantRoutes } from './routes/participants';
 import { registerStaticDataRoutes } from './routes/static-data';
 import { subscribeToCampaignEvents } from './event-handlers';
 import { subscribeToSpamFloodEvents } from './spam-flood-handlers';
+import { startStaleJobSweeper } from './stale-job-sweeper';
+import { registerAccountHealthRoutes } from './routes/account-health';
+import { WarmupService } from './warmup-service';
 
 async function main() {
   const redis = new RedisClient({ url: process.env.REDIS_URL || 'redis://localhost:6380' });
@@ -47,9 +50,15 @@ async function main() {
   registerSequenceRoutes(app, { db, log });
   registerExecutionRoutes(app, { db, rabbitmq, log, redis, jobQueue });
   registerParticipantRoutes(app, { db, log });
+  registerAccountHealthRoutes(app, { pool: db.write, log, redis });
+
+  const warmupService = new WarmupService({ pool: db.write, log });
+  warmupService.start();
 
   await subscribeToCampaignEvents({ pool: db.write, rabbitmq, log, redis, jobQueue });
   await subscribeToSpamFloodEvents({ pool: db.write, rabbitmq, log, redis, jobQueue });
+
+  startStaleJobSweeper({ pool: db.write, log, jobQueue });
 
   await ctx.start();
 }

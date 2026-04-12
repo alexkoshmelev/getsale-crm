@@ -1,5 +1,6 @@
 import { Job } from 'bullmq';
 import { randomUUID } from 'crypto';
+import { createServer } from 'http';
 import { Pool } from 'pg';
 import { createLogger } from '@getsale/logger';
 import { RedisClient } from '@getsale/cache';
@@ -93,6 +94,78 @@ function expandSpintax(text: string): string {
     const parts = options.split('|').map((s) => s.trim());
     return parts[Math.floor(Math.random() * parts.length)] ?? '';
   });
+}
+
+type TemplateVariantRow = {
+  id: string;
+  content: string;
+  media_url: string | null;
+  media_type: string | null;
+  media_metadata: Record<string, any> | null;
+  variant_weight: number;
+};
+
+function pickWeightedTemplateVariant(variants: TemplateVariantRow[]): TemplateVariantRow {
+  if (variants.length === 1) return variants[0]!;
+  const weights = variants.map((v) => Math.max(0, Number(v.variant_weight) || 0));
+  const total = weights.reduce((a, b) => a + b, 0);
+  if (total <= 0) {
+    return variants[Math.floor(Math.random() * variants.length)]!;
+  }
+  let r = Math.random() * total;
+  for (let i = 0; i < variants.length; i++) {
+    r -= weights[i]!;
+    if (r < 0) return variants[i]!;
+  }
+  return variants[variants.length - 1]!;
+}
+
+async function applyAbTemplateVariant(
+  db: Pool,
+  campaignId: string,
+  step: {
+    variant_group: string | null;
+    content: string;
+    media_url: string | null;
+    media_type: string | null;
+    media_metadata: Record<string, any> | null;
+  },
+): Promise<{
+  content: string;
+  media_url: string | null;
+  media_type: string | null;
+  media_metadata: Record<string, any> | null;
+}> {
+  if (!step.variant_group) {
+    return {
+      content: step.content,
+      media_url: step.media_url,
+      media_type: step.media_type,
+      media_metadata: step.media_metadata,
+    };
+  }
+  const v = await db.query(
+    `SELECT id, content, media_url, media_type, media_metadata, variant_weight
+     FROM campaign_templates
+     WHERE campaign_id = $1 AND variant_group = $2`,
+    [campaignId, step.variant_group],
+  );
+  const rows = v.rows as TemplateVariantRow[];
+  if (rows.length === 0) {
+    return {
+      content: step.content,
+      media_url: step.media_url,
+      media_type: step.media_type,
+      media_metadata: step.media_metadata,
+    };
+  }
+  const picked = pickWeightedTemplateVariant(rows);
+  return {
+    content: picked.content,
+    media_url: picked.media_url,
+    media_type: picked.media_type,
+    media_metadata: picked.media_metadata,
+  };
 }
 
 function substituteVariables(
@@ -404,11 +477,13 @@ async function main() {
     }
 
     // Daily cap — DB-accurate count with per-account limit
+    const accountTz = (bdAccount as any).schedule_timezone || (bdAccount as any).timezone || audience.schedule?.timezone || 'UTC';
     const dailyCountRes = await pool.query(
       `SELECT COUNT(*)::int AS c FROM campaign_sends cs
        JOIN campaign_participants cp ON cp.id = cs.campaign_participant_id
-       WHERE cp.bd_account_id = $1 AND cs.status IN ('sent','queued') AND cs.sent_at >= CURRENT_DATE`,
-      [data.bdAccountId],
+       WHERE cp.bd_account_id = $1 AND cs.status IN ('sent','queued')
+         AND cs.sent_at >= (NOW() AT TIME ZONE $2)::date AT TIME ZONE $2`,
+      [data.bdAccountId, accountTz],
     );
     const dailyCount = Number(dailyCountRes.rows[0]?.c ?? 0);
     const perAccountLimit = bdAccount.max_dm_per_day ?? DEFAULT_DAILY_CAP;
@@ -446,7 +521,9 @@ async function main() {
 
     try {
       const seqRes = await pool.query(
-        `SELECT cs.id, cs.order_index, ct.content, cs.trigger_type, cs.delay_hours, cs.delay_minutes, cs.is_hidden, cs.conditions
+        `SELECT cs.id, cs.order_index, ct.content, ct.media_url, ct.media_type, ct.media_metadata,
+                ct.variant_group, ct.variant_weight,
+                cs.trigger_type, cs.delay_hours, cs.delay_minutes, cs.is_hidden, cs.conditions
          FROM campaign_sequences cs
          JOIN campaign_templates ct ON ct.id = cs.template_id
          WHERE cs.campaign_id = $1
@@ -456,9 +533,11 @@ async function main() {
       const steps = seqRes.rows as {
         id: string; order_index: number; content: string; trigger_type: string;
         delay_hours: number; delay_minutes: number; is_hidden: boolean; conditions: any;
+        media_url: string | null; media_type: string | null; media_metadata: Record<string, any> | null;
+        variant_group: string | null; variant_weight: number;
       }[];
-      const step = steps[data.stepIndex];
-      if (!step) {
+      const stepBase = steps[data.stepIndex];
+      if (!stepBase) {
         log.warn({ message: `Step ${data.stepIndex} not found for campaign ${data.campaignId}`, totalSteps: steps.length });
         await pool.query(
           "UPDATE campaign_participants SET status = 'failed', failed_at = NOW(), last_error = 'Step not found', updated_at = NOW() WHERE id = $1",
@@ -467,6 +546,9 @@ async function main() {
         await checkCampaignCompletion(data.campaignId);
         return;
       }
+
+      const variantResolved = await applyAbTemplateVariant(pool, data.campaignId, stepBase);
+      const step = { ...stepBase, ...variantResolved };
 
       if (step.is_hidden) {
         log.info({ message: `Step ${data.stepIndex} is hidden, skipping to next`, campaignId: data.campaignId });
@@ -526,20 +608,42 @@ async function main() {
         payload: { channelId: data.channelId, duration: typingDuration },
       });
 
+      const sendPayload: Record<string, unknown> = {
+        conversationId: null,
+        text: messageText,
+        channelId: data.channelId,
+        organizationId: data.organizationId,
+        userId: '',
+        contactId: data.contactId,
+        campaignId: data.campaignId,
+        participantId: data.participantId,
+      };
+
+      if (step.media_url && step.media_type) {
+        try {
+          const mediaResp = await fetch(step.media_url);
+          if (mediaResp.ok) {
+            const buf = Buffer.from(await mediaResp.arrayBuffer());
+            sendPayload.fileBase64 = buf.toString('base64');
+            sendPayload.mediaType = step.media_type;
+            sendPayload.fileName = step.media_url.split('/').pop() || 'media';
+            if (step.media_metadata) {
+              if (step.media_metadata.duration) sendPayload.mediaDuration = step.media_metadata.duration;
+              if (step.media_metadata.mimeType) sendPayload.mimeType = step.media_metadata.mimeType;
+            }
+          } else {
+            log.warn({ message: 'Failed to fetch campaign media', url: step.media_url, httpStatus: String(mediaResp.status) });
+          }
+        } catch (mediaErr) {
+          log.warn({ message: 'Error fetching campaign media', url: step.media_url, error: String(mediaErr) });
+        }
+      }
+
       await rabbitmq.publishCommand(commandQueue, {
         id: randomUUID(),
         type: CommandType.SEND_MESSAGE,
         priority: 7,
-        payload: {
-          conversationId: null,
-          text: messageText,
-          channelId: data.channelId,
-          organizationId: data.organizationId,
-          userId: '',
-          contactId: data.contactId,
-          campaignId: data.campaignId,
-          participantId: data.participantId,
-        },
+        payload: sendPayload,
       });
 
       await pool.query(
@@ -582,8 +686,23 @@ async function main() {
 
   log.info({ message: `Campaign worker started (concurrency: ${concurrency})` });
 
+  const healthPort = parseInt(process.env.HEALTH_PORT || '4016', 10);
+  const healthServer = createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  healthServer.listen(healthPort, () => {
+    log.info({ message: `Health server listening on :${healthPort}` });
+  });
+
   const shutdown = async () => {
     log.info({ message: 'Campaign worker shutting down' });
+    healthServer.close();
     await jobQueue.close();
     await rabbitmq.close();
     await pool.end();

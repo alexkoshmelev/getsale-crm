@@ -26,12 +26,22 @@ spec:
                 name: getsale-common-config
             - secretRef:
                 name: getsale-secrets
+          ports:
+            - containerPort: 4017
+              protocol: TCP
+              name: health
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4017
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
           livenessProbe:
-            exec:
-              command:
-                - node
-                - -e
-                - "process.exit(0)"
+            httpGet:
+              path: /health
+              port: 4017
             initialDelaySeconds: 15
             periodSeconds: 30
             timeoutSeconds: 5
