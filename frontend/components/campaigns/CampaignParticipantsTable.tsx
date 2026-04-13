@@ -419,7 +419,9 @@ export function CampaignParticipantsTable({
                   <td className="px-4 py-3 text-muted-foreground text-xs hidden md:table-cell">{formatDate(p.sent_at)}</td>
                   <td className="px-4 py-3 hidden md:table-cell">
                     {(p.read_at || p.status_phase === 'read') ? (
-                      <CheckCircle2 className="w-4 h-4 text-blue-500" title={p.read_at ? formatDate(p.read_at) : ''} />
+                      <span title={p.read_at ? formatDate(p.read_at) : undefined} className="inline-flex">
+                        <CheckCircle2 className="w-4 h-4 text-blue-500" aria-hidden />
+                      </span>
                     ) : (
                       <span className="text-muted-foreground text-xs">—</span>
                     )}

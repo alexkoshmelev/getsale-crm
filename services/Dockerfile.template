@@ -3,7 +3,7 @@
 
 ARG SERVICE=gateway
 
-FROM node:22-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -31,7 +31,7 @@ RUN npm run build -w shared/types && \
     npm run build -w shared/telegram && \
     npm run build -w services/${SERVICE}
 
-FROM node:22-alpine AS runner
+FROM node:24-alpine AS runner
 WORKDIR /app
 
 RUN addgroup -g 1001 -S nodejs && adduser -S getsale -u 1001

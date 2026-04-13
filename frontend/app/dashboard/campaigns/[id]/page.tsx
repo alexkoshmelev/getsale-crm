@@ -165,12 +165,15 @@ export default function CampaignDetailPage() {
   const { t } = useTranslation();
   const rawId = params?.id;
   const id = (Array.isArray(rawId) ? rawId[0] : rawId) ?? '';
-  const tabFromUrl = (searchParams?.get('tab') || 'overview') as Tab;
-  const [tab, setTab] = useState<Tab>(
-    ['overview', 'sequence', 'audience', 'settings', 'participants'].includes(tabFromUrl)
-      ? (tabFromUrl === 'audience' ? 'settings' : tabFromUrl === 'sends' ? 'participants' : tabFromUrl)
-      : 'overview'
-  );
+  const rawTab = searchParams?.get('tab') ?? 'overview';
+  const [tab, setTab] = useState<Tab>(() => {
+    if (rawTab === 'sends') return 'participants';
+    if (rawTab === 'audience') return 'settings';
+    if (['overview', 'sequence', 'settings', 'participants'].includes(rawTab)) {
+      return rawTab as Tab;
+    }
+    return 'overview';
+  });
   const [campaign, setCampaign] = useState<CampaignWithDetails | null>(null);
   const [stats, setStats] = useState<CampaignStats | null>(null);
   const [analytics, setAnalytics] = useState<CampaignAnalytics | null>(null);

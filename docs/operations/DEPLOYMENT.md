@@ -7,7 +7,7 @@
 ### Требования
 
 - Docker & Docker Compose
-- Node.js 22+ (для локальной разработки без Docker)
+- Node.js 24+ (для локальной разработки без Docker)
 
 ### Запуск (Docker Compose)
 

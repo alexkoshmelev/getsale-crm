@@ -14,10 +14,10 @@
     "@getsale/queue": "*",
     "fastify": "^5.0.0",
     "@fastify/cookie": "^11.0.0",
-    "pg": "^8.11.3"
+    "pg": "^8.16.0"
   },
   "devDependencies": {
-    "@types/node": "^20.10.0",
+    "@types/node": "^22.19.0",
     "typescript": "^5.3.0",
     "vitest": "^3.0.0"
   }
