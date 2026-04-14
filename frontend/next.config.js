@@ -3,6 +3,8 @@ const path = require('path');
 
 const nextConfig = {
   output: 'standalone',
+  // Monorepo: two lockfiles (root + frontend); trace files from repo root so standalone output is correct
+  outputFileTracingRoot: path.join(__dirname, '..'),
   reactStrictMode: true,
   // Next.js 16: Turbopack is default for dev; we keep webpack for build (form-data alias). Empty config silences the warning.
   turbopack: {},

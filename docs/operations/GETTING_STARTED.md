@@ -8,6 +8,8 @@
 
 ### 1. Клонировать и установить
 
+Используйте **Node.js 24+** и **npm 10+** (как в CI и Docker): см. [`.nvmrc`](../../.nvmrc) и `engines` в [`package.json`](../../package.json).
+
 ```bash
 git clone <repository>
 cd getsale-crm

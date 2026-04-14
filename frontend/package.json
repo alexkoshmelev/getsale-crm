@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@sentry/browser": "^8.55.0",
+    "@sentry/browser": "^8.55.1",
     "@tailwindcss/postcss": "^4.2.2",
     "axios": "^1.15.0",
     "clsx": "^2.0.0",
@@ -33,7 +33,7 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
-    "@types/node": "^22.19.0",
+    "@types/node": "^24.12.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "cross-env": "^7.0.3",

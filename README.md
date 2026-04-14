@@ -38,13 +38,16 @@
 
 ## Быстрый старт
 
+**Node.js:** версия **24+** (см. [`.nvmrc`](.nvmrc) и `engines` в [`package.json`](package.json)). Совпадает с CI и Docker-образами.
+
 ### Локальная разработка (Docker Compose)
 
 ```bash
 npm install
 docker compose -f docker-compose.yml up -d
 
-# Фронтенд: http://localhost:5173
+# Фронтенд в Compose: http://localhost:5173 (маппинг на Next внутри контейнера)
+# Локально без Docker: cd frontend && npm run dev → http://localhost:3000
 # API Gateway: http://localhost:8000
 # RabbitMQ UI: http://localhost:15673
 ```
@@ -58,13 +61,15 @@ bash scripts/test-services.sh
 bash scripts/test-api.sh
 ```
 
-### Продакшн (Kubernetes)
+### Продакшн
+
+Основной путь развёртывания описан в [docs/operations/DEPLOYMENT.md](docs/operations/DEPLOYMENT.md) (Docker на сервере, CI).
+
+Манифесты в `k8s/` при необходимости:
 
 ```bash
 kubectl apply -f k8s/
 ```
-
-Подробнее: [docs/operations/DEPLOYMENT.md](docs/operations/DEPLOYMENT.md)
 
 ## Документация
 
