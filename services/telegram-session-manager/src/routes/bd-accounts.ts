@@ -105,8 +105,8 @@ const PurchaseBody = z.object({
 });
 
 const ConfigBody = z.object({
-  limits: z.record(z.unknown()).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  limits: z.record(z.string(), z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 function assertNotViewer(user: { role: string }): void {

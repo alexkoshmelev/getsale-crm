@@ -4,12 +4,15 @@ import Stripe from 'stripe';
 import { AppError, ErrorCodes, requireUser, validate, type DatabasePools } from '@getsale/service-framework';
 import { RabbitMQClient } from '@getsale/queue';
 import { Logger } from '@getsale/logger';
+import { invoiceClientSecret, subscriptionBillingPeriod } from '../stripe-utils';
+
+type StripeClient = InstanceType<typeof Stripe>;
 
 interface Deps {
   db: DatabasePools;
   rabbitmq: RabbitMQClient;
   log: Logger;
-  stripe: Stripe;
+  stripe: StripeClient;
 }
 
 const SubscriptionUpgradeSchema = z.object({
@@ -71,8 +74,13 @@ export function registerSubscriptionRoutes(app: FastifyInstance, { db, log, stri
       items: [{ price: priceId }],
       payment_behavior: 'default_incomplete',
       payment_settings: { save_default_payment_method: 'on_subscription' },
-      expand: ['latest_invoice.payment_intent'],
+      expand: ['latest_invoice.confirmation_secret'],
     });
+
+    const period = subscriptionBillingPeriod(subscription);
+    if (!period) {
+      throw new AppError(502, 'Stripe subscription missing billing period', ErrorCodes.INTERNAL_ERROR);
+    }
 
     await db.write.query(
       `INSERT INTO subscriptions (user_id, organization_id, stripe_customer_id, stripe_subscription_id, plan, status, current_period_start, current_period_end)
@@ -84,14 +92,12 @@ export function registerSubscriptionRoutes(app: FastifyInstance, { db, log, stri
         subscription.id,
         plan,
         subscription.status,
-        new Date(subscription.current_period_start * 1000),
-        new Date(subscription.current_period_end * 1000),
+        period.start,
+        period.end,
       ],
     );
 
-    const latestInvoice = subscription.latest_invoice as Stripe.Invoice | null;
-    const paymentIntent = latestInvoice?.payment_intent as Stripe.PaymentIntent | undefined;
-    const clientSecret = paymentIntent?.client_secret ?? undefined;
+    const clientSecret = invoiceClientSecret(subscription.latest_invoice);
 
     log.info({
       message: 'Subscription upgraded',

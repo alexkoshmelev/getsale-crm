@@ -13,14 +13,14 @@ const TemplateCreateSchema = z.object({
   name: z.string().min(1).max(500).trim(),
   channel: z.string().min(1).max(64).trim(),
   content: z.string(),
-  conditions: z.record(z.unknown()).optional(),
+  conditions: z.record(z.string(), z.unknown()).optional(),
 });
 
 const TemplateUpdateSchema = z.object({
   name: z.string().min(1).max(500).trim().optional(),
   channel: z.string().min(1).max(64).trim().optional(),
   content: z.string().optional(),
-  conditions: z.record(z.unknown()).optional(),
+  conditions: z.record(z.string(), z.unknown()).optional(),
 });
 
 export function registerTemplateRoutes(app: FastifyInstance, deps: Deps): void {

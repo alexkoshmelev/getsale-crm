@@ -12,7 +12,7 @@ const CreateCompanySchema = z.object({
   description: z.string().max(5000).optional(),
   size: z.string().max(100).optional(),
   goals: z.array(z.unknown()).optional(),
-  policies: z.record(z.unknown()).optional(),
+  policies: z.record(z.string(), z.unknown()).optional(),
 });
 
 const ListQuerySchema = z.object({

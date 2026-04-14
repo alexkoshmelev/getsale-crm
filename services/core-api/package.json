@@ -15,16 +15,16 @@
     "@getsale/events": "*",
     "@getsale/logger": "*",
     "@getsale/types": "*",
-    "bcryptjs": "^2.4.3",
+    "bcryptjs": "^3.0.3",
     "fastify": "^5.3.3",
     "pg": "^8.16.0",
-    "zod": "^3.25.76"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/pg": "^8.20.0",
     "@types/node": "^24.12.2",
     "tsx": "^4.21.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.9.0"
   }
 }

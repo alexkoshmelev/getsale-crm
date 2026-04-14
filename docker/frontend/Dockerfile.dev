@@ -23,4 +23,5 @@ RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 EXPOSE 3000
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["npm", "run", "dev", "--", "-p", "3000", "-H", "0.0.0.0"]
+# Webpack in Docker: same toolchain as production build; Turbopack + bind-mounted host dir is often CPU/RAM-heavy on Desktop.
+CMD ["npm", "run", "dev:docker"]

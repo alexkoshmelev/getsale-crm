@@ -18,8 +18,8 @@
     "fastify": "^5.3.3",
     "pg": "^8.16.0",
     "jsonwebtoken": "^9.0.2",
-    "bcryptjs": "^2.4.3",
-    "zod": "^3.25.76",
+    "bcryptjs": "^3.0.3",
+    "zod": "^4.3.6",
     "speakeasy": "^2.0.0",
     "qrcode": "^1.5.3"
   },
@@ -29,6 +29,6 @@
     "@types/pg": "^8.20.0",
     "@types/node": "^24.12.2",
     "tsx": "^4.21.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.9.0"
   }
 }

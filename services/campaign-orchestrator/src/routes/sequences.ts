@@ -14,7 +14,7 @@ const SequenceCreateSchema = z.object({
   templateId: z.string().uuid(),
   delayHours: z.number().int().min(0).optional(),
   delayMinutes: z.number().int().min(0).max(59).optional(),
-  conditions: z.record(z.unknown()).optional(),
+  conditions: z.record(z.string(), z.unknown()).optional(),
   triggerType: z.enum(['delay', 'after_reply']).optional(),
   isHidden: z.boolean().optional(),
 });
@@ -24,7 +24,7 @@ const SequenceUpdateSchema = z.object({
   templateId: z.string().uuid().optional(),
   delayHours: z.number().int().min(0).optional(),
   delayMinutes: z.number().int().min(0).max(59).optional(),
-  conditions: z.record(z.unknown()).optional(),
+  conditions: z.record(z.string(), z.unknown()).optional(),
   triggerType: z.enum(['delay', 'after_reply']).optional(),
   isHidden: z.boolean().optional(),
 });

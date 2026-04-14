@@ -1,10 +1,20 @@
 /** @type {import('next').NextConfig} */
 const path = require('path');
+const fs = require('fs');
 
 const nextConfig = {
   output: 'standalone',
-  // Monorepo: two lockfiles (root + frontend); trace files from repo root so standalone output is correct
-  outputFileTracingRoot: path.join(__dirname, '..'),
+  // Monorepo: trace from repo root when building inside the full repo (standalone + hoisted deps).
+  // Docker image often uses context ./frontend only → parent is "/" — do not set tracing root there
+  // or PostCSS/webpack resolve "tailwindcss" from filesystem root and fail.
+  ...(function () {
+    const parent = path.resolve(__dirname, '..');
+    const hasRootManifest = fs.existsSync(path.join(parent, 'package.json'));
+    if (hasRootManifest && parent !== path.resolve(__dirname)) {
+      return { outputFileTracingRoot: parent };
+    }
+    return {};
+  })(),
   reactStrictMode: true,
   // Next.js 16: Turbopack is default for dev; we keep webpack for build (form-data alias). Empty config silences the warning.
   turbopack: {},

@@ -13,7 +13,7 @@ const ProfileUpdateSchema = z.object({
   lastName: z.string().max(200).trim().optional().nullable(),
   avatarUrl: z.string().max(2000).trim().optional().nullable(),
   timezone: z.string().max(128).optional().nullable(),
-  preferences: z.record(z.unknown()).optional(),
+  preferences: z.record(z.string(), z.unknown()).optional(),
 });
 
 export function registerProfileRoutes(app: FastifyInstance, { db, log }: Deps): void {

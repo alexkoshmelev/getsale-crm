@@ -15,8 +15,8 @@ interface Deps {
 const CreateRuleSchema = z.object({
   name: z.string().min(1).max(500),
   triggerType: z.string().min(1),
-  triggerConditions: z.record(z.unknown()).optional(),
-  actions: z.array(z.record(z.unknown())),
+  triggerConditions: z.record(z.string(), z.unknown()).optional(),
+  actions: z.array(z.record(z.string(), z.unknown())),
   isActive: z.boolean().default(true),
 });
 

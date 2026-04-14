@@ -1,16 +1,26 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { randomUUID } from 'crypto';
 import Stripe from 'stripe';
+import type { Event } from 'stripe/cjs/resources/Events.js';
+import type { Invoice } from 'stripe/cjs/resources/Invoices.js';
+import type { Subscription } from 'stripe/cjs/resources/Subscriptions.js';
 import { EventType } from '@getsale/events';
 import type { DatabasePools } from '@getsale/service-framework';
 import { RabbitMQClient } from '@getsale/queue';
 import { Logger } from '@getsale/logger';
+import {
+  extractSubscriptionId,
+  stripeSubscriptionIdFromInvoice,
+  subscriptionBillingPeriod,
+} from '../stripe-utils';
+
+type StripeClient = InstanceType<typeof Stripe>;
 
 interface Deps {
   db: DatabasePools;
   rabbitmq: RabbitMQClient;
   log: Logger;
-  stripe: Stripe;
+  stripe: StripeClient;
 }
 
 interface HandlerDeps {
@@ -18,11 +28,6 @@ interface HandlerDeps {
   log: Logger;
   rabbitmq: RabbitMQClient;
   correlationId?: string;
-}
-
-function extractSubscriptionId(ref: string | Stripe.Subscription | null | undefined): string | undefined {
-  if (!ref) return undefined;
-  return typeof ref === 'string' ? ref : ref.id;
 }
 
 export function registerStripeWebhookRoutes(app: FastifyInstance, { db, rabbitmq, log, stripe }: Deps): void {
@@ -56,7 +61,7 @@ export function registerStripeWebhookRoutes(app: FastifyInstance, { db, rabbitmq
       return reply.code(500).send({ error: 'Raw body unavailable' });
     }
 
-    let event: Stripe.Event;
+    let event: Event;
     try {
       event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
     } catch (err) {
@@ -76,16 +81,16 @@ export function registerStripeWebhookRoutes(app: FastifyInstance, { db, rabbitmq
     try {
       switch (event.type) {
         case 'invoice.payment_succeeded':
-          await handlePaymentSucceeded(event.data.object as Stripe.Invoice, deps);
+          await handlePaymentSucceeded(event.data.object as Invoice, deps);
           break;
         case 'invoice.payment_failed':
-          await handlePaymentFailed(event.data.object as Stripe.Invoice, deps);
+          await handlePaymentFailed(event.data.object as Invoice, deps);
           break;
         case 'customer.subscription.updated':
-          await handleSubscriptionUpdated(event.data.object as Stripe.Subscription, deps);
+          await handleSubscriptionUpdated(event.data.object as Subscription, deps);
           break;
         case 'customer.subscription.deleted':
-          await handleSubscriptionDeleted(event.data.object as Stripe.Subscription, deps);
+          await handleSubscriptionDeleted(event.data.object as Subscription, deps);
           break;
         default:
           log.info({ message: 'Unhandled webhook event type', event_type: event.type });
@@ -99,8 +104,8 @@ export function registerStripeWebhookRoutes(app: FastifyInstance, { db, rabbitmq
   });
 }
 
-async function handlePaymentSucceeded(invoice: Stripe.Invoice, { db, log, rabbitmq, correlationId }: HandlerDeps) {
-  const stripeSubId = extractSubscriptionId(invoice.subscription);
+async function handlePaymentSucceeded(invoice: Invoice, { db, log, rabbitmq, correlationId }: HandlerDeps) {
+  const stripeSubId = stripeSubscriptionIdFromInvoice(invoice);
   if (!stripeSubId) return;
 
   const periodEnd = invoice.lines?.data?.[0]?.period?.end
@@ -136,8 +141,8 @@ async function handlePaymentSucceeded(invoice: Stripe.Invoice, { db, log, rabbit
   });
 }
 
-async function handlePaymentFailed(invoice: Stripe.Invoice, { db, log, rabbitmq, correlationId }: HandlerDeps) {
-  const stripeSubId = extractSubscriptionId(invoice.subscription);
+async function handlePaymentFailed(invoice: Invoice, { db, log, rabbitmq, correlationId }: HandlerDeps) {
+  const stripeSubId = stripeSubscriptionIdFromInvoice(invoice);
   if (!stripeSubId) return;
 
   const result = await db.write.query(
@@ -167,21 +172,17 @@ async function handlePaymentFailed(invoice: Stripe.Invoice, { db, log, rabbitmq,
   });
 }
 
-async function handleSubscriptionUpdated(subscription: Stripe.Subscription, { db, log, rabbitmq, correlationId }: HandlerDeps) {
+async function handleSubscriptionUpdated(subscription: Subscription, { db, log, rabbitmq, correlationId }: HandlerDeps) {
+  const period = subscriptionBillingPeriod(subscription);
   const result = await db.write.query(
     `UPDATE subscriptions
      SET status = $1,
-         current_period_start = $2,
-         current_period_end = $3,
+         current_period_start = COALESCE($2, current_period_start),
+         current_period_end = COALESCE($3, current_period_end),
          updated_at = NOW()
      WHERE stripe_subscription_id = $4
      RETURNING id, user_id, organization_id, plan`,
-    [
-      subscription.status,
-      new Date(subscription.current_period_start * 1000),
-      new Date(subscription.current_period_end * 1000),
-      subscription.id,
-    ],
+    [subscription.status, period?.start ?? null, period?.end ?? null, subscription.id],
   );
 
   if (result.rows.length === 0) {
@@ -203,7 +204,7 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription, { db
   });
 }
 
-async function handleSubscriptionDeleted(subscription: Stripe.Subscription, { db, log, rabbitmq, correlationId }: HandlerDeps) {
+async function handleSubscriptionDeleted(subscription: Subscription, { db, log, rabbitmq, correlationId }: HandlerDeps) {
   const result = await db.write.query(
     `UPDATE subscriptions
      SET status = 'cancelled', updated_at = NOW()
