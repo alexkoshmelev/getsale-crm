@@ -1,6 +1,9 @@
 # Server Docker Compose for GetSale CRM (production)
 # This file is used on the remote server to run the production stack (services images).
 # All app images are pulled from the DigitalOcean registry.
+#
+# deploy.resources: honored by `docker stack deploy` (Swarm). On `docker compose up`, Engine may
+# apply limits depending on version; if not, use host cgroups or document in DEPLOYMENT.md.
 # Set REGISTRY in .env to override (default: registry.digitalocean.com/regestry-getsale-ai)
 #
 # Required in .env (copy from .env.example §2 — production): POSTGRES_PASSWORD, REDIS_PASSWORD,
@@ -24,12 +27,21 @@
 # name: fixes project name so "compose down" targets only this stack (run from /docker/getsale-crm)
 name: getsale-crm
 
+# Log rotation (50 GB disk): avoids unbounded json-file growth on the host.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   # ==================== Infrastructure ====================
   postgres:
     image: postgres:${POSTGRES_VERSION:-15-alpine}
     container_name: getsale-crm-postgres
     restart: unless-stopped
+    logging: *default-logging
+    shm_size: "256mb"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -37,20 +49,25 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./.data/postgres:/var/lib/postgresql/data
+    # Loopback only: use SSH -L 5435:127.0.0.1:5435 from home, or see DEPLOYMENT.md for public bind + firewall.
     ports:
-      - "5435:5432"
+      - "127.0.0.1:5435:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - default
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
 
   redis:
     image: redis:${REDIS_VERSION:-7-alpine}
     container_name: getsale-crm-redis
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - ./.data/redis:/data
     environment:
@@ -61,13 +78,17 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - default
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
     container_name: getsale-crm-rabbitmq
     restart: unless-stopped
+    logging: *default-logging
     environment:
       RABBITMQ_DEFAULT_USER: getsale
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-set_me_in_env}
@@ -79,13 +100,12 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
-    networks:
-      - default
 
   pgbouncer:
-    image: edoburu/pgbouncer:latest
+    image: edoburu/pgbouncer:v1.19.1-p0
     container_name: getsale-crm-pgbouncer
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       AUTH_TYPE: scram-sha-256
@@ -99,22 +119,24 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - default
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
 
   # ==================== Migrations (run once on deploy) ====================
   # Host getsale-crm-postgres avoids resolving to another stack's "postgres" container
   migrations:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:migrations
     container_name: getsale-crm-migrations
+    logging: *default-logging
     environment:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@getsale-crm-postgres:5432/postgres
       - NODE_ENV=production
       # Optional: RUN_SEEDS=true to load demo seeds on deploy (default skips seeds in production)
     depends_on:
       postgres: { condition: service_healthy }
-    networks:
-      - default
     restart: "no"
 
   # ==================== App services (from registry) ====================
@@ -124,6 +146,8 @@ services:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:gateway
     container_name: getsale-crm-gateway
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=8000
@@ -152,6 +176,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
     networks:
       - default
       - traefik
@@ -170,6 +199,8 @@ services:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:auth-service
     container_name: getsale-crm-auth-service
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=4001
@@ -188,14 +219,14 @@ services:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
       migrations: { condition: service_completed_successfully }
-    networks:
-      - default
 
   # ─── Core API (CRM + Pipeline + Team + Activity) ───────────
   core-api:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:core-api
     container_name: getsale-crm-core-api
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=4002
@@ -209,14 +240,14 @@ services:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
       migrations: { condition: service_completed_successfully }
-    networks:
-      - default
 
   # ─── Messaging API ─────────────────────────────────────────
   messaging-api:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:messaging-api
     container_name: getsale-crm-messaging-api
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=4003
@@ -229,14 +260,14 @@ services:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
       migrations: { condition: service_completed_successfully }
-    networks:
-      - default
 
   # ─── Telegram Session Manager ──────────────────────────────
   telegram-sm:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:telegram-session-manager
     container_name: getsale-crm-telegram-sm
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=4005
@@ -252,14 +283,14 @@ services:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
       migrations: { condition: service_completed_successfully }
-    networks:
-      - default
 
   # ─── Campaign Orchestrator ─────────────────────────────────
   campaign-orchestrator:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:campaign-orchestrator
     container_name: getsale-crm-campaign-orchestrator
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=4006
@@ -272,14 +303,14 @@ services:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
       migrations: { condition: service_completed_successfully }
-    networks:
-      - default
 
   # ─── Campaign Worker (headless; scale with --scale campaign-worker=N) ─
+  # No container_name: required so compose can assign unique names per replica.
   campaign-worker:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:campaign-worker
-    container_name: getsale-crm-campaign-worker
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@pgbouncer:5432/postgres
@@ -293,14 +324,19 @@ services:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
       migrations: { condition: service_completed_successfully }
-    networks:
-      - default
+    deploy:
+      resources:
+        limits:
+          cpus: "1.25"
+          memory: 1536M
 
   # ─── Automation Engine ─────────────────────────────────────
   automation-engine:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:automation-engine
     container_name: getsale-crm-automation-engine
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=4007
@@ -313,14 +349,14 @@ services:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
       migrations: { condition: service_completed_successfully }
-    networks:
-      - default
 
   # ─── Notification Hub (Socket.IO): CORS_ORIGIN must match frontend origin ─
   notification-hub:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:notification-hub
     container_name: getsale-crm-notification-hub
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=4008
@@ -350,6 +386,8 @@ services:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:user-service
     container_name: getsale-crm-user-service
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=4009
@@ -372,14 +410,14 @@ services:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
       migrations: { condition: service_completed_successfully }
-    networks:
-      - default
 
   # ─── AI Service ────────────────────────────────────────────
   ai-service:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:ai-service
     container_name: getsale-crm-ai-service
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - PORT=4010
@@ -400,14 +438,19 @@ services:
     depends_on:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
-    networks:
-      - default
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1536M
 
   # ─── Analytics Worker (headless — no PORT) ─────────────────
   analytics-worker:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:analytics-worker
     container_name: getsale-crm-analytics-worker
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@pgbouncer:5432/postgres
@@ -418,20 +461,26 @@ services:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
       migrations: { condition: service_completed_successfully }
-    networks:
-      - default
 
   # ─── Frontend from registry ────────────────────────────────
   frontend:
     image: ${REGISTRY:-registry.digitalocean.com/regestry-getsale-ai}/getsale-crm:frontend
     container_name: getsale-crm-frontend
     restart: unless-stopped
+    init: true
+    logging: *default-logging
     environment:
       - NODE_ENV=production
       # SSR / server-side fetches: reach gateway on Docker network (browser uses NEXT_PUBLIC_* from image build)
       - API_URL=http://gateway:8000
     depends_on:
       gateway: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3000 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
     networks:
       - default
       - traefik

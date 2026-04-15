@@ -9,9 +9,9 @@ RUN npm install
 COPY . .
 
 # Build-time env (NEXT_PUBLIC_* must be set at build for client bundle)
-# API_URL: internal hostname for next.config rewrites (/api/* → gateway). Same Docker network as api-gateway.
+# API_URL: internal hostname for next.config rewrites (/api/* → gateway). Must match docker-compose service name `gateway`.
 # Without this, rewrites fall back to NEXT_PUBLIC_API_URL and the browser may call api-crm cross-origin → CORS/OPTIONS issues.
-ARG API_URL=http://api-gateway:8000
+ARG API_URL=http://gateway:8000
 ENV API_URL=${API_URL}
 ARG NEXT_PUBLIC_API_URL=https://api-crm.getsale.ai
 ARG NEXT_PUBLIC_WS_URL=wss://ws-crm.getsale.ai

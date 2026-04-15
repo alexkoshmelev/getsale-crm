@@ -103,6 +103,40 @@ TELEGRAM_API_HASH=your_api_hash
 
 Без этого в production сервисы намеренно не стартуют (защита от подделки внутренних запросов).
 
+## Доступ к PostgreSQL с локальной машины (production)
+
+В [`docker-compose.server.yml`](../../docker-compose.server.yml) порт Postgres опубликован как **`127.0.0.1:5435:5432`**: слушает только loopback на хосте, с интернета к БД **нельзя** подключиться напрямую.
+
+### Вариант A (рекомендуется): SSH port forwarding
+
+На домашней машине:
+
+```bash
+ssh -N -L 5435:127.0.0.1:5435 <user>@<server-ip>
+```
+
+Оставьте сессию открытой. В DBeaver, `psql` или другом клиенте: хост `127.0.0.1` или `localhost`, порт **5435**, пользователь `postgres`, пароль — значение `POSTGRES_PASSWORD` из `.env` на сервере (не коммитьте пароль в репозиторий).
+
+Пример `psql` с той же машины, где запущен туннель:
+
+```bash
+psql "postgresql://postgres:PASSWORD@127.0.0.1:5435/postgres"
+```
+
+### Вариант B: прямое подключение и whitelist
+
+Имеет смысл, если домашний IP **стабильный** и вы готовы поддерживать правила. При динамическом IP удобнее вариант A или приватная сеть (например, Tailscale).
+
+1. **DigitalOcean Cloud Firewall** ([документация](https://docs.digitalocean.com/products/networking/firewalls/)): inbound **TCP 5435** только с вашего IP (и при необходимости нескольких).
+2. При использовании **ufw** на дроплете: `ufw allow from YOUR_HOME_IP to any port 5435 proto tcp` (проверьте политику по умолчанию — не открывайте лишнее).
+3. В **compose** временно замените маппинг Postgres на `"0.0.0.0:5435:5432"` или используйте локальный `docker-compose.override.yml` на сервере — **не храните** открытый Postgres в git по умолчанию.
+
+Дополнительный слой — `pg_hba.conf` в volume Postgres (только доверенные сети/пользователи). Основная линия защиты: не публиковать порт в интернет, сильный пароль, firewall.
+
+### Лимиты CPU/RAM (`deploy.resources`) в compose
+
+У части сервисов заданы `deploy.resources.limits`. С **`docker stack deploy`** (Docker Swarm) лимиты применяются предсказуемо. С **`docker compose up`** на одном хосте применимость зависит от версии Docker Engine; проверка: `docker inspect getsale-crm-gateway --format '{{.HostConfig.Memory}}'` (ноль часто значит «без лимита»). Если лимиты не действуют, см. комментарий в шапке `docker-compose.server.yml` и при необходимости настройте ограничения на уровне systemd/cgroup или перейдите на Swarm/Kubernetes.
+
 ## Чек-лист перед выходом в прод
 
 Перед первым деплоем в production убедитесь:
@@ -127,6 +161,8 @@ TELEGRAM_API_HASH=your_api_hash
 ### Воркер отправок кампаний (campaign-worker)
 
 Переменные окружения см. в [`services/campaign-worker/src/index.ts`](../../services/campaign-worker/src/index.ts) и в `docker-compose.server.yml` для сервиса `campaign-worker` (в т.ч. `CAMPAIGN_MAX_SENDS_PER_ACCOUNT_PER_DAY`).
+
+Масштабирование: у `campaign-worker` **нет** `container_name`, чтобы работало `docker compose -f docker-compose.server.yml up -d --scale campaign-worker=N`. Имена контейнеров будут вида `getsale-crm-campaign-worker-1`, …
 
 Межсервисные таймауты/ретраи/circuit breaker задаются общими `SERVICE_HTTP_*` (см. раздел выше про `interServiceHttpDefaults`).
 

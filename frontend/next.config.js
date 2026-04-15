@@ -42,7 +42,7 @@ const nextConfig = {
     }];
   },
   async rewrites() {
-    // Prefer API_URL at build (Docker: http://api-gateway:8000) so /api/* proxies inside the stack, not cross-origin to api-crm.
+    // Prefer API_URL at build (Docker: http://gateway:8000) so /api/* proxies inside the stack, not cross-origin to api-crm.
     const apiUrl = process.env.API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
     return [
       {

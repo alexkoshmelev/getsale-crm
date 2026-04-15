@@ -1125,7 +1125,7 @@ CREATE MATERIALIZED VIEW public.mv_account_health AS
           WHERE ((ba2.id = ba.id) AND (ba2.flood_wait_until > (now() - '7 days'::interval)))) floods_7d ON (true))
      LEFT JOIN public.bd_account_warmup warmup ON ((warmup.bd_account_id = ba.id)))
   WHERE (ba.is_active = true)
-  WITH NO DATA;
+  WITH DATA;
 
 
 --
@@ -1143,7 +1143,7 @@ CREATE MATERIALIZED VIEW public.mv_campaign_stats AS
    FROM (public.campaign_participants cp
      JOIN public.campaigns c ON ((c.id = cp.campaign_id)))
   GROUP BY cp.campaign_id, c.organization_id
-  WITH NO DATA;
+  WITH DATA;
 
 
 --
@@ -1197,7 +1197,7 @@ CREATE MATERIALIZED VIEW public.mv_conversion_funnel AS
      JOIN public.pipelines p ON ((p.id = s.pipeline_id)))
      LEFT JOIN public.leads l ON (((l.stage_id = s.id) AND (l.deleted_at IS NULL))))
   GROUP BY s.pipeline_id, p.organization_id, s.id, s.name, s.order_index
-  WITH NO DATA;
+  WITH DATA;
 
 
 --

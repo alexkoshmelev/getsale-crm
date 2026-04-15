@@ -183,11 +183,6 @@ export function registerExecutionRoutes(app: FastifyInstance, deps: Deps): void 
       throw new AppError(400, 'Cannot add participants to this campaign status', ErrorCodes.BAD_REQUEST);
     }
 
-    const seqRes = await db.read.query('SELECT 1 FROM campaign_sequences WHERE campaign_id = $1 LIMIT 1', [id]);
-    if (!seqRes.rows.length) {
-      throw new AppError(400, 'Add at least one sequence step first', ErrorCodes.BAD_REQUEST);
-    }
-
     const audience = (campaign.target_audience || {}) as Record<string, unknown>;
     const bdAccountId = (audience.bdAccountId as string) || ((audience.bdAccountIds as string[]) ?? [])[0] || null;
 

@@ -88,6 +88,7 @@ jobs:
           push: true
           tags: ${{ env.REGISTRY }}/getsale-crm:frontend
           build-args: |
+            API_URL=http://gateway:8000
             NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL || 'https://api-crm.getsale.ai' }}
             NEXT_PUBLIC_WS_URL=${{ vars.NEXT_PUBLIC_WS_URL || 'wss://ws-crm.getsale.ai' }}
           cache-from: type=gha
