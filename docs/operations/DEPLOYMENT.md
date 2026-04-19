@@ -1,6 +1,6 @@
 # Руководство по развертыванию
 
-> **Актуальный стек (2026):** [`docker-compose.yml`](../../docker-compose.yml) локально, [`docker-compose.server.yml`](../../docker-compose.server.yml) на сервере, переменные окружения — раздел «production server» в [`.env.example`](../../.env.example). См. также [docs/README.md](../README.md). Ниже остаются детали, часть путей к старому `services/*` может быть устаревшей.
+> **Актуальный стек (2026):** [`docker-compose.yml`](../../docker-compose.yml) локально, [`docker-compose.server.yml`](../../docker-compose.server.yml) + опционально [`docker-compose.observability.prod.yml`](../../docker-compose.observability.prod.yml) на сервере, переменные окружения — раздел «production server» в [`.env.example`](../../.env.example). См. также [docs/README.md](../README.md). Ниже остаются детали, часть путей к старому `services/*` может быть устаревшей.
 
 ## Локальная разработка
 
@@ -22,9 +22,7 @@ docker compose -f docker-compose.yml down -v
 
 - **API Gateway**: http://localhost:8000
 - **RabbitMQ Management**: http://localhost:15672 (getsale/getsale_dev)
-- **Grafana**: http://localhost:3000 (admin/admin)
-- **Prometheus**: http://localhost:9090
-- **Jaeger**: http://localhost:16686
+- **Grafana / Prometheus / Loki** (если поднято с [`docker-compose.observability.yml`](../../docker-compose.observability.yml)): Grafana http://localhost:3100, Prometheus http://localhost:9090, Loki внутри сети compose (см. комментарии в файле).
 
 ### Переменные окружения
 
@@ -148,6 +146,7 @@ psql "postgresql://postgres:PASSWORD@127.0.0.1:5435/postgres"
    - `CORS_ORIGIN` — задан списком разрешённых фронтовых доменов (в production обязателен).
 3. **Сеть:** Бэкенды (auth, crm, messaging, bd-accounts, pipeline, campaign, automation, ai, user, team, analytics, activity) не открыты в интернет; единственная точка входа для клиентов — API Gateway; бэкенды доступны только из внутренней сети.
 4. **Один и тот же INTERNAL_AUTH_SECRET** у API Gateway и всех бэкендов (как описано выше в разделе «Безопасность»).
+5. **Наблюдаемость (если поднимаете [`docker-compose.observability.prod.yml`](../../docker-compose.observability.prod.yml)):** в `.env` заданы `GRAFANA_HOST` (прод: `grafana-app.getsale.ai`), `GF_SECURITY_ADMIN_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`; DNS для `GRAFANA_HOST` указывает на дроплет; Traefik (сеть `traefik`) и middleware `security-headers` доступны, как у фронта.
 
 После выполнения пунктов выше выход в прод по текущему аудиту допустим.
 
@@ -349,40 +348,29 @@ jobs:
 
 ## Мониторинг
 
-### Prometheus
+### Production (Docker Compose на одном хосте)
 
-Метрики доступны на `http://prometheus:9090`
+Стек наблюдаемости подключается вторым файлом compose (тот же проект `getsale-crm`, та же Docker-сеть, что и приложение):
 
-**Межсервисный HTTP (B1):** у сервисов с `ServiceHttpClient` и переданным `metricsRegistry` в конструкторе клиента — счётчики **`inter_service_http_requests_total{client,method,outcome}`** (`outcome`: `success`, `client_4xx`, `server_or_downstream`, `timeout_abort`, `network_error`, `circuit_open`) и **`inter_service_http_circuit_reject_total{client}`**. См. HTTP-клиент в `shared/service-framework`. Алерты по доле неуспешных исходов и по circuit-reject: **`InterServiceHttpErrorShareElevated`**, **`InterServiceHttpCircuitReject`** в `infrastructure/prometheus/alert_rules.yml` (лейблы `job`, `client`).
-
-### Grafana
-
-Дашборды доступны на `http://grafana:3000`
-
-### Логирование
-
-Настройте централизованное логирование (ELK или Loki):
-
-```yaml
-# Пример с Fluentd
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: fluentd-config
-  namespace: getsale-crm
-data:
-  fluent.conf: |
-    <source>
-      @type tail
-      path /var/log/containers/*.log
-      pos_file /var/log/fluentd-containers.log.pos
-      tag kubernetes.*
-      read_from_head true
-      <parse>
-        @type json
-      </parse>
-    </source>
+```bash
+docker compose -f docker-compose.server.yml -f docker-compose.observability.prod.yml up -d
 ```
+
+**Текущий прод-сервер (ориентир):** DigitalOcean, дроплет **dev-api-getsale-ai**, регион **AMS3**, **16 GB RAM** / **50 GB** диска. Ретеншен метрик и логов **7 дней** рассчитан на такой объём; следите за `df -h` и каталогом `./.data` (Postgres, Redis, RabbitMQ, Loki, Prometheus). При нехватке места уменьшите ретеншен в [`observability/loki.yml`](../../observability/loki.yml) / флаги Prometheus или лимиты в [`docker-compose.observability.prod.yml`](../../docker-compose.observability.prod.yml).
+
+**Ресурсы приложения:** в [`docker-compose.server.yml`](../../docker-compose.server.yml) заданы `deploy.resources.limits` для части сервисов (Postgres, Redis, gateway, AI, оркестратор кампаний, RabbitMQ, **telegram-sm** и др.). На одном хосте 16 GB это согласует пики; при OOM смотрите `docker stats` и при необходимости снижайте лимиты редко нагружаемых сервисов или масштабируйте воркеры на отдельные машины.
+
+- **Grafana**: публичный URL **https://grafana-app.getsale.ai** (Traefik, `Host` = `GRAFANA_HOST`). В `.env` задайте `GRAFANA_HOST=grafana-app.getsale.ai`, `GF_SECURITY_ADMIN_PASSWORD`, опционально `GRAFANA_ADMIN_USER`. Порт 3000 контейнера **не** публикуется наружу — только через Traefik. См. labels в [`docker-compose.observability.prod.yml`](../../docker-compose.observability.prod.yml).
+- **Prometheus** и **Alertmanager**: только во внутренней сети compose (без публикации в интернет). Правила: [`infrastructure/prometheus/alert_rules.yml`](../../infrastructure/prometheus/alert_rules.yml) и [`infrastructure/prometheus/exporter_infra_alerts.yml`](../../infrastructure/prometheus/exporter_infra_alerts.yml); конфиг скрейпа — [`observability/prometheus.server.yml`](../../observability/prometheus.server.yml). Ретеншен TSDB: **7 дней**.
+- **Уведомления в Telegram**: Prometheus шлёт алерты в **Alertmanager**; доставку в Telegram выполняет Alertmanager (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` в `.env`). В Grafana добавлен datasource **Alertmanager** (см. [`observability/grafana/provisioning/datasources/datasources.yml`](../../observability/grafana/provisioning/datasources/datasources.yml)) для просмотра и управления снимками.
+- **Loki / Promtail**: логи контейнеров; ретеншен Loki **7 суток** (`observability/loki.yml`). Данные: `./.data/prometheus`, `./.data/grafana`, `./.data/loki` (тома в `docker-compose.observability.prod.yml`).
+- **RabbitMQ**: для метрик `:15692` на сервере включён тот же плагин, что и локально — volume [`observability/rabbitmq-plugins`](../../observability/rabbitmq-plugins) в [`docker-compose.server.yml`](../../docker-compose.server.yml). Первое включение перезапускает узел RabbitMQ (кратковременная недоступность очередей).
+
+**Межсервисный HTTP (B1):** у сервисов с `ServiceHttpClient` и переданным `metricsRegistry` в конструкторе клиента — счётчики **`inter_service_http_requests_total{client,method,outcome}`** и **`inter_service_http_circuit_reject_total{client}`**. См. `shared/service-framework`. Алерты: **`InterServiceHttpErrorShareElevated`**, **`InterServiceHttpCircuitReject`** в `infrastructure/prometheus/alert_rules.yml`.
+
+### Локально / обзор метрик
+
+Внутри сети compose метрики приложений — на `/metrics` каждого сервиса; Prometheus scrapes настроены в [`observability/prometheus.yml`](../../observability/prometheus.yml) (dev) и `observability/prometheus.server.yml` (prod).
 
 ## Резервное копирование
 

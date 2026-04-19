@@ -25,9 +25,13 @@
 #   analytics-worker:       DATABASE_URL, REDIS_URL, RABBITMQ_URL; headless (no PORT)
 #
 # name: fixes project name so "compose down" targets only this stack (run from /docker/getsale-crm)
+#
+# Capacity (typical single droplet: 16 GB RAM / 50 GB disk, e.g. DO AMS3 dev-api-getsale-ai):
+# deploy.resources caps worst-case RAM per service; verify with `docker inspect … HostConfig.Memory`.
+# If the host OOMs, raise limits only where justified or add limits to services that have none — see DEPLOYMENT.md.
 name: getsale-crm
 
-# Log rotation (50 GB disk): avoids unbounded json-file growth on the host.
+# Log rotation (aligns with ~50 GB disk droplets): avoids unbounded json-file growth on the host.
 x-logging: &default-logging
   driver: json-file
   options:
@@ -94,12 +98,19 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-set_me_in_env}
     volumes:
       - ./.data/rabbitmq:/var/lib/rabbitmq
+      # Prometheus scrapes :15692/metrics (see observability/prometheus.server.yml)
+      - ./observability/rabbitmq-plugins:/etc/rabbitmq/enabled_plugins:ro
     healthcheck:
       test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 1024M
 
   pgbouncer:
     image: edoburu/pgbouncer:v1.19.1-p0
@@ -283,6 +294,11 @@ services:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
       migrations: { condition: service_completed_successfully }
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1536M
 
   # ─── Campaign Orchestrator ─────────────────────────────────
   campaign-orchestrator:

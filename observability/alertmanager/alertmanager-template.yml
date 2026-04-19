@@ -1,0 +1,17 @@
+# Processed at container start: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID substituted by entrypoint.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: telegram
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: telegram
+    telegram_configs:
+      - bot_token: "__TELEGRAM_BOT_TOKEN__"
+        chat_id: "__TELEGRAM_CHAT_ID__"
+        parse_mode: HTML
+        message: "{{ .CommonLabels.alertname }} ({{ .Status }})\n{{ range .Alerts }}{{ .Annotations.summary }} — {{ .Annotations.description }}\n{{ end }}"
