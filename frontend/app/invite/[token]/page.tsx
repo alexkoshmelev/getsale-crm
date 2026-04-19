@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { useTranslation } from 'react-i18next';
 import { apiClient } from '@/lib/api/client';
+import { getApiBaseUrl } from '@/lib/api/public-api-base';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import { Button } from '@/components/ui/Button';
 import { Loader2, Users } from 'lucide-react';
@@ -34,8 +35,8 @@ export default function InvitePage() {
       setError(t('invitePage.invalidLink'));
       return;
     }
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-    fetch(`${apiUrl}/api/invite/${token}`)
+    // Same-origin /api/* → Next rewrites to gateway (see next.config.js). Avoids broken cross-origin to api-crm.
+    fetch(`${getApiBaseUrl()}/api/invite/${token}`)
       .then((r) => (r.ok ? r.json() : Promise.reject({ status: r.status, data: {} })))
       .then((data: InviteInfo) => setInvite(data))
       .catch((err: { status?: number }) => {
