@@ -183,7 +183,8 @@ services:
       redis: { condition: service_healthy }
       migrations: { condition: service_completed_successfully }
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 8000 || exit 1"]
+      # 127.0.0.1: Node listens on 0.0.0.0 (IPv4); `localhost` may resolve to ::1 first and fail.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8000 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
