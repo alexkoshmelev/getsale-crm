@@ -53,6 +53,46 @@ const SYSTEM_MESSAGES = {
   DEAL_LOST: '[System] Deal lost.',
 } as const;
 
+function parseStageIdsFromStageChangedMetadata(metadata: unknown): { from?: string; to?: string } {
+  if (metadata == null) return {};
+  let obj: Record<string, unknown>;
+  if (typeof metadata === 'string') {
+    try {
+      obj = JSON.parse(metadata) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  } else if (typeof metadata === 'object') {
+    obj = metadata as Record<string, unknown>;
+  } else {
+    return {};
+  }
+  const from = typeof obj.from_stage_id === 'string' ? obj.from_stage_id : undefined;
+  const to = typeof obj.to_stage_id === 'string' ? obj.to_stage_id : undefined;
+  return { from, to };
+}
+
+function timelineCreatedAtIso(v: unknown): string {
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === 'string') {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? v : d.toISOString();
+  }
+  return String(v);
+}
+
+export type LeadTimelineItem = {
+  id: string;
+  lead_id: string;
+  type: string;
+  metadata: unknown;
+  created_at: string;
+  from_stage_name?: string | null;
+  to_stage_name?: string | null;
+  /** Alias for to_stage_name (UI / i18n). */
+  stage_name?: string | null;
+};
+
 async function buildLeadContext(
   db: MessagingDeps['db'],
   user: { id: string; organizationId: string },
@@ -61,6 +101,19 @@ async function buildLeadContext(
   const leadId = row.lead_id as string | null;
   const contactId = row.contact_id as string | null;
   const campaignId = row.campaign_id as string | null;
+
+  /** Deal closure (won/lost/revenue/loss_reason) lives on `conversations`, not `leads`. */
+  const isoFromRow = (v: unknown): string | null => {
+    if (v == null) return null;
+    if (v instanceof Date) return v.toISOString();
+    const d = new Date(v as string);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  };
+  let wonAt: string | null = isoFromRow(row.won_at);
+  let lostAt: string | null = isoFromRow(row.lost_at);
+  let revenueAmount: number | null = row.revenue_amount != null ? Number(row.revenue_amount) : null;
+  let lossReason: string | null =
+    row.loss_reason != null && String(row.loss_reason).trim() !== '' ? String(row.loss_reason) : null;
 
   let contactName = '';
   let contactTelegramId: string | null = null;
@@ -83,17 +136,13 @@ async function buildLeadContext(
   let stages: { id: string; name: string }[] = [];
   let responsibleId: string | null = null;
   let responsibleEmail: string | null = null;
-  let wonAt: string | null = null;
-  let revenueAmount: number | null = null;
-  let lostAt: string | null = null;
-  let lossReason: string | null = null;
-  let timeline: { id: string; lead_id: string; type: string; metadata: unknown; created_at: string }[] = [];
+  let timeline: LeadTimelineItem[] = [];
   let companyName: string | null = null;
 
   if (leadId) {
     const leadRes = await db.read.query(
-      `SELECT l.id, l.stage_id, l.pipeline_id, l.responsible_id, l.won_at, l.revenue_amount, l.lost_at,
-              l.metadata, l.created_at, s.name AS stage_name, p.name AS pipeline_name
+      `SELECT l.id, l.stage_id, l.pipeline_id, l.responsible_id, l.revenue_amount, l.created_at,
+              s.name AS stage_name, p.name AS pipeline_name
        FROM leads l
        LEFT JOIN stages s ON s.id = l.stage_id
        LEFT JOIN pipelines p ON p.id = l.pipeline_id
@@ -105,11 +154,7 @@ async function buildLeadContext(
       pipeline = { id: String(l.pipeline_id ?? ''), name: String(l.pipeline_name ?? '') };
       stage = { id: String(l.stage_id ?? ''), name: String(l.stage_name ?? '') };
       responsibleId = (l.responsible_id as string) ?? null;
-      wonAt = l.won_at ? new Date(l.won_at as string).toISOString() : null;
-      revenueAmount = l.revenue_amount != null ? Number(l.revenue_amount) : null;
-      lostAt = l.lost_at ? new Date(l.lost_at as string).toISOString() : null;
-      const meta = (l.metadata && typeof l.metadata === 'object') ? l.metadata as Record<string, unknown> : {};
-      lossReason = (meta.loss_reason as string) ?? null;
+      if (revenueAmount == null && l.revenue_amount != null) revenueAmount = Number(l.revenue_amount);
 
       if (l.pipeline_id) {
         const stagesRes = await db.read.query(
@@ -128,7 +173,53 @@ async function buildLeadContext(
         'SELECT id, lead_id, type, metadata, created_at FROM lead_activity_log WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 50',
         [leadId],
       );
-      timeline = timelineResult.rows as typeof timeline;
+      const rawRows = timelineResult.rows as Array<{
+        id: string;
+        lead_id: string;
+        type: string;
+        metadata: unknown;
+        created_at: unknown;
+      }>;
+
+      const stageIds = new Set<string>();
+      for (const r of rawRows) {
+        if (r.type !== 'stage_changed') continue;
+        const { from, to } = parseStageIdsFromStageChangedMetadata(r.metadata);
+        if (from) stageIds.add(from);
+        if (to) stageIds.add(to);
+      }
+
+      let stageNameById = new Map<string, string>();
+      if (stageIds.size > 0) {
+        const ids = [...stageIds];
+        const stageRes = await db.read.query(
+          'SELECT id, name FROM stages WHERE organization_id = $1 AND id = ANY($2::uuid[])',
+          [user.organizationId, ids],
+        );
+        for (const sr of stageRes.rows as { id: string; name: string }[]) {
+          stageNameById.set(sr.id, sr.name);
+        }
+      }
+
+      timeline = rawRows.map((r) => {
+        const base: LeadTimelineItem = {
+          id: r.id,
+          lead_id: r.lead_id,
+          type: r.type,
+          metadata: r.metadata,
+          created_at: timelineCreatedAtIso(r.created_at),
+        };
+        if (r.type !== 'stage_changed') return base;
+        const { from, to } = parseStageIdsFromStageChangedMetadata(r.metadata);
+        const fromName = from != null ? stageNameById.get(from) ?? null : null;
+        const toName = to != null ? stageNameById.get(to) ?? null : null;
+        return {
+          ...base,
+          from_stage_name: fromName,
+          to_stage_name: toName,
+          stage_name: toName,
+        };
+      });
 
       const companyResult = await db.read.query(
         `SELECT comp.name FROM contacts c
@@ -178,7 +269,7 @@ async function buildLeadContext(
 }
 
 export function registerConversationFeatureRoutes(app: FastifyInstance, deps: MessagingDeps): void {
-  const { db, rabbitmq, log, aiClient } = deps;
+  const { db, rabbitmq, log, aiClient, redis } = deps;
 
   // GET /api/messaging/resolve-contact
   app.get('/api/messaging/resolve-contact', { preHandler: [requireUser] }, async (request) => {
@@ -236,7 +327,8 @@ export function registerConversationFeatureRoutes(app: FastifyInstance, deps: Me
     const conv = await db.read.query(
       `SELECT c.id AS conversation_id, c.lead_id, c.contact_id, c.campaign_id, c.became_lead_at,
               c.bd_account_id, c.channel_id,
-              c.shared_chat_created_at, c.shared_chat_channel_id, c.shared_chat_invite_link
+              c.shared_chat_created_at, c.shared_chat_channel_id, c.shared_chat_invite_link,
+              c.won_at, c.lost_at, c.revenue_amount, c.loss_reason
        FROM conversations c WHERE c.id = $1 AND c.organization_id = $2`,
       [id, user.organizationId],
     );
@@ -251,7 +343,8 @@ export function registerConversationFeatureRoutes(app: FastifyInstance, deps: Me
     const conv = await db.read.query(
       `SELECT c.id AS conversation_id, c.lead_id, c.contact_id, c.campaign_id, c.became_lead_at,
               c.bd_account_id, c.channel_id,
-              c.shared_chat_created_at, c.shared_chat_channel_id, c.shared_chat_invite_link
+              c.shared_chat_created_at, c.shared_chat_channel_id, c.shared_chat_invite_link,
+              c.won_at, c.lost_at, c.revenue_amount, c.loss_reason
        FROM conversations c
        WHERE c.lead_id = $1 AND c.organization_id = $2
        ORDER BY c.updated_at DESC LIMIT 1`,
@@ -440,47 +533,40 @@ export function registerConversationFeatureRoutes(app: FastifyInstance, deps: Me
       throw new AppError(400, 'Lead Telegram user id or contact username is required', ErrorCodes.VALIDATION);
     }
 
+    const lockKey = `create_shared_chat:${convId}`;
+    const lockToken = randomUUID();
+    const lockOk = await redis.tryLock(lockKey, lockToken, 120);
+    if (!lockOk) {
+      throw new AppError(409, 'Shared chat creation already in progress for this conversation', ErrorCodes.CONFLICT, {
+        conversation_id: convId,
+      });
+    }
+
     const commandQueue = `telegram:commands:${effectiveBdAccountId}`;
-    rabbitmq.publishCommand(commandQueue, {
-      type: 'CREATE_SHARED_CHAT',
-      id: randomUUID(),
-      priority: 7,
-      payload: {
-        organizationId: user.organizationId,
-        conversationId: convId,
-        title,
-        leadTelegramUserId: leadTelegramUserId ?? undefined,
-        leadUsername: leadUsername ?? undefined,
-        extraUsernames,
-      },
-    }).catch((err) => {
-      log.warn({ message: 'Failed to publish CREATE_SHARED_CHAT command', error: String(err) });
-    });
-
-    const now = new Date().toISOString();
-    await db.write.query(
-      `UPDATE conversations SET shared_chat_created_at = NOW(), updated_at = NOW()
-       WHERE id = $1 AND organization_id = $2`,
-      [convId, user.organizationId],
-    );
-
-    const systemContent = SYSTEM_MESSAGES.SHARED_CHAT_CREATED(title);
-    await db.write.query(
-      `INSERT INTO messages (id, organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata)
-       VALUES (gen_random_uuid(), $1, $2, 'telegram', $3, $4, 'outbound', $5, 'delivered', false, $6)`,
-      [
-        user.organizationId,
-        effectiveBdAccountId,
-        c.channel_id,
-        c.contact_id,
-        systemContent,
-        JSON.stringify({ system: true, event: 'shared_chat_created', title }),
-      ],
-    );
+    try {
+      await rabbitmq.publishCommand(commandQueue, {
+        type: 'CREATE_SHARED_CHAT',
+        id: randomUUID(),
+        priority: 6,
+        payload: {
+          organizationId: user.organizationId,
+          conversationId: convId,
+          title,
+          leadTelegramUserId: leadTelegramUserId ?? undefined,
+          leadUsername: leadUsername ?? undefined,
+          extraUsernames,
+        },
+      });
+    } catch (err) {
+      await redis.releaseLock(lockKey, lockToken).catch(() => {});
+      log.error({ message: 'Failed to publish CREATE_SHARED_CHAT command', error: String(err) });
+      throw err;
+    }
 
     return {
+      status: 'queued' as const,
       conversation_id: convId,
-      shared_chat_created_at: now,
+      shared_chat_created_at: null,
       shared_chat_channel_id: null,
       shared_chat_invite_link: null,
       channel_id: c.channel_id,

@@ -22,7 +22,9 @@ import {
   DeleteMessagePayload, SendReactionPayload, SaveDraftPayload,
   ForwardMessagePayload, SendBulkPayload, LoadOlderHistoryPayload,
   AccountLifecyclePayload, SyncHistoryPayload,
+  CreateSharedChatPayload,
 } from './command-types';
+import { executeCreateSharedChatTelegram } from './create-shared-chat-executor';
 import { doSpambotCheck, handleSpambotCheckWithBackoff } from './spambot-checker';
 
 export { handleSyncHistory, type SyncHandlerDeps } from './sync-handler';
@@ -163,30 +165,127 @@ export class AccountActor {
     );
   }
 
+  private static channelIdFromPeer(peer: any): string | null {
+    if (!peer) return null;
+    if (peer.userId != null) return String(peer.userId.value ?? peer.userId);
+    if (peer.chatId != null) return String(peer.chatId.value ?? peer.chatId);
+    if (peer.channelId != null) return String(peer.channelId.value ?? peer.channelId);
+    return null;
+  }
+
+  private static maxIdFromReadUpdate(event: any): number {
+    const n = Number(event?.maxId ?? event?.max_id ?? 0);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  private static normalizeTelegramMessageIds(raw: unknown): number[] {
+    const arr = Array.isArray(raw) ? raw : [];
+    const out: number[] = [];
+    for (const x of arr) {
+      const n = typeof x === 'object' && x != null && 'value' in x ? Number((x as { value: unknown }).value) : Number(x);
+      if (Number.isFinite(n) && n > 0) out.push(n);
+    }
+    return [...new Set(out)];
+  }
+
   private registerReadReceiptHandler(): void {
-    this.client!.addEventHandler(async (update: any) => {
+    try {
+      this.client!.addEventHandler(
+        async (event: any) => {
+          try {
+            if (!this.client?.connected) return;
+            const channelId = AccountActor.channelIdFromPeer(event?.peer);
+            const maxId = AccountActor.maxIdFromReadUpdate(event);
+            if (!channelId || maxId <= 0) return;
+            await this.handleReadOutbox(channelId, maxId, 'UpdateReadHistoryOutbox');
+          } catch (err) {
+            this.log.warn({ message: 'UpdateReadHistoryOutbox handler error', error: String(err) });
+          }
+        },
+        new Raw({ types: [Api.UpdateReadHistoryOutbox], func: () => true }),
+      );
+    } catch (err) {
+      this.log.warn({ message: 'Could not register UpdateReadHistoryOutbox handler', error: String(err) });
+    }
+
+    try {
+      this.client!.addEventHandler(
+        async (event: any) => {
+          try {
+            if (!this.client?.connected) return;
+            const channelIdRaw = event?.channelId ?? event?.channel_id;
+            const channelId = channelIdRaw != null ? String(channelIdRaw.value ?? channelIdRaw) : '';
+            const maxId = AccountActor.maxIdFromReadUpdate(event);
+            if (!channelId || maxId <= 0) return;
+            await this.handleReadOutbox(channelId, maxId, 'UpdateReadChannelOutbox');
+          } catch (err) {
+            this.log.warn({ message: 'UpdateReadChannelOutbox handler error', error: String(err) });
+          }
+        },
+        new Raw({ types: [Api.UpdateReadChannelOutbox], func: () => true }),
+      );
+    } catch (err) {
+      this.log.warn({ message: 'Could not register UpdateReadChannelOutbox handler', error: String(err) });
+    }
+
+    try {
+      this.client!.addEventHandler(
+        async (event: any) => {
+          try {
+            if (!this.client?.connected) return;
+            const ids = AccountActor.normalizeTelegramMessageIds(event?.messages);
+            if (ids.length === 0) return;
+            const dateRaw = event?.date ?? event?.Date;
+            const readAt =
+              dateRaw != null && Number(dateRaw) > 0
+                ? new Date(Number(dateRaw) * 1000)
+                : new Date();
+            await this.handleReadMessageContentsByIds(ids, {
+              channelId: null,
+              readAt,
+              updateKind: 'UpdateReadMessagesContents',
+            });
+          } catch (err) {
+            this.log.warn({ message: 'UpdateReadMessagesContents handler error', error: String(err) });
+          }
+        },
+        new Raw({ types: [Api.UpdateReadMessagesContents], func: () => true }),
+      );
+    } catch (err) {
+      this.log.warn({ message: 'Could not register UpdateReadMessagesContents handler', error: String(err) });
+    }
+
+    const UpdateChannelReadMessagesContents = (Api as any).UpdateChannelReadMessagesContents;
+    if (UpdateChannelReadMessagesContents) {
       try {
-        const cn = update?.className;
-        if (cn === 'UpdateReadHistoryOutbox') {
-          const peer = update.peer;
-          let channelId = '';
-          if (peer?.userId != null) channelId = String(peer.userId.value ?? peer.userId);
-          else if (peer?.chatId != null) channelId = String(peer.chatId.value ?? peer.chatId);
-          else if (peer?.channelId != null) channelId = String(peer.channelId.value ?? peer.channelId);
-          if (!channelId) return;
-          const maxId = update.maxId ?? 0;
-          await this.handleReadOutbox(channelId, maxId);
-        } else if (cn === 'UpdateReadChannelOutbox') {
-          const channelIdRaw = update.channelId;
-          const channelId = channelIdRaw != null ? String(channelIdRaw.value ?? channelIdRaw) : '';
-          if (!channelId) return;
-          const maxId = update.maxId ?? 0;
-          await this.handleReadOutbox(channelId, maxId);
-        }
+        this.client!.addEventHandler(
+          async (event: any) => {
+            try {
+              if (!this.client?.connected) return;
+              const channelIdRaw = event?.channelId ?? event?.channel_id;
+              const channelId = channelIdRaw != null ? String(channelIdRaw.value ?? channelIdRaw) : '';
+              const ids = AccountActor.normalizeTelegramMessageIds(event?.messages);
+              if (!channelId || ids.length === 0) return;
+              const dateRaw = event?.date ?? event?.Date;
+              const readAt =
+                dateRaw != null && Number(dateRaw) > 0
+                  ? new Date(Number(dateRaw) * 1000)
+                  : new Date();
+              await this.handleReadMessageContentsByIds(ids, {
+                channelId,
+                readAt,
+                updateKind: 'UpdateChannelReadMessagesContents',
+              });
+            } catch (err) {
+              this.log.warn({ message: 'UpdateChannelReadMessagesContents handler error', error: String(err) });
+            }
+          },
+          new Raw({ types: [UpdateChannelReadMessagesContents], func: () => true }),
+        );
       } catch (err) {
-        this.log.warn({ message: 'Read receipt handler error', error: String(err) });
+        this.log.warn({ message: 'Could not register UpdateChannelReadMessagesContents handler', error: String(err) });
       }
-    });
+    }
   }
 
   private async isChatAllowed(channelId: string): Promise<boolean> {
@@ -551,8 +650,13 @@ export class AccountActor {
     }
   }
 
-  private async handleReadOutbox(channelId: string, maxId: number): Promise<void> {
+  private async handleReadOutbox(
+    channelId: string,
+    maxId: number,
+    updateKind: string,
+  ): Promise<void> {
     if (!maxId || maxId <= 0) return;
+    const readAt = new Date();
     try {
       const result = await this.pool.query(
         `UPDATE messages
@@ -565,25 +669,179 @@ export class AccountActor {
            AND status <> 'read'`,
         [this.organizationId, this.accountId, channelId, maxId],
       );
-      if (result.rowCount && result.rowCount > 0) {
-        this.log.info({ message: 'Marked messages as read', accountId: this.accountId, channelId, maxId, count: result.rowCount });
+      const msgCount = result.rowCount ?? 0;
+      if (msgCount > 0) {
+        this.log.info({
+          message: 'Marked messages as read',
+          accountId: this.accountId,
+          channelId,
+          maxId,
+          updateKind,
+          count: msgCount,
+        });
         await this.invalidateCampaignStatsForChannel(channelId);
+      } else {
+        this.log.info({
+          message: 'handleReadOutbox: no message rows updated',
+          accountId: this.accountId,
+          channelId,
+          maxId,
+          updateKind,
+          log_detail: 'read_receipt_no_rows',
+        });
       }
 
-      // Update campaign_sends.read_at for messages that are now read
-      await this.pool.query(
-        `UPDATE campaign_sends cs SET read_at = NOW()
+      const csResult = await this.pool.query(
+        `UPDATE campaign_sends cs
+         SET read_at = $4
          FROM messages m
          WHERE cs.message_id = m.id
-           AND m.bd_account_id = $1 AND m.channel_id = $2
+           AND m.organization_id = $1
+           AND m.bd_account_id = $2
+           AND m.channel_id = $3
+           AND m.direction = 'outbound'
            AND m.telegram_message_id IS NOT NULL
            AND m.telegram_message_id ~ '^[0-9]+$'
-           AND m.telegram_message_id::bigint <= $3
+           AND m.telegram_message_id::bigint <= $5
            AND cs.read_at IS NULL`,
-        [this.accountId, channelId, maxId],
+        [this.organizationId, this.accountId, channelId, readAt, maxId],
       );
+      const csCount = csResult.rowCount ?? 0;
+      if (csCount === 0) {
+        this.log.info({
+          message: 'handleReadOutbox: no campaign_sends rows updated',
+          accountId: this.accountId,
+          channelId,
+          maxId,
+          updateKind,
+          log_detail: 'read_receipt_no_campaign_sends',
+        });
+      }
     } catch (err) {
-      this.log.warn({ message: 'handleReadOutbox failed', channelId, maxId, error: String(err) });
+      this.log.warn({
+        message: 'handleReadOutbox failed',
+        channelId,
+        maxId,
+        updateKind,
+        error: String(err),
+      });
+    }
+  }
+
+  private async handleReadMessageContentsByIds(
+    telegramIds: number[],
+    ctx: { channelId: string | null; readAt: Date; updateKind: string },
+  ): Promise<void> {
+    const ids = AccountActor.normalizeTelegramMessageIds(telegramIds);
+    if (ids.length === 0) return;
+
+    const { channelId, readAt, updateKind } = ctx;
+    const idStrs = ids.map(String);
+
+    try {
+      let result: { rows: { channel_id: string }[]; rowCount: number | null };
+      if (channelId) {
+        result = await this.pool.query<{ channel_id: string }>(
+          `UPDATE messages
+           SET status = 'read', updated_at = NOW()
+           WHERE organization_id = $1 AND bd_account_id = $2
+             AND channel_id = $3 AND direction = 'outbound'
+             AND telegram_message_id IS NOT NULL
+             AND telegram_message_id::text = ANY($4::text[])
+             AND status <> 'read'
+           RETURNING channel_id`,
+          [this.organizationId, this.accountId, channelId, idStrs],
+        );
+      } else {
+        result = await this.pool.query<{ channel_id: string }>(
+          `UPDATE messages
+           SET status = 'read', updated_at = NOW()
+           WHERE organization_id = $1 AND bd_account_id = $2
+             AND direction = 'outbound'
+             AND telegram_message_id IS NOT NULL
+             AND telegram_message_id::text = ANY($3::text[])
+             AND status <> 'read'
+           RETURNING channel_id`,
+          [this.organizationId, this.accountId, idStrs],
+        );
+      }
+
+      const msgCount = result.rowCount ?? 0;
+      if (msgCount > 0) {
+        const seen = new Set<string>();
+        for (const row of result.rows) {
+          if (seen.has(row.channel_id)) continue;
+          seen.add(row.channel_id);
+          await this.invalidateCampaignStatsForChannel(row.channel_id);
+        }
+        this.log.info({
+          message: 'Marked messages as read (contents)',
+          accountId: this.accountId,
+          channelId,
+          updateKind,
+          count: msgCount,
+          telegramMessageIds: ids,
+        });
+      } else {
+        this.log.info({
+          message: 'handleReadMessageContentsByIds: no message rows updated',
+          accountId: this.accountId,
+          channelId,
+          updateKind,
+          telegramMessageIds: ids,
+          log_detail: 'read_contents_no_messages',
+        });
+      }
+
+      let csResult: { rowCount: number | null };
+      if (channelId) {
+        csResult = await this.pool.query(
+          `UPDATE campaign_sends cs
+           SET read_at = $4
+           FROM messages m
+           WHERE cs.message_id = m.id
+             AND m.organization_id = $1
+             AND m.bd_account_id = $2
+             AND m.channel_id = $3
+             AND m.direction = 'outbound'
+             AND m.telegram_message_id IS NOT NULL
+             AND m.telegram_message_id::text = ANY($5::text[])
+             AND cs.read_at IS NULL`,
+          [this.organizationId, this.accountId, channelId, readAt, idStrs],
+        );
+      } else {
+        csResult = await this.pool.query(
+          `UPDATE campaign_sends cs
+           SET read_at = $3
+           FROM messages m
+           WHERE cs.message_id = m.id
+             AND m.organization_id = $1
+             AND m.bd_account_id = $2
+             AND m.direction = 'outbound'
+             AND m.telegram_message_id IS NOT NULL
+             AND m.telegram_message_id::text = ANY($4::text[])
+             AND cs.read_at IS NULL`,
+          [this.organizationId, this.accountId, readAt, idStrs],
+        );
+      }
+
+      const csCount = csResult.rowCount ?? 0;
+      if (csCount === 0) {
+        this.log.info({
+          message: 'handleReadMessageContentsByIds: no campaign_sends rows updated',
+          accountId: this.accountId,
+          channelId,
+          updateKind,
+          telegramMessageIds: ids,
+          log_detail: 'read_contents_no_campaign_sends',
+        });
+      }
+    } catch (err) {
+      this.log.warn({
+        message: 'handleReadMessageContentsByIds failed',
+        updateKind,
+        error: String(err),
+      });
     }
   }
 
@@ -755,6 +1013,7 @@ export class AccountActor {
     CommandType.SEND_BULK,
     CommandType.FORWARD_MESSAGE,
     CommandType.GET_PARTICIPANTS,
+    CommandType.CREATE_SHARED_CHAT,
   ]);
 
   private async processCommand(command: TelegramCommand): Promise<void> {
@@ -833,6 +1092,9 @@ export class AccountActor {
           break;
         case CommandType.SYNC_HISTORY:
           await this.syncHistory((command.payload as SyncHistoryPayload).organizationId);
+          break;
+        case CommandType.CREATE_SHARED_CHAT:
+          await this.handleCreateSharedChat(command.payload as CreateSharedChatPayload);
           break;
         default:
           this.log.warn({ message: `Unknown command type: ${command.type}` });
@@ -959,6 +1221,79 @@ export class AccountActor {
       await client.getDialogs({ limit: 100 });
       return await client.getInputEntity(peerVal);
     }
+  }
+
+  private async handleCreateSharedChat(payload: CreateSharedChatPayload): Promise<void> {
+    if (!this.client?.connected) {
+      throw new Error(`Client not connected for account ${this.accountId}`);
+    }
+    const { organizationId, conversationId, title, leadTelegramUserId, leadUsername, extraUsernames } = payload;
+
+    const convRes = await this.pool.query(
+      `SELECT id, channel_id, bd_account_id, contact_id, organization_id, shared_chat_created_at
+       FROM conversations WHERE id = $1 AND organization_id = $2`,
+      [conversationId, organizationId],
+    );
+    if (!convRes.rows.length) {
+      this.log.warn({ message: 'CREATE_SHARED_CHAT: conversation not found', conversationId, organizationId });
+      return;
+    }
+    const row = convRes.rows[0] as {
+      channel_id: string;
+      bd_account_id: string | null;
+      contact_id: string | null;
+      shared_chat_created_at: Date | null;
+    };
+    if (row.shared_chat_created_at != null) {
+      this.log.info({ message: 'CREATE_SHARED_CHAT: already created, skipping', conversationId });
+      return;
+    }
+    const bdAccountId = row.bd_account_id ?? this.accountId;
+    if (bdAccountId !== this.accountId) {
+      this.log.warn({ message: 'CREATE_SHARED_CHAT: bd account mismatch', expected: this.accountId, got: bdAccountId });
+      return;
+    }
+
+    const result = await executeCreateSharedChatTelegram({
+      client: this.client,
+      pool: this.pool,
+      log: this.log,
+      bdAccountId: this.accountId,
+      title,
+      leadTelegramUserId,
+      leadUsername,
+      extraUsernames: extraUsernames ?? [],
+    });
+
+    const systemContent = `[System] Shared chat created: ${title}`;
+    await this.pool.query(
+      `UPDATE conversations
+       SET shared_chat_created_at = NOW(),
+           shared_chat_invite_link = $1,
+           shared_chat_channel_id = $2::bigint,
+           updated_at = NOW()
+       WHERE id = $3 AND organization_id = $4`,
+      [result.inviteLink, result.sharedChatChannelIdForDb, conversationId, organizationId],
+    );
+
+    await this.pool.query(
+      `INSERT INTO messages (id, organization_id, bd_account_id, channel, channel_id, contact_id, direction, content, status, unread, metadata)
+       VALUES (gen_random_uuid(), $1, $2, 'telegram', $3, $4, 'outbound', $5, 'delivered', false, $6::jsonb)`,
+      [
+        organizationId,
+        this.accountId,
+        row.channel_id,
+        row.contact_id,
+        systemContent,
+        JSON.stringify({ system: true, event: 'shared_chat_created', title }),
+      ],
+    );
+
+    this.log.info({
+      message: 'CREATE_SHARED_CHAT completed',
+      conversationId,
+      inviteLink: result.inviteLink != null,
+    });
   }
 
   private async handleSendMessage(payload: SendMessagePayload): Promise<void> {

@@ -1272,6 +1272,8 @@
     "timelineLeadCreated": "Лид создан",
     "timelineStageChanged": "Стадия: {{name}}",
     "timelineDealCreated": "Сделка создана",
+    "timelineCampaignReplyReceived": "Ответ по кампании",
+    "timelineEventGeneric": "Событие: {{type}}",
     "newLeadsFolder": "Новые лиды",
     "newLeadsEmptyTitle": "Нет новых лидов",
     "newLeadsEmptyDesc": "Все лиды обработаны 🎉",

@@ -16,6 +16,7 @@ export enum CommandType {
   RECONNECT = 'RECONNECT',
   SPAMBOT_CHECK = 'SPAMBOT_CHECK',
   SYNC_HISTORY = 'SYNC_HISTORY',
+  CREATE_SHARED_CHAT = 'CREATE_SHARED_CHAT',
 }
 
 export const COMMAND_PRIORITY: Record<CommandType, number> = {
@@ -36,6 +37,7 @@ export const COMMAND_PRIORITY: Record<CommandType, number> = {
   [CommandType.RECONNECT]: 10,
   [CommandType.SPAMBOT_CHECK]: 2,
   [CommandType.SYNC_HISTORY]: 3,
+  [CommandType.CREATE_SHARED_CHAT]: 6,
 };
 
 export interface TelegramCommand<T = unknown> {
@@ -148,6 +150,15 @@ export interface AccountLifecyclePayload {
 export interface SyncHistoryPayload {
   accountId: string;
   organizationId: string;
+}
+
+export interface CreateSharedChatPayload {
+  organizationId: string;
+  conversationId: string;
+  title: string;
+  leadTelegramUserId?: number;
+  leadUsername?: string;
+  extraUsernames: string[];
 }
 
 export type AccountState = 'disconnected' | 'connecting' | 'connected' | 'flood_wait' | 'spam_restricted' | 'error' | 'reauth_required';

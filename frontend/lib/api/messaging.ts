@@ -52,7 +52,19 @@ export interface LeadContextByLead {
   revenue_amount?: number | null;
   lost_at?: string | null;
   loss_reason?: string | null;
-  timeline: Array<{ type: string; created_at: string; stage_name?: string }>;
+  timeline: LeadTimelineEvent[];
+}
+
+/** Matches messaging-api lead-context enriched timeline (lead_activity_log + stage names). */
+export interface LeadTimelineEvent {
+  id: string;
+  lead_id: string;
+  type: string;
+  metadata?: unknown;
+  created_at: string;
+  from_stage_name?: string | null;
+  to_stage_name?: string | null;
+  stage_name?: string | null;
 }
 
 export async function fetchLeadContextByLeadId(leadId: string): Promise<LeadContextByLead> {
@@ -78,13 +90,36 @@ export interface CreateSharedChatParams {
   bd_account_id?: string;
 }
 
-export interface SharedChatResult {
+/** API queues work to TSM; DB is updated when Telegram creation finishes. */
+export interface SharedChatQueuedResult {
+  status: 'queued';
   conversation_id: string;
-  shared_chat_created_at: string;
-  shared_chat_channel_id: string | null;
-  shared_chat_invite_link: string | null;
+  title: string;
+  shared_chat_created_at: null;
+  shared_chat_channel_id: null;
+  shared_chat_invite_link: null;
   channel_id?: string;
-  title?: string;
+}
+
+export type SharedChatResult = SharedChatQueuedResult;
+
+const SHARED_CHAT_POLL_MAX_MS = 60_000;
+const SHARED_CHAT_POLL_INITIAL_MS = 1500;
+const SHARED_CHAT_POLL_MAX_DELAY_MS = 5000;
+
+/** Poll lead-context until shared chat fields appear or timeout; returns last snapshot. */
+export async function pollLeadContextUntilSharedChatReady(conversationId: string): Promise<LeadContextByLead> {
+  const start = Date.now();
+  let delay = SHARED_CHAT_POLL_INITIAL_MS;
+  while (Date.now() - start < SHARED_CHAT_POLL_MAX_MS) {
+    const ctx = await fetchLeadContext(conversationId);
+    if (ctx.shared_chat_created_at != null || (ctx.shared_chat_invite_link != null && ctx.shared_chat_invite_link !== '')) {
+      return ctx;
+    }
+    await new Promise((r) => setTimeout(r, delay));
+    delay = Math.min(Math.round(delay * 1.5), SHARED_CHAT_POLL_MAX_DELAY_MS);
+  }
+  return fetchLeadContext(conversationId);
 }
 
 export async function createSharedChat(params: CreateSharedChatParams): Promise<SharedChatResult> {

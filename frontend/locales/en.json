@@ -1272,6 +1272,8 @@
     "timelineLeadCreated": "Lead created",
     "timelineStageChanged": "Stage changed to {{name}}",
     "timelineDealCreated": "Deal created",
+    "timelineCampaignReplyReceived": "Campaign reply received",
+    "timelineEventGeneric": "Event: {{type}}",
     "newLeadsFolder": "New leads",
     "newLeadsEmptyTitle": "No new leads",
     "newLeadsEmptyDesc": "All leads have been replied to 🎉",

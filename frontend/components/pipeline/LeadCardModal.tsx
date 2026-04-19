@@ -2,12 +2,13 @@
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import Link from 'next/link';
 import { MessageSquare, ExternalLink, Loader2, Save, Trash2 } from 'lucide-react';
 import { LeadContextAvatar } from '@/components/messaging/LeadContextAvatar';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
-import { fetchLeadContextByLeadId, resolveContact, type LeadContextByLead } from '@/lib/api/messaging';
+import { fetchLeadContextByLeadId, resolveContact, type LeadContextByLead, type LeadTimelineEvent } from '@/lib/api/messaging';
 import { updateLead } from '@/lib/api/pipeline';
 import { apiClient } from '@/lib/api/client';
 import { fetchContactNotes, fetchContactReminders, deleteNote, updateReminder, deleteReminder, type Note, type Reminder } from '@/lib/api/crm';
@@ -20,6 +21,27 @@ function formatLeadPanelDate(iso: string): string {
   const month = d.toLocaleString('en-GB', { month: 'short' });
   const year = d.getFullYear();
   return `${day} ${month} ${year}`;
+}
+
+/** Calendar day in UTC — aligns with Postgres `created_at` ordering for activity log. */
+function formatLeadPanelDateUtc(iso: string): string {
+  if (!iso || Number.isNaN(new Date(iso).getTime())) return '—';
+  const d = new Date(iso);
+  const day = d.getUTCDate();
+  const month = d.toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' });
+  const year = d.getUTCFullYear();
+  return `${day} ${month} ${year}`;
+}
+
+function timelineEventLabel(ev: LeadTimelineEvent, t: TFunction): string {
+  if (ev.type === 'lead_created') return t('messaging.timelineLeadCreated', 'Lead created');
+  if (ev.type === 'stage_changed') {
+    const name = ev.stage_name ?? ev.to_stage_name ?? '—';
+    return t('messaging.timelineStageChanged', { name });
+  }
+  if (ev.type === 'deal_created') return t('messaging.timelineDealCreated', 'Deal created');
+  if (ev.type === 'campaign_reply_received') return t('messaging.timelineCampaignReplyReceived', 'Campaign reply received');
+  return t('messaging.timelineEventGeneric', { type: ev.type });
 }
 
 interface TeamMember {
@@ -146,6 +168,11 @@ export function LeadCardModal({ leadId, open, onClose, onLeadUpdated }: LeadCard
     context?.bd_account_id && context?.channel_id
       ? `/dashboard/messaging?bdAccountId=${encodeURIComponent(context.bd_account_id)}&open=${encodeURIComponent(context.channel_id)}`
       : null;
+
+  const timelineChronological = useMemo(() => {
+    if (!context?.timeline?.length) return [];
+    return [...context.timeline].reverse();
+  }, [context?.timeline]);
 
   return (
     <Modal
@@ -326,19 +353,17 @@ export function LeadCardModal({ leadId, open, onClose, onLeadUpdated }: LeadCard
               </div>
             )}
 
-            {/* Timeline */}
+            {/* Timeline — oldest first (API returns newest first). */}
             <div className="border-t border-border pt-4 space-y-2">
               <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('messaging.timelineTitle', 'History')}</h4>
-              {context.timeline.length === 0 ? (
+              {timelineChronological.length === 0 ? (
                 <div className="text-xs text-muted-foreground">—</div>
               ) : (
-                context.timeline.map((ev, i) => (
-                  <div key={i} className="text-xs text-muted-foreground">
-                    <span className="tabular-nums">{formatLeadPanelDate(ev.created_at)}</span>
+                timelineChronological.map((ev) => (
+                  <div key={ev.id} className="text-xs text-muted-foreground">
+                    <span className="tabular-nums">{formatLeadPanelDateUtc(ev.created_at)}</span>
                     {' — '}
-                    {ev.type === 'lead_created' && t('messaging.timelineLeadCreated')}
-                    {ev.type === 'stage_changed' && t('messaging.timelineStageChanged', { name: ev.stage_name ?? '' })}
-                    {ev.type === 'deal_created' && t('messaging.timelineDealCreated')}
+                    {timelineEventLabel(ev, t)}
                   </div>
                 ))
               )}

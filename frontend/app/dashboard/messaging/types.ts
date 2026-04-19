@@ -1,3 +1,4 @@
+import type { LeadTimelineEvent } from '@/lib/api/messaging';
 import type { Note, Reminder } from '@/lib/api/crm';
 import type { RightPanelTab } from '@/components/messaging/RightWorkspacePanel';
 import type { BDAccount, BdSyncFolder } from '@/lib/types/bd-account';
@@ -57,7 +58,7 @@ export interface LeadContext {
   revenue_amount?: number | null;
   lost_at?: string | null;
   loss_reason?: string | null;
-  timeline: Array<{ type: string; created_at: string; stage_name?: string }>;
+  timeline: LeadTimelineEvent[];
 }
 
 export interface Message {

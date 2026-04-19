@@ -10,6 +10,7 @@ import type { TelegramClient } from 'telegram';
 import { telegramInvokeWithFloodRetry } from '@getsale/telegram';
 import { SessionCoordinator } from '../coordinator';
 import { CommandType } from '../command-types';
+import { executeCreateSharedChatTelegram } from '../create-shared-chat-executor';
 
 interface Deps {
   db: DatabasePools;
@@ -374,112 +375,21 @@ export function registerMessagingRoutes(app: FastifyInstance, deps: Deps): void 
       : undefined;
     const extraUsernames = body.extra_usernames ?? [];
 
-    log.info({ message: 'create-shared-chat request', account_id: id, extra_count: extraUsernames.length });
-
-    // Step 1: Create the supergroup
-    const createResult = await telegramInvokeWithFloodRetry(log, id, 'CreateChannel', () =>
-      client.invoke(new Api.channels.CreateChannel({
-        title,
-        about: '',
-        megagroup: true,
-      })),
-    ) as any;
-
-    const chats = createResult?.chats ?? [];
-    const channel = chats[0];
-    if (!channel) {
+    const result = await executeCreateSharedChatTelegram({
+      client,
+      pool: db.write,
+      log,
+      bdAccountId: id,
+      title,
+      leadTelegramUserId: leadId,
+      leadUsername: leadUser,
+      extraUsernames,
+    }).catch((err) => {
+      log.error({ message: 'create-shared-chat executor failed', account_id: id, error: String(err) });
       throw new AppError(502, 'Failed to create Telegram group', ErrorCodes.SERVICE_UNAVAILABLE);
-    }
+    });
 
-    const channelId = String(channel.id);
-    const accessHash = channel.accessHash != null ? String(channel.accessHash) : null;
-
-    // Step 2: Invite users
-    const usersToInvite: any[] = [];
-    if (leadId && Number.isInteger(leadId) && leadId > 0) {
-      try {
-        const entity = await client.getInputEntity(leadId);
-        usersToInvite.push(entity);
-      } catch (e) {
-        log.warn({ message: 'Could not resolve lead by ID for invite', account_id: id, leadId, error: String(e) });
-      }
-    }
-    if (leadUser && usersToInvite.length === 0) {
-      try {
-        const entity = await client.getInputEntity(leadUser);
-        usersToInvite.push(entity);
-      } catch (e) {
-        log.warn({ message: 'Could not resolve lead by username for invite', account_id: id, leadUser, error: String(e) });
-      }
-    }
-    for (const uname of extraUsernames) {
-      const u = (uname ?? '').trim().replace(/^@/, '');
-      if (!u) continue;
-      try {
-        const entity = await client.getInputEntity(u);
-        usersToInvite.push(entity);
-      } catch (e) {
-        log.warn({ message: 'Could not resolve extra username for invite', account_id: id, username: u, error: String(e) });
-      }
-    }
-
-    if (usersToInvite.length > 0) {
-      try {
-        await telegramInvokeWithFloodRetry(log, id, 'InviteToChannel', () =>
-          client.invoke(new Api.channels.InviteToChannel({
-            channel: channel,
-            users: usersToInvite,
-          })),
-        );
-      } catch (e) {
-        log.warn({ message: 'InviteToChannel partially failed', account_id: id, error: String(e) });
-      }
-    }
-
-    // Step 3: Generate invite link
-    let inviteLink: string | null = null;
-    try {
-      const exportResult = await client.invoke(new Api.messages.ExportChatInvite({
-        peer: channel,
-      })) as any;
-      inviteLink = exportResult?.link ?? null;
-    } catch (e) {
-      log.warn({ message: 'ExportChatInvite failed', account_id: id, error: String(e) });
-    }
-
-    // Step 4: Send invite link as DM to lead and extra participants
-    if (inviteLink) {
-      const inviteMessage = `Присоединяйтесь к группе:\n${inviteLink}`;
-      const dmTargets: string[] = [];
-      if (leadId && Number.isInteger(leadId) && leadId > 0) dmTargets.push(String(leadId));
-      else if (leadUser) dmTargets.push(leadUser);
-      for (const uname of extraUsernames) {
-        const u = (uname ?? '').trim().replace(/^@/, '');
-        if (u) dmTargets.push(u);
-      }
-      for (const target of dmTargets) {
-        try {
-          await client.sendMessage(target, { message: inviteMessage });
-        } catch (e) {
-          log.warn({ message: 'Failed to send invite DM', account_id: id, target, error: String(e) });
-        }
-      }
-    }
-
-    // Step 5: Upsert the new chat in sync list
-    const rawId = Number(channelId);
-    const fullChannelId = Number.isInteger(rawId) && rawId > 0 ? String(-1000000000000 - rawId) : channelId;
-    if (fullChannelId) {
-      await db.write.query(
-        `INSERT INTO bd_account_sync_chats (bd_account_id, telegram_chat_id, title, peer_type, is_folder, folder_id, access_hash, sync_list_origin)
-         VALUES ($1, $2, $3, 'chat', false, NULL, $4, 'outbound_send')
-         ON CONFLICT (bd_account_id, telegram_chat_id)
-         DO UPDATE SET title = EXCLUDED.title, access_hash = COALESCE(EXCLUDED.access_hash, bd_account_sync_chats.access_hash)`,
-        [id, fullChannelId, (channel.title ?? title).slice(0, 500), accessHash],
-      );
-    }
-
-    return { channelId, title: channel.title ?? title, inviteLink };
+    return { channelId: result.channelId, title: result.title, inviteLink: result.inviteLink };
   });
 
   // ═══════════════════════════════════════════════════════
