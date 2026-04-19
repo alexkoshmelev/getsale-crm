@@ -1,12 +1,16 @@
 # GetSale CRM Frontend
 
-Frontend приложение на Next.js 14 с App Router.
+Frontend на **Next.js 16** (App Router), **React 19**.
+
+## Требования
+
+- **Node.js 24+** (как в корневом репозитории: `.nvmrc`, `engines` в `package.json`)
 
 ## Технологии
 
-- **Next.js 14** - React framework с App Router
-- **TypeScript** - Типизация
-- **Tailwind CSS** - Стилизация
+- **Next.js 16** — React framework, App Router
+- **TypeScript** — типизация
+- **Tailwind CSS 4** — стилизация
 - **Zustand** - State management
 - **Socket.io Client** - WebSocket для real-time
 - **Axios** - HTTP клиент
@@ -27,10 +31,10 @@ npm run dev
 
 ```bash
 # Из корня проекта
-docker-compose up frontend
+docker compose -f docker-compose.yml up frontend
 ```
 
-Приложение будет доступно на http://localhost:5173 (порт 5173 на хосте маппится на порт 3000 внутри контейнера)
+Приложение: http://localhost:5173 (хост 5173 → порт 3000 внутри контейнера). Полный стек: `docker compose -f docker-compose.yml up -d`.
 
 ## Структура
 

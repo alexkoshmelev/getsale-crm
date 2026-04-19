@@ -1,58 +1,66 @@
-import './load-env';
-import OpenAI from 'openai';
-import { RedisClient } from '@getsale/utils';
+import { createService } from '@getsale/service-framework';
+import { RedisClient } from '@getsale/cache';
 import { EventType } from '@getsale/events';
 import { AIDraftStatus } from '@getsale/types';
-import { createServiceApp } from '@getsale/service-core';
-import { draftsRouter } from './routes/drafts';
-import { analyzeRouter } from './routes/analyze';
-import { usageRouter } from './routes/usage';
-import { searchQueriesRouter } from './routes/search-queries';
-import { campaignRephraseRouter } from './routes/campaign-rephrase';
+import { createOpenAIClient, resolveModels } from './openai-client';
 import { AIRateLimiter } from './rate-limiter';
 import { DRAFT_SYSTEM, PROMPT_VERSION } from './prompts';
-import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL } from './openrouter-campaign-config';
-
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || '';
-const isPlaceholder = /your[_\-]?openai|placeholder|your_ope/i.test(OPENAI_API_KEY);
-const isKeyConfigured = OPENAI_API_KEY.length > 0 && !isPlaceholder && OPENAI_API_KEY.startsWith('sk-');
-
-const models = {
-  draft: process.env.AI_MODEL_DRAFT || 'gpt-4o',
-  analyze: process.env.AI_MODEL_ANALYZE || 'gpt-4o',
-  summarize: process.env.AI_MODEL_SUMMARIZE || 'gpt-4o-mini',
-};
+import {
+  resolveOpenRouterCampaignModel,
+  resolveOpenRouterAutoRespondModel,
+  resolveOpenRouterChatSummarizeModel,
+} from './openrouter-models';
+import { registerDraftRoutes } from './routes/drafts';
+import { registerAnalyzeRoutes } from './routes/analyze';
+import { registerUsageRoutes } from './routes/usage';
+import { registerSearchQueryRoutes } from './routes/search-queries';
+import { registerCampaignRephraseRoutes } from './routes/campaign-rephrase';
+import { registerAutoRespondRoutes } from './routes/auto-respond';
 
 async function main() {
-  const ctx = await createServiceApp({ name: 'ai-service', port: 3005, skipDb: true });
-  const { rabbitmq, log } = ctx;
+  const redis = new RedisClient({ url: process.env.REDIS_URL || 'redis://localhost:6380' });
+  const maxPerHour = parseInt(process.env.AI_RATE_LIMIT_PER_HOUR || '200', 10);
+  const rateLimiter = new AIRateLimiter(redis, maxPerHour);
+  const models = resolveModels();
+  const openai = createOpenAIClient();
 
-  const openai = isKeyConfigured ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+  const ctx = await createService({
+    name: 'ai-service',
+    port: parseInt(process.env.PORT || '4010', 10),
+    skipDb: true,
+    onShutdown: () => redis.disconnect(),
+  });
 
-  if (!openai) {
-    log.warn({ message: 'OPENAI_API_KEY not configured. AI endpoints will return 503.' });
-  } else {
+  const { app, rabbitmq, log } = ctx;
+
+  if (openai) {
     log.info({ message: 'OpenAI configured', models: JSON.stringify(models), prompt_version: PROMPT_VERSION });
   }
 
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
-  const openRouterModel = process.env.OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_CAMPAIGN_MODEL;
   if (openRouterKey) {
+    const summarizeOr = resolveOpenRouterChatSummarizeModel();
     log.info({
-      message: 'OPENROUTER_API_KEY is set; campaign rephrase endpoint is available',
-      openrouter_model: openRouterModel,
+      message: 'OpenRouter configured',
+      openrouter_campaign_model: resolveOpenRouterCampaignModel(),
+      openrouter_auto_respond_model: resolveOpenRouterAutoRespondModel(),
+      chat_summarize: summarizeOr
+        ? { provider: 'openrouter', model: summarizeOr }
+        : { provider: 'openai', model: models.summarize },
     });
   } else {
-    log.warn({ message: 'OPENROUTER_API_KEY not set; campaign rephrase will return 503' });
+    log.warn({ message: 'OPENROUTER_API_KEY not set; campaign rephrase and OpenRouter summarize will return 503' });
   }
-
-  const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6379');
-  const maxPerHour = parseInt(process.env.AI_RATE_LIMIT_PER_HOUR || '200', 10);
-  const rateLimiter = new AIRateLimiter(redis, maxPerHour);
 
   const deps = { openai, redis, rabbitmq, log, rateLimiter, models };
 
-  // Event-driven: generate draft on inbound messages
+  registerDraftRoutes(app, deps);
+  registerAnalyzeRoutes(app, deps);
+  registerUsageRoutes(app, deps);
+  registerSearchQueryRoutes(app, deps);
+  registerCampaignRephraseRoutes(app, { log, rateLimiter });
+  registerAutoRespondRoutes(app, { log, rateLimiter });
+
   if (rabbitmq.isConnected()) {
     await rabbitmq.subscribeToEvents(
       [EventType.MESSAGE_RECEIVED],
@@ -113,20 +121,14 @@ async function main() {
         }
       },
       'events',
-      'ai-service'
+      'ai-service',
     );
   }
 
-  ctx.mount('/api/ai/drafts', draftsRouter(deps));
-  ctx.mount('/api/ai', analyzeRouter(deps));
-  ctx.mount('/api/ai', usageRouter(deps));
-  ctx.mount('/api/ai', searchQueriesRouter(deps));
-  ctx.mount('/api/ai', campaignRephraseRouter({ log, rateLimiter }));
-
-  ctx.start();
+  await ctx.start();
 }
 
 main().catch((err) => {
-  console.error('Fatal: AI service failed to start:', err);
+  console.error('Fatal: ai-service failed to start:', err);
   process.exit(1);
 });

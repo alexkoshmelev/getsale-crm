@@ -3,7 +3,21 @@ import { io, Socket } from 'socket.io-client';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import { reportError, reportWarning } from '@/lib/error-reporter';
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3004';
+function resolveWsUrl(): string {
+  if (typeof window === 'undefined') return process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3004';
+  const { hostname, port, protocol } = window.location;
+  // Accessed through gateway (:8000) or via a domain (not localhost) — WS is proxied through the gateway on the same origin
+  if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+    return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+  }
+  if (port === '8000') {
+    return `ws://${window.location.host}`;
+  }
+  // Direct frontend access (localhost:5173 / localhost:3000) — connect to notification-hub directly
+  return process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:4008';
+}
+
+const WS_URL = resolveWsUrl();
 
 /** Same-origin /api/* so Next rewrites to gateway; cookies work for app.getsale.ai */
 const WS_TOKEN_URL = typeof window !== 'undefined' ? '/api/auth/ws-token' : '';

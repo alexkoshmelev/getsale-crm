@@ -1,22 +1,85 @@
 apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: rabbitmq-pvc
-  namespace: getsale-crm
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
----
-apiVersion: apps/v1
-kind: Deployment
+kind: Service
 metadata:
   name: rabbitmq
-  namespace: getsale-crm
+  namespace: getsale
+  labels:
+    app: rabbitmq
+    app.kubernetes.io/part-of: getsale
 spec:
-  replicas: 1
+  type: ClusterIP
+  ports:
+    - port: 5672
+      targetPort: 5672
+      protocol: TCP
+      name: amqp
+    - port: 15672
+      targetPort: 15672
+      protocol: TCP
+      name: management
+  selector:
+    app: rabbitmq
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-headless
+  namespace: getsale
+  labels:
+    app: rabbitmq
+    app.kubernetes.io/part-of: getsale
+spec:
+  clusterIP: None
+  ports:
+    - port: 5672
+      targetPort: 5672
+      name: amqp
+    - port: 4369
+      targetPort: 4369
+      name: epmd
+    - port: 25672
+      targetPort: 25672
+      name: dist
+  selector:
+    app: rabbitmq
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-config
+  namespace: getsale
+  labels:
+    app: rabbitmq
+    app.kubernetes.io/part-of: getsale
+data:
+  enabled_plugins: |
+    [rabbitmq_management,rabbitmq_peer_discovery_k8s,rabbitmq_prometheus].
+  rabbitmq.conf: |
+    cluster_formation.peer_discovery_backend = rabbit_peer_discovery_k8s
+    cluster_formation.k8s.host = kubernetes.default.svc.cluster.local
+    cluster_formation.k8s.address_type = hostname
+    cluster_formation.k8s.service_name = rabbitmq-headless
+    cluster_formation.k8s.hostname_suffix = .rabbitmq-headless.getsale.svc.cluster.local
+    cluster_formation.node_cleanup.only_log_warning = true
+    queue_master_locator = min-masters
+    default_vhost = /
+    default_user = getsale
+    vm_memory_high_watermark.relative = 0.7
+    disk_free_limit.relative = 1.5
+    log.console = true
+    log.console.level = info
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: getsale
+  labels:
+    app: rabbitmq
+    app.kubernetes.io/part-of: getsale
+spec:
+  serviceName: rabbitmq-headless
+  replicas: 3
   selector:
     matchLabels:
       app: rabbitmq
@@ -24,54 +87,86 @@ spec:
     metadata:
       labels:
         app: rabbitmq
+        app.kubernetes.io/part-of: getsale
     spec:
       containers:
-      - name: rabbitmq
-        image: rabbitmq:3-management-alpine
-        env:
-        - name: RABBITMQ_DEFAULT_USER
-          valueFrom:
-            secretKeyRef:
-              name: rabbitmq-secret
-              key: username
-        - name: RABBITMQ_DEFAULT_PASS
-          valueFrom:
-            secretKeyRef:
-              name: rabbitmq-secret
-              key: password
-        ports:
-        - containerPort: 5672
-          name: amqp
-        - containerPort: 15672
-          name: management
-        volumeMounts:
-        - name: rabbitmq-storage
-          mountPath: /var/lib/rabbitmq
+        - name: rabbitmq
+          image: rabbitmq:3-management-alpine
+          ports:
+            - containerPort: 5672
+              name: amqp
+            - containerPort: 15672
+              name: management
+            - containerPort: 4369
+              name: epmd
+            - containerPort: 25672
+              name: dist
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              value: "getsale"
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: getsale-secrets
+                  key: RABBITMQ_DEFAULT_PASS
+            - name: RABBITMQ_ERLANG_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: getsale-secrets
+                  key: RABBITMQ_ERLANG_COOKIE
+            - name: RABBITMQ_USE_LONGNAME
+              value: "true"
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RABBITMQ_NODENAME
+              value: "rabbit@$(MY_POD_NAME).rabbitmq-headless.getsale.svc.cluster.local"
+          readinessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - check_running
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - check_running
+            initialDelaySeconds: 40
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+            - name: rabbitmq-config
+              mountPath: /etc/rabbitmq/conf.d/20-custom.conf
+              subPath: rabbitmq.conf
+            - name: rabbitmq-plugins
+              mountPath: /etc/rabbitmq/enabled_plugins
+              subPath: enabled_plugins
+      volumes:
+        - name: rabbitmq-config
+          configMap:
+            name: rabbitmq-config
+        - name: rabbitmq-plugins
+          configMap:
+            name: rabbitmq-config
+  volumeClaimTemplates:
+    - metadata:
+        name: rabbitmq-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "2Gi"
-            cpu: "1000m"
-      volumes:
-      - name: rabbitmq-storage
-        persistentVolumeClaim:
-          claimName: rabbitmq-pvc
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: rabbitmq
-  namespace: getsale-crm
-spec:
-  selector:
-    app: rabbitmq
-  ports:
-  - port: 5672
-    targetPort: 5672
-    name: amqp
-  - port: 15672
-    targetPort: 15672
-    name: management
-
+            storage: 10Gi

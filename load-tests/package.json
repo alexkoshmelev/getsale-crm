@@ -1,0 +1,12 @@
+{
+  "name": "getsale-load-tests",
+  "private": true,
+  "scripts": {
+    "test:auth": "k6 run auth-flow.js",
+    "test:crm": "k6 run crm-crud.js",
+    "test:messaging": "k6 run messaging.js",
+    "test:pipeline": "k6 run pipeline.js",
+    "test:mixed": "k6 run mixed-load.js",
+    "test:all": "k6 run mixed-load.js --out json=results.json"
+  }
+}

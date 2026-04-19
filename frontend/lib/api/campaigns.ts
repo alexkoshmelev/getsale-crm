@@ -17,11 +17,13 @@ export interface CampaignTargetAudience {
   sendDelayMaxSeconds?: number;
   /** Rephrase message text via AI (OpenRouter) for randomization. */
   randomizeWithAI?: boolean;
-  /** Перед запуском обогащать контакты из Telegram (getEntity → first_name, last_name, username). */
+  /** Resolve username -> telegram_id via Telegram API before starting the campaign. */
   enrichContactsBeforeStart?: boolean;
   /** Dynamic campaign: auto-add leads when they enter one of these stages in the given pipeline */
   dynamicPipelineId?: string;
   dynamicStageIds?: string[];
+  /** Overrides BD account daily cap for staggering (1–500). */
+  dailySendTarget?: number;
 }
 
 export interface LeadCreationSettings {
@@ -29,6 +31,27 @@ export interface LeadCreationSettings {
   default_stage_id?: string;
   /** User ID to set as lead responsible when creating lead from campaign. */
   default_responsible_id?: string;
+}
+
+/** BD account snapshot on campaign list/detail (from campaign-service). */
+export interface CampaignBdAccount {
+  id: string;
+  displayName: string;
+  floodWaitUntil?: string | null;
+  floodWaitSeconds?: number | null;
+  floodReason?: string | null;
+  floodLastAt?: string | null;
+  spamRestrictedAt?: string | null;
+  spamRestrictionSource?: string | null;
+  peerFloodCount1h?: number | null;
+  photoFileId?: string | null;
+  isActive: boolean;
+  connectionState?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  username?: string | null;
+  phoneNumber?: string | null;
+  telegramId?: string | null;
 }
 
 export interface Campaign {
@@ -50,6 +73,8 @@ export interface Campaign {
   created_by_user_id?: string | null;
   owner_name?: string | null;
   bd_account_name?: string | null;
+  /** Enriched BD accounts for this campaign (order matches audience). */
+  bd_accounts?: CampaignBdAccount[];
   total_participants?: number;
   total_sent?: number;
   total_read?: number;
@@ -90,6 +115,8 @@ export interface CampaignSequenceStep {
   delay_minutes?: number;
   trigger_type?: CampaignStepTriggerType;
   conditions?: Record<string, unknown>;
+  /** Skipped at send time; kept in sequence editor. */
+  is_hidden?: boolean;
   created_at: string;
   updated_at: string;
   template_name?: string;
@@ -111,7 +138,7 @@ export interface SelectedContactInfo {
 export interface CampaignWithDetails extends Campaign {
   templates: CampaignTemplate[];
   sequences: CampaignSequenceStep[];
-  /** For draft/paused: contacts selected in audience (from target_audience.contactIds). */
+  /** For draft/paused: contacts added as campaign participants (from campaign_participants table). */
   selected_contacts?: SelectedContactInfo[];
 }
 
@@ -131,21 +158,22 @@ export interface CampaignParticipant {
   updated_at: string;
 }
 
-/** PHASE 2.5 — участник с полями для воронки (статус по этапу, даты, conversation_id). */
+/** Simplified participant phase for UI display. */
 export type CampaignParticipantPhase =
+  | 'waiting'
   | 'sent'
   | 'read'
   | 'replied'
-  | 'shared'
-  | 'failed'
-  | 'pending'
-  | 'scheduled'
-  | 'skipped';
+  | 'completed'
+  | 'skipped'
+  | 'failed';
 
 export interface CampaignParticipantRow {
   participant_id: string;
   contact_id: string;
   contact_name: string;
+  username: string | null;
+  telegram_id: string | null;
   conversation_id: string | null;
   bd_account_id: string | null;
   /** Display name of the BD account that sends to this participant. */
@@ -164,11 +192,14 @@ export interface CampaignParticipantRow {
   next_send_at?: string | null;
   /** Total number of steps in the campaign sequence. */
   sequence_total_steps?: number;
+  /** When the latest sent message was read by the contact. */
+  read_at?: string | null;
 }
 
 export interface CampaignStats {
   total: number;
   byStatus: Record<string, number>;
+  byPhase?: { waiting: number; sent: number; replied: number; failed: number };
   /** When there are failed participants, a sample error message (e.g. PEER_FLOOD). */
   error_summary?: { count: number; sample?: string };
   totalSends?: number;
@@ -244,6 +275,60 @@ export async function deleteCampaign(id: string): Promise<void> {
   await apiClient.delete(`/api/campaigns/${id}`);
 }
 
+export async function duplicateCampaign(id: string): Promise<Campaign> {
+  const { data } = await apiClient.post<Campaign>(`/api/campaigns/${id}/duplicate`);
+  return data;
+}
+
+/** Remove all participants and send records; set status to draft. Keeps target_audience, schedule, templates, sequences. */
+export async function resetCampaignProgress(id: string): Promise<Campaign> {
+  const { data } = await apiClient.post<Campaign>(`/api/campaigns/${id}/reset-progress`);
+  return data;
+}
+
+export async function pauseCampaignAccount(
+  campaignId: string,
+  accountId: string
+): Promise<{ ok: boolean; sendBlockedUntil?: string }> {
+  const { data } = await apiClient.post(`/api/campaigns/${campaignId}/accounts/${accountId}/pause`);
+  return data as { ok: boolean; sendBlockedUntil?: string };
+}
+
+export async function resumeCampaignAccount(campaignId: string, accountId: string): Promise<{ ok: boolean }> {
+  const { data } = await apiClient.post(`/api/campaigns/${campaignId}/accounts/${accountId}/resume`);
+  return data as { ok: boolean };
+}
+
+export async function removeCampaignAccount(
+  campaignId: string,
+  accountId: string
+): Promise<{ ok: boolean; reassignedParticipants: number; remainingBdAccountIds: string[] }> {
+  const { data } = await apiClient.delete(`/api/campaigns/${campaignId}/accounts/${accountId}`);
+  return data as { ok: boolean; reassignedParticipants: number; remainingBdAccountIds: string[] };
+}
+
+export interface AudienceConflictRow {
+  contact_id: string;
+  contact_name: string | null;
+  contact_username: string | null;
+  campaign_id: string;
+  campaign_name: string;
+  participant_status: string;
+  last_sent_at: string | null;
+  is_current_campaign: boolean;
+}
+
+export async function checkCampaignAudienceConflicts(
+  campaignId: string,
+  contactIds: string[]
+): Promise<{ conflicts: AudienceConflictRow[] }> {
+  const { data } = await apiClient.post<{ conflicts: AudienceConflictRow[] }>(
+    `/api/campaigns/${campaignId}/audience/conflicts`,
+    { contactIds }
+  );
+  return data;
+}
+
 export async function startCampaign(id: string): Promise<Campaign> {
   const { data } = await apiClient.post<Campaign>(`/api/campaigns/${id}/start`);
   return data;
@@ -317,7 +402,15 @@ export async function createCampaignSequenceStep(
 export async function updateCampaignSequenceStep(
   campaignId: string,
   stepId: string,
-  body: Partial<{ orderIndex: number; templateId: string; delayHours: number; delayMinutes: number; conditions: Record<string, unknown>; triggerType: CampaignStepTriggerType }>
+  body: Partial<{
+    orderIndex: number;
+    templateId: string;
+    delayHours: number;
+    delayMinutes: number;
+    conditions: Record<string, unknown>;
+    triggerType: CampaignStepTriggerType;
+    isHidden: boolean;
+  }>
 ): Promise<CampaignSequenceStep> {
   const { data } = await apiClient.patch<CampaignSequenceStep>(
     `/api/campaigns/${campaignId}/sequences/${stepId}`,
@@ -396,9 +489,7 @@ export async function fetchCampaignAnalytics(
   return data;
 }
 
-export interface CampaignAgent {
-  id: string;
-  displayName: string;
+export interface CampaignAgent extends CampaignBdAccount {
   sentToday: number;
 }
 
@@ -531,5 +622,82 @@ export async function uploadAudienceFromUsernameList(
     skipped: number;
     invalidSamples?: string[];
   }>(`/api/campaigns/${campaignId}/audience/from-usernames`, body);
+  return data;
+}
+
+export interface AddCampaignParticipantsResult {
+  inserted: number;
+  requested: number;
+  eligibleWithTelegram: number;
+  campaignStatus: CampaignStatus;
+}
+
+export async function addCampaignParticipants(campaignId: string, contactIds: string[]): Promise<AddCampaignParticipantsResult> {
+  const { data } = await apiClient.post<AddCampaignParticipantsResult>(`/api/campaigns/${campaignId}/participants/add`, {
+    contactIds,
+  });
+  return data;
+}
+
+export async function removeCampaignParticipant(campaignId: string, contactId: string): Promise<{ deleted: number }> {
+  const { data } = await apiClient.delete<{ deleted: number }>(`/api/campaigns/${campaignId}/participants/${contactId}`);
+  return data;
+}
+
+export async function removeAllCampaignParticipants(campaignId: string): Promise<{ deleted: number }> {
+  const { data } = await apiClient.delete<{ deleted: number }>(`/api/campaigns/${campaignId}/participants`);
+  return data;
+}
+
+export interface CampaignSendHistoryRow {
+  sendId: string;
+  sentAt: string;
+  sequenceStep: number;
+  status: string;
+  participantStatus?: string | null;
+  messageId: string | null;
+  /** Delivery / deferral details (e.g. event: min_gap, rate_limit_429). */
+  metadata?: Record<string, unknown> | null;
+  participantId: string;
+  contactId: string;
+  contactName: string;
+  messageContent: string | null;
+  messageStatus: string | null;
+  messageDirection?: string | null;
+}
+
+export interface CampaignSendsPage {
+  data: CampaignSendHistoryRow[];
+  /** total = all rows (sent, deferred, failed); sentTotal = delivered messages only */
+  pagination: { page: number; limit: number; total: number; sentTotal: number; totalPages: number };
+}
+
+export interface CampaignParticipantExportRow {
+  first_name: string | null;
+  last_name: string | null;
+  username: string | null;
+  phone: string | null;
+  email: string | null;
+  status: string;
+  display_status: string;
+  first_sent_at: string | null;
+  sender_account: string | null;
+  is_read: boolean;
+  replied_at: string | null;
+  first_reply_text: string | null;
+}
+
+export async function fetchCampaignParticipantsExport(campaignId: string): Promise<CampaignParticipantExportRow[]> {
+  const { data } = await apiClient.get<CampaignParticipantExportRow[]>(`/api/campaigns/${campaignId}/participants/export`);
+  return data;
+}
+
+export async function fetchCampaignSends(
+  campaignId: string,
+  params?: { page?: number; limit?: number }
+): Promise<CampaignSendsPage> {
+  const { data } = await apiClient.get<CampaignSendsPage>(`/api/campaigns/${campaignId}/sends`, {
+    params: params ?? {},
+  });
   return data;
 }

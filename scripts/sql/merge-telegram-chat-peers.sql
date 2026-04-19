@@ -1,0 +1,35 @@
+-- One-off maintenance (run manually after backup): repoint messages and remove duplicate
+-- bd_account_sync_chats rows when the same Telegram user was stored under multiple peer strings
+-- (username vs numeric id). Adjust UUIDs and channel id lists to your data.
+--
+-- Typical flow:
+-- 1) Pick canonical_channel_id = contacts.telegram_id::text (numeric user id).
+-- 2) UPDATE messages SET channel_id = canonical WHERE contact_id = ... AND channel_id IN (aliases).
+-- 3) UPDATE conversations SET channel_id = canonical WHERE ... (match org + bd + old channel_id).
+-- 4) DELETE FROM bd_account_sync_chats WHERE bd_account_id = ... AND telegram_chat_id IN (aliases);
+--
+-- Example (commented — uncomment and substitute real values):
+--
+-- BEGIN;
+-- UPDATE messages
+-- SET channel_id = '8214410394', updated_at = NOW()
+-- WHERE organization_id = '00000000-0000-0000-0000-000000000000'::uuid
+--   AND bd_account_id = '00000000-0000-0000-0000-000000000000'::uuid
+--   AND channel = 'telegram'
+--   AND contact_id = '00000000-0000-0000-0000-000000000000'::uuid
+--   AND channel_id IN ('8214410394', 'someusername');
+--
+-- UPDATE conversations
+-- SET channel_id = '8214410394', updated_at = NOW()
+-- WHERE organization_id = '00000000-0000-0000-0000-000000000000'::uuid
+--   AND bd_account_id = '00000000-0000-0000-0000-000000000000'::uuid
+--   AND channel = 'telegram'
+--   AND contact_id = '00000000-0000-0000-0000-000000000000'::uuid
+--   AND channel_id IN ('someusername');
+--
+-- DELETE FROM bd_account_sync_chats
+-- WHERE bd_account_id = '00000000-0000-0000-0000-000000000000'::uuid
+--   AND telegram_chat_id = 'someusername';
+-- COMMIT;
+
+SELECT 1 AS script_placeholder_run_specific_updates_above;

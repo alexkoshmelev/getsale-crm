@@ -6,7 +6,12 @@ import { X, Loader2 } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
-import { createSharedChat, fetchLeadContext, fetchLeadContextByLeadId } from '@/lib/api/messaging';
+import {
+  createSharedChat,
+  fetchLeadContext,
+  fetchLeadContextByLeadId,
+  pollLeadContextUntilSharedChatReady,
+} from '@/lib/api/messaging';
 import { reportError } from '@/lib/error-reporter';
 import type { LeadContext } from '@/app/dashboard/messaging/types';
 
@@ -65,9 +70,12 @@ export function SharedChatModal({ isOpen, onClose, leadContext, selectedAccountI
         participant_usernames: extraUsernames,
         bd_account_id: selectedAccountId ?? leadContext.bd_account_id ?? undefined,
       });
-      const updatedContext = result.conversation_id
-        ? await fetchLeadContext(result.conversation_id)
-        : (leadId ? await fetchLeadContextByLeadId(leadId) : null);
+      const cid = result.conversation_id;
+      const updatedContext = cid
+        ? await pollLeadContextUntilSharedChatReady(cid)
+        : leadId
+          ? await fetchLeadContextByLeadId(leadId)
+          : null;
       if (updatedContext) onSuccess(updatedContext as LeadContext);
     } catch (e: unknown) {
       const status = (e as { response?: { status?: number } })?.response?.status;

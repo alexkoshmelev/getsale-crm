@@ -2,176 +2,148 @@
 
 > **Event-driven, Microservices-based, AI-first CRM Platform**
 
-## 🏗️ Архитектура
+## Архитектура (active stack)
 
-### Микросервисы
+### Микросервисы (12 сервисов)
 
-1. **api-gateway** - Единая точка входа, маршрутизация, rate limiting
-2. **auth-service** - Identity & Access Management (JWT, MFA, RBAC, OAuth)
-3. **user-service** - Управление профилями, подписки, биллинг (Stripe), команды
-4. **bd-accounts-service** - Управление BD аккаунтами (Telegram GramJS), подключение, покупка
-5. **crm-service** - CRM Core (Contacts, Companies, Deals)
-6. **pipeline-service** - Управление воронкой продаж, стадиями, история переходов
-7. **messaging-service** - Unified messaging (Telegram GramJS, Email, LinkedIn, Twitter)
-8. **automation-service** - Автоматизация переходов, триггеры, правила
-9. **analytics-service** - Метрики конверсии, аналитика воронки, отчеты
-10. **team-service** - Управление командами, распределение клиентов, права доступа
-11. **websocket-service** - Real-time WebSocket соединения
-12. **ai-service** - AI Agents System (Draft generation, suggestions)
-13. **campaign-service** - Cold Outreach Engine (базовый CRUD, кампании, шаблоны, sequences, участники, start/pause)
+1. **gateway** — Единая точка входа, маршрутизация, rate limiting, WebSocket proxy (port 8000)
+2. **auth-service** — Identity & Access Management (JWT, 2FA, RBAC, OAuth) (port 4001)
+3. **core-api** — CRM Core (Contacts, Companies, Deals), Pipeline, Teams, Activity (port 4002)
+4. **messaging-api** — Unified messaging, чаты, сообщения (port 4003)
+5. **telegram-session-manager** — Telegram GramJS, подключение, синхронизация (port 4005)
+6. **campaign-orchestrator** — Cold Outreach Engine, кампании, шаблоны, sequences (port 4006)
+7. **campaign-worker** — Воркер отправки кампаний (масштабируется горизонтально)
+8. **automation-engine** — Автоматизация переходов, триггеры, правила (port 4007)
+9. **notification-hub** — Real-time WebSocket соединения, уведомления (port 4008)
+10. **user-service** — Профили, подписки, биллинг (Stripe, NowPayments) (port 4009)
+11. **ai-service** — AI Agents System (Draft generation, summarize, campaign rephrase) (port 4010)
+12. **analytics-worker** — Метрики конверсии, аналитика воронки (background worker)
+
+### Общие библиотеки (shared/)
+
+- **@getsale/types** — TypeScript типы
+- **@getsale/events** — Event definitions
+- **@getsale/logger** — Структурированное логирование
+- **@getsale/cache** — Redis кеш
+- **@getsale/queue** — RabbitMQ клиент
+- **@getsale/service-framework** — Общий фреймворк сервисов (Fastify)
+- **@getsale/telegram** — Telegram GramJS обёртка
 
 ### Инфраструктура
 
-- **RabbitMQ** - Message Queue для event-driven коммуникации
-- **Redis** - Кеш и session storage
-- **PostgreSQL** - Основная БД (по сервису или shared)
-- **MongoDB** - Документное хранилище (опционально для analytics)
-- **Elasticsearch** - Поиск и логирование
-- **Prometheus + Grafana** - Мониторинг
-- **Kong/nginx** - API Gateway (опционально)
+- **RabbitMQ** — Message Queue для event-driven коммуникации
+- **Redis** — Кеш и session storage
+- **PostgreSQL** — Основная БД
+- **Prometheus + Grafana** — Мониторинг
 
-## 🚀 Быстрый старт
+## Быстрый старт
+
+**Node.js:** версия **24+** (см. [`.nvmrc`](.nvmrc) и `engines` в [`package.json`](package.json)). Совпадает с CI и Docker-образами.
 
 ### Локальная разработка (Docker Compose)
 
 ```bash
-# Установить зависимости
 npm install
+docker compose -f docker-compose.yml up -d
 
-# Запустить все сервисы (включая фронтенд)
-make dev
-# или
-docker-compose up -d
-
-# Просмотр логов
-make dev-logs
-
-# Фронтенд будет доступен на http://localhost:5173
-# API Gateway на http://localhost:8000
+# Фронтенд в Compose: http://localhost:5173 (маппинг на Next внутри контейнера)
+# Локально без Docker: cd frontend && npm run dev → http://localhost:3000
+# API Gateway: http://localhost:8000
+# RabbitMQ UI: http://localhost:15673
 ```
 
-Подробнее: [QUICKSTART.md](QUICKSTART.md)
+Подробнее: [docs/operations/GETTING_STARTED.md](docs/operations/GETTING_STARTED.md)
 
 ### Тестирование
 
 ```bash
-# Проверить health checks всех сервисов
 bash scripts/test-services.sh
-
-# Протестировать базовые API endpoints
 bash scripts/test-api.sh
 ```
 
-### Продакшн (Kubernetes)
+### Продакшн
+
+Основной путь развёртывания описан в [docs/operations/DEPLOYMENT.md](docs/operations/DEPLOYMENT.md) (Docker на сервере, CI).
+
+Манифесты в `k8s/` при необходимости:
 
 ```bash
-# Применить все манифесты
 kubectl apply -f k8s/
-
-# Или использовать Makefile
-make k8s-apply
 ```
 
-Подробнее: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+## Документация
 
-## 📚 Документация
-
-### Основная документация
+- [Индекс документации](docs/INDEX.md) — полный каталог всей документации
 - [Contributing](CONTRIBUTING.md) — PR, ADR (`docs/adr/`)
-- [Индекс документации](docs/INDEX.md) — целевая / as-is / миграция, API, runbooks
-- [Архитектура системы](docs/ARCHITECTURE.md) - Общая архитектура
-- [Целевая архитектура SaaS CRM](docs/TARGET_SAAS_CRM_ARCHITECTURE.md) — целевая модель, границы сервисов, надёжность
-- [Текущее состояние (as-is)](docs/CURRENT_SYSTEM_AS_IS.md) — фактическая реализация, дубли, SRP
-- [План перехода к целевой архитектуре](docs/MIGRATION_TO_TARGET_ARCHITECTURE.md) — фазы A–E и критерии готовности
-- [BD CRM Архитектура](docs/BD_CRM_ARCHITECTURE.md) - Детальная архитектура согласно промпту
-- [Анализ текущего состояния](docs/CURRENT_STATE_ANALYSIS.md) - Детальный анализ всех доменов
-- [План к продакшену](docs/PRODUCTION_ROADMAP.md) - Пошаговый план до продакшена
-- [План действий](docs/ACTION_PLAN.md) - Конкретные задачи и шаги
+- [Архитектура системы](docs/architecture/ARCHITECTURE.md) — архитектура, принципы, границы сервисов
+- [Дорожная карта](docs/ROADMAP.md) — приоритеты и бэклог
+- [Развёртывание](docs/operations/DEPLOYMENT.md) — руководство по развёртыванию
+- [Frontend](frontend/README.md) — документация фронтенда
 
-### Тестирование и разработка
-- [План тестирования](docs/TESTING_PLAN.md) - Чеклист для тестирования
-- [Пошаговое тестирование](docs/STEP_BY_STEP_TESTING.md) - Детальное руководство по тестированию
-- [План разработки](docs/DEVELOPMENT_ROADMAP.md) - Roadmap разработки
-- [Следующие шаги](docs/NEXT_STEPS.md) - Приоритетные задачи
-
-### Развертывание
-- [Развертывание](docs/DEPLOYMENT.md) - Руководство по развертыванию
-- [Быстрый старт](QUICKSTART.md) - Быстрый старт для разработчиков
-- [Frontend README](frontend/README.md) - Документация фронтенда
-
-## 🧪 Тестирование
-
-```bash
-# Проверить health checks
-bash scripts/test-services.sh
-
-# Протестировать API
-bash scripts/test-api.sh
-
-# Протестировать события
-bash scripts/test-events.sh
-```
-
-## 📁 Структура проекта
+## Структура проекта
 
 ```
 getsale-crm/
-├── services/              # Микросервисы
-│   ├── api-gateway/      # API Gateway (маршрутизация, auth, rate limiting)
-│   ├── auth-service/     # Identity & Access Management
-│   ├── crm-service/      # CRM Core (Contacts, Companies, Deals)
-│   ├── messaging-service/# Unified Messaging (Telegram, Email)
-│   ├── websocket-service/# Real-time WebSocket
-│   └── ai-service/       # AI Agents & Drafts
-├── infrastructure/        # Docker, K8s конфигурации
-│   ├── prometheus/       # Prometheus конфигурация
-│   └── grafana/          # Grafana provisioning
-├── k8s/                  # Kubernetes манифесты
-│   ├── namespace.yaml
-│   ├── postgres.yaml
-│   ├── redis.yaml
-│   ├── rabbitmq.yaml
-│   └── *.yaml            # Манифесты сервисов
-├── shared/               # Общие библиотеки
-│   ├── types/           # TypeScript типы
-│   ├── events/          # Event definitions
-│   └── utils/           # Утилиты (RabbitMQ, Redis)
-├── docs/                # Документация
-│   ├── ARCHITECTURE.md  # Архитектура системы
-│   └── DEPLOYMENT.md    # Руководство по развертыванию
-├── docker-compose.yml    # Docker Compose для разработки
-├── Makefile             # Команды для разработки
-└── QUICKSTART.md        # Быстрый старт
+├── services/             # Микросервисы (12 сервисов, Fastify)
+│   ├── gateway/             # API Gateway + WS proxy
+│   ├── auth-service/        # Identity & Access Management
+│   ├── core-api/            # CRM + Pipeline + Teams + Activity
+│   ├── messaging-api/       # Чаты, сообщения
+│   ├── telegram-session-manager/ # Telegram (GramJS)
+│   ├── campaign-orchestrator/# Cold Outreach
+│   ├── campaign-worker/     # Воркер отправки
+│   ├── automation-engine/   # Автоматизация
+│   ├── notification-hub/    # Real-time WebSocket
+│   ├── user-service/        # Профили, подписки
+│   ├── ai-service/          # AI Agents & Drafts
+│   └── analytics-worker/    # Аналитика (background)
+├── shared/               # Общие библиотеки (@getsale/*)
+│   ├── types/               # TypeScript типы
+│   ├── events/              # Event definitions
+│   ├── logger/              # Структурированное логирование
+│   ├── cache/               # Redis кеш
+│   ├── queue/               # RabbitMQ клиент
+│   ├── service-framework/   # Fastify фреймворк сервисов
+│   └── telegram/            # Telegram GramJS обёртка
+├── frontend/                # Next.js App Router
+├── migrations/              # Knex миграции БД
+├── infrastructure/          # Prometheus конфигурация
+├── k8s/                     # Kubernetes манифесты
+├── docker/                  # Docker конфигурации
+├── load-tests/              # k6 нагрузочные тесты
+├── docs/                    # Документация
+│   ├── architecture/        # Архитектура и дизайн
+│   ├── api/                 # API контракты
+│   ├── domain/              # Бизнес-флоу
+│   ├── product/             # Продуктовая стратегия
+│   ├── operations/          # Развёртывание и инфра
+│   ├── runbooks/            # Операционные runbooks
+│   └── adr/                 # Architecture Decision Records
+├── docker-compose.yml    # Локальная разработка
+├── docker-compose.server.yml  # Продакшн-сервер (Docker)
+└── Makefile                 # Команды для разработки
 ```
 
-## 🔄 Event-Driven Architecture
+## Event-Driven Architecture
 
 Все сервисы общаются через события в RabbitMQ:
 
-- `user.created`
-- `message.received`
-- `deal.stage.changed`
+- `user.created`, `user.updated`
+- `message.received`, `message.sent`
+- `deal.stage.changed`, `lead.stage.changed`
 - `ai.draft.generated`
-- и т.д.
 
-## 🔐 Безопасность
+## Безопасность
 
 - JWT с refresh tokens
-- Multi-tenant isolation на уровне БД
-- RBAC на уровне API Gateway
+- Multi-tenant isolation на уровне БД (`organization_id`)
+- RBAC на уровне API Gateway и сервисов
 - Audit logs для всех действий
-- MFA (TOTP)
+- 2FA (TOTP)
 
-## 📊 Мониторинг
+## Мониторинг
 
 - Prometheus метрики из всех сервисов
 - Grafana дашборды
-- Centralized logging (ELK stack)
-- Distributed tracing (Jaeger)
-
-## 🧪 Тестирование
-
-- Unit tests в каждом сервисе
-- Integration tests с Testcontainers
-- E2E tests для критических путей
-
+- Межсервисные метрики и алерты (`inter_service_http_*`)
+- DLQ метрики и алерты

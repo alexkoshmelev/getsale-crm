@@ -1,37 +1,35 @@
-import cookieParser from 'cookie-parser';
-import { createServiceApp } from '@getsale/service-core';
-import { RedisClient } from '@getsale/utils';
-import { authRouter } from './routes/auth';
-import { twoFactorRouter } from './routes/two-factor';
-import { organizationRouter } from './routes/organization';
-import { workspacesRouter } from './routes/workspaces';
-import { invitesRouter } from './routes/invites';
+import { createService } from '@getsale/service-framework';
+import { RedisClient } from '@getsale/cache';
+import { registerAuthRoutes } from './routes/auth';
+import { registerWorkspaceRoutes } from './routes/workspaces';
+import { registerOrganizationRoutes } from './routes/organization';
+import { registerInviteRoutes } from './routes/invites';
+import { registerTwoFactorRoutes } from './routes/two-factor';
 
 async function main() {
-  const redis = new RedisClient(process.env.REDIS_URL || 'redis://localhost:6379');
-  const ctx = await createServiceApp({
+  const redis = new RedisClient({ url: process.env.REDIS_URL || 'redis://localhost:6380' });
+
+  const ctx = await createService({
     name: 'auth-service',
-    port: 3001,
+    port: 4001,
     cors: true,
     skipUserExtract: true,
     onShutdown: () => redis.disconnect(),
   });
 
-  ctx.app.use(cookieParser());
+  const { db, rabbitmq, log } = ctx;
+  const pool = db.write;
 
-  const { pool, rabbitmq, log } = ctx;
-  const deps = { pool, rabbitmq, log, redis };
+  registerAuthRoutes(ctx.app, { pool, rabbitmq, log, redis });
+  registerWorkspaceRoutes(ctx.app, { pool, rabbitmq, log });
+  registerOrganizationRoutes(ctx.app, { pool, log });
+  registerInviteRoutes(ctx.app, { pool, log });
+  registerTwoFactorRoutes(ctx.app, { pool, log, redis });
 
-  ctx.mount('/api/auth', authRouter(deps));
-  ctx.mount('/api/auth/2fa', twoFactorRouter(deps));
-  ctx.mount('/api/auth', organizationRouter(deps));
-  ctx.mount('/api/auth', workspacesRouter(deps));
-  ctx.mount('/api/invite', invitesRouter(deps));
-
-  ctx.start();
+  await ctx.start();
 }
 
 main().catch((err) => {
-  console.error('Fatal: Auth service failed to start:', err);
+  console.error('Fatal: auth-service failed to start:', err);
   process.exit(1);
 });

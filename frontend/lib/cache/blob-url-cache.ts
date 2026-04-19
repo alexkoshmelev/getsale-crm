@@ -4,10 +4,10 @@ import { reportWarning } from '../error-reporter';
  * LRU cache for blob URLs (avatars, media).
  * Keys: e.g. "avatar:account:${id}", "avatar:chat:${bdAccountId}:${chatId}", or full media URL.
  * On eviction calls URL.revokeObjectURL to free memory.
- * Max size 200 by default (see UX_MESSAGING_ARCHITECTURE.md).
+ * Max size 500 by default (see UX_MESSAGING_ARCHITECTURE.md).
  */
 
-const DEFAULT_MAX_SIZE = 200;
+const DEFAULT_MAX_SIZE = 500;
 
 class BlobUrlCache {
   private map = new Map<string, string>();
@@ -79,6 +79,37 @@ export function avatarAccountKey(accountId: string): string {
 export function avatarChatKey(bdAccountId: string, chatId: string): string {
   return `avatar:chat:${bdAccountId}:${chatId}`;
 }
+
+const AVATAR_CHAT_MISS_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Remembers recent 404/miss for chat avatars so list remounts do not re-hit GET …/avatar.
+ * Keys match {@link avatarChatKey}; entries expire after {@link AVATAR_CHAT_MISS_TTL_MS}.
+ */
+class AvatarChatMissCache {
+  private map = new Map<string, number>();
+
+  isMissing(key: string): boolean {
+    const exp = this.map.get(key);
+    if (exp == null) return false;
+    if (Date.now() > exp) {
+      this.map.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  markMissing(key: string): void {
+    this.map.set(key, Date.now() + AVATAR_CHAT_MISS_TTL_MS);
+  }
+
+  /** Call when a blob loads successfully so a prior miss does not block refetch forever in the same session. */
+  clear(key: string): void {
+    this.map.delete(key);
+  }
+}
+
+export const avatarChatMissCache = new AvatarChatMissCache();
 
 /** Cache key for media (use full URL or build from bdAccountId, channelId, messageId) */
 export function mediaKey(mediaUrl: string): string {

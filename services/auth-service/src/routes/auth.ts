@@ -1,33 +1,23 @@
-import { Router } from 'express';
+import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import '@fastify/cookie';
 import bcrypt from 'bcryptjs';
+import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
-import { RabbitMQClient } from '@getsale/utils';
-import { EventType, UserCreatedEvent, type Event } from '@getsale/events';
+import { EventType, type Event } from '@getsale/events';
 import { UserRole } from '@getsale/types';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
-import { randomUUID } from 'crypto';
+import { AppError, ErrorCodes } from '@getsale/service-framework';
+import { RedisClient } from '@getsale/cache';
+import { RabbitMQClient } from '@getsale/queue';
+import { SignupSchema, SigninSchema, AU_ORG_NAME_MAX_LEN, AU_ORG_SLUG_MAX_LEN } from '../validation';
 import {
-  AU_ORG_NAME_MAX_LEN,
-  AU_ORG_SLUG_MAX_LEN,
-  AuSignupSchema,
-  AuSigninSchema,
-  AuVerifyBodySchema,
-  auEmailSchema,
-} from '../validation';
-import {
-  signAccessToken, signRefreshToken, signWsToken, verifyAccessToken, verifyRefreshToken, hashRefreshToken,
-  signTempToken,
+  signAccessToken, signRefreshToken, signWsToken, verifyAccessToken,
+  verifyRefreshToken, hashRefreshToken, signTempToken, getRoleForWorkspace,
 } from '../helpers';
 import {
-  AUTH_COOKIE_ACCESS,
-  AUTH_COOKIE_REFRESH,
-  AUTH_COOKIE_OPTS,
-  ACCESS_MAX_AGE_SEC,
-  REFRESH_MAX_AGE_SEC,
-  REFRESH_EXPIRY_MS,
+  AUTH_COOKIE_ACCESS, AUTH_COOKIE_REFRESH, AUTH_COOKIE_OPTS,
+  ACCESS_MAX_AGE_SEC, REFRESH_MAX_AGE_SEC, REFRESH_EXPIRY_MS,
 } from '../cookies';
-import type { RedisClient } from '@getsale/utils';
 
 interface Deps {
   pool: Pool;
@@ -36,97 +26,41 @@ interface Deps {
   redis: RedisClient;
 }
 
-const REFRESH_RATE_LIMIT = 5;
-const REFRESH_RATE_WINDOW = 60_000; // 1 min in ms
-const REFRESH_RATE_WINDOW_SEC = Math.ceil(REFRESH_RATE_WINDOW / 1000);
-
-const SIGNIN_RATE_LIMIT = 10;
-const SIGNIN_RATE_WINDOW_MS = 15 * 60 * 1000; // 15 min
-const SIGNIN_RATE_WINDOW_SEC = Math.ceil(SIGNIN_RATE_WINDOW_MS / 1000);
-
-const SIGNIN_EMAIL_RATE_LIMIT = 5;
-const SIGNIN_EMAIL_RATE_WINDOW_MS = 15 * 60 * 1000; // 15 min
-
-const SIGNUP_RATE_LIMIT = 5;
-const SIGNUP_RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
-const SIGNUP_RATE_WINDOW_SEC = Math.ceil(SIGNUP_RATE_WINDOW_MS / 1000);
-
-function getClientIp(req: { ip?: string; headers?: Record<string, string | string[] | undefined> }): string {
-  const forwarded = req.headers?.['x-forwarded-for'];
-  if (typeof forwarded === 'string') return forwarded.split(',')[0]?.trim() || req.ip || 'unknown';
-  return req.ip || 'unknown';
+async function checkRateLimit(redis: RedisClient, keyPrefix: string, clientId: string, limit: number, windowMs: number, message: string): Promise<void> {
+  const allowed = await redis.checkRateLimit(`${keyPrefix}:${clientId}`, limit, windowMs);
+  if (!allowed) throw new AppError(429, message, ErrorCodes.RATE_LIMITED);
 }
 
-export async function checkRateLimit(
-  redis: RedisClient,
-  opts: { keyPrefix: string; clientId: string; limit: number; windowMs: number; message: string }
-): Promise<void> {
-  const slot = Math.floor(Date.now() / opts.windowMs);
-  const key = `${opts.keyPrefix}:${opts.clientId}:${slot}`;
-  const windowSec = Math.ceil(opts.windowMs / 1000);
-  const count = await redis.incr(key, windowSec);
-  if (count > opts.limit) {
-    throw new AppError(429, opts.message, ErrorCodes.RATE_LIMITED);
-  }
+function getClientIp(request: FastifyRequest): string {
+  const forwarded = request.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string') return forwarded.split(',')[0]?.trim() || request.ip || 'unknown';
+  return request.ip || 'unknown';
 }
 
-function validatePassword(password: string): string | null {
-  if (password.length < 8) return 'Password must be at least 8 characters';
-  if (password.length > 128) return 'Password must be at most 128 characters';
-  if (!/[a-z]/.test(password)) return 'Password must contain a lowercase letter';
-  if (!/[A-Z]/.test(password)) return 'Password must contain an uppercase letter';
-  if (!/[0-9]/.test(password)) return 'Password must contain a digit';
-  return null;
+const RL_SIGNUP_LIMIT = parseInt(process.env.AUTH_RL_SIGNUP || '5', 10);
+const RL_SIGNUP_WINDOW = parseInt(process.env.AUTH_RL_SIGNUP_WINDOW_MS || '3600000', 10);
+const RL_SIGNIN_IP_LIMIT = parseInt(process.env.AUTH_RL_SIGNIN_IP || '10', 10);
+const RL_SIGNIN_EMAIL_LIMIT = parseInt(process.env.AUTH_RL_SIGNIN_EMAIL || '5', 10);
+const RL_SIGNIN_WINDOW = parseInt(process.env.AUTH_RL_SIGNIN_WINDOW_MS || '900000', 10);
+const RL_REFRESH_LIMIT = parseInt(process.env.AUTH_RL_REFRESH || '5', 10);
+const RL_REFRESH_WINDOW = parseInt(process.env.AUTH_RL_REFRESH_WINDOW_MS || '60000', 10);
+
+function setCookiesAndSend(reply: FastifyReply, accessToken: string, refreshToken: string, user: { id: string; email: string; organizationId: string; role: string }) {
+  reply
+    .setCookie(AUTH_COOKIE_ACCESS, accessToken, { ...AUTH_COOKIE_OPTS, maxAge: ACCESS_MAX_AGE_SEC })
+    .setCookie(AUTH_COOKIE_REFRESH, refreshToken, { ...AUTH_COOKIE_OPTS, maxAge: REFRESH_MAX_AGE_SEC })
+    .send({ user: { id: user.id, email: user.email, organizationId: user.organizationId, role: user.role } });
 }
 
-function validateEmailAndPassword(
-  body: unknown,
-  opts: { requirePasswordLength?: boolean } = {}
-): { email: string; password: string } {
-  const raw = body as { email?: unknown; password?: unknown };
-  if (!raw.email || !raw.password) throw new AppError(400, 'Email and password required', ErrorCodes.BAD_REQUEST);
+export function registerAuthRoutes(app: FastifyInstance, deps: Deps): void {
+  const { pool, rabbitmq, log, redis } = deps;
 
-  const emailResult = auEmailSchema.safeParse(raw.email);
-  if (!emailResult.success) {
-    throw new AppError(400, 'Invalid email format', ErrorCodes.VALIDATION);
-  }
-  const email = emailResult.data;
+  app.post('/api/auth/signup', async (request, reply) => {
+    const body = SignupSchema.parse(request.body);
+    await checkRateLimit(redis, 'auth:signup', getClientIp(request), RL_SIGNUP_LIMIT, RL_SIGNUP_WINDOW, 'Too many sign-up attempts');
 
-  if (typeof raw.password !== 'string') throw new AppError(400, 'Invalid password', ErrorCodes.VALIDATION);
-  if (opts.requirePasswordLength !== false) {
-    const pwError = validatePassword(raw.password);
-    if (pwError) throw new AppError(400, pwError, ErrorCodes.VALIDATION);
-  }
-  return { email, password: raw.password };
-}
-
-export function setAuthCookiesAndRespond(
-  res: import('express').Response,
-  accessToken: string,
-  refreshToken: string,
-  user: { id: string; email: string; organizationId: string; role: string }
-): void {
-  res.cookie(AUTH_COOKIE_ACCESS, accessToken, { ...AUTH_COOKIE_OPTS, maxAge: ACCESS_MAX_AGE_SEC * 1000 });
-  res.cookie(AUTH_COOKIE_REFRESH, refreshToken, { ...AUTH_COOKIE_OPTS, maxAge: REFRESH_MAX_AGE_SEC * 1000 });
-  res.json({ user: { id: user.id, email: user.email, organizationId: user.organizationId, role: user.role } });
-}
-
-export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
-  const router = Router();
-
-  router.post('/signup', validate(AuSignupSchema), asyncHandler(async (req, res) => {
-    await checkRateLimit(redis, {
-      keyPrefix: 'auth_rate:signup',
-      clientId: getClientIp(req),
-      limit: SIGNUP_RATE_LIMIT,
-      windowMs: SIGNUP_RATE_WINDOW_MS,
-      message: 'Too many sign-up attempts. Try again later.',
-    });
-    const { email, password, organizationName, inviteToken } = req.body;
-    const orgName =
-      organizationName != null && String(organizationName).trim()
-        ? String(organizationName).trim().slice(0, AU_ORG_NAME_MAX_LEN)
-        : 'My Organization';
+    const { email, password, organizationName, inviteToken } = body;
+    const orgName = organizationName?.trim()?.slice(0, AU_ORG_NAME_MAX_LEN) || 'My Organization';
 
     let organization: { id: string; name: string };
     let user: { id: string; email: string; organization_id: string; role: string };
@@ -135,64 +69,51 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      // Invite path: user joins an existing organization; create user and add to organization_members.
       if (inviteToken) {
         const inv = await client.query('SELECT organization_id, role, expires_at FROM organization_invite_links WHERE token = $1', [inviteToken]);
-        if (inv.rows.length === 0) throw new AppError(404, 'Invite not found', ErrorCodes.NOT_FOUND);
-
-        const { organization_id: orgId, role: inviteRole, expires_at: expiresAt } = inv.rows[0];
-        if (new Date(expiresAt) <= new Date()) throw new AppError(410, 'Invite expired', ErrorCodes.BAD_REQUEST);
+        if (!inv.rows.length) throw new AppError(404, 'Invite not found', ErrorCodes.NOT_FOUND);
+        const { organization_id: orgId, role: inviteRole, expires_at } = inv.rows[0];
+        if (new Date(expires_at) <= new Date()) throw new AppError(410, 'Invite expired', ErrorCodes.BAD_REQUEST);
 
         const orgRow = await client.query('SELECT id, name FROM organizations WHERE id = $1', [orgId]);
-        if (orgRow.rows.length === 0) throw new AppError(404, 'Organization not found', ErrorCodes.NOT_FOUND);
+        if (!orgRow.rows.length) throw new AppError(404, 'Organization not found', ErrorCodes.NOT_FOUND);
         organization = orgRow.rows[0];
 
-        const passwordHash = await bcrypt.hash(password, 12);
-        const userResult = await client.query(
+        const hash = await bcrypt.hash(password, 12);
+        const result = await client.query(
           'INSERT INTO users (email, password_hash, organization_id, role) VALUES ($1, $2, $3, $4) RETURNING *',
-          [email, passwordHash, organization.id, inviteRole]
+          [email, hash, organization.id, inviteRole],
         );
-        user = userResult.rows[0];
+        user = result.rows[0];
         await client.query('INSERT INTO organization_members (user_id, organization_id, role) VALUES ($1, $2, $3)', [user.id, organization.id, inviteRole]);
         await client.query('DELETE FROM organization_invite_links WHERE token = $1', [inviteToken]);
       } else {
-        // New org path: create organization, user (owner), default team + members, and organization_members. Default pipeline is created later via pipeline-service.
         createdNewOrg = true;
-        const rawSlug = (email.split('@')[0] || 'org').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'workspace';
-        let slug = rawSlug;
-        for (let attempt = 0; attempt < 10; attempt++) {
+        let slug = (email.split('@')[0] || 'org').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'workspace';
+        for (let i = 0; i < 10; i++) {
           const existing = await client.query('SELECT id FROM organizations WHERE slug = $1', [slug]);
-          if (existing.rows.length === 0) break;
-          slug = `${rawSlug}-${Math.random().toString(36).slice(2, 6)}`;
+          if (!existing.rows.length) break;
+          slug = `${slug}-${Math.random().toString(36).slice(2, 6)}`;
         }
 
         const orgResult = await client.query(
           'INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING *',
-          [orgName, slug.slice(0, AU_ORG_SLUG_MAX_LEN)]
+          [orgName, slug.slice(0, AU_ORG_SLUG_MAX_LEN)],
         );
         organization = orgResult.rows[0];
 
-        const passwordHash = await bcrypt.hash(password, 12);
+        const hash = await bcrypt.hash(password, 12);
         const userResult = await client.query(
           'INSERT INTO users (email, password_hash, organization_id, role) VALUES ($1, $2, $3, $4) RETURNING *',
-          [email, passwordHash, organization.id, UserRole.OWNER]
+          [email, hash, organization.id, UserRole.OWNER],
         );
         user = userResult.rows[0];
-
-        const teamResult = await client.query(
-          'INSERT INTO teams (organization_id, name, created_by) VALUES ($1, $2, $3) RETURNING *',
-          [organization.id, organization.name, user.id]
-        );
-        await client.query('INSERT INTO team_members (team_id, user_id, role, invited_by) VALUES ($1, $2, $3, $4)',
-          [teamResult.rows[0].id, user.id, 'admin', user.id]);
-        await client.query('INSERT INTO organization_members (user_id, organization_id, role) VALUES ($1, $2, $3)',
-          [user.id, organization.id, user.role]);
+        await client.query('INSERT INTO organization_members (user_id, organization_id, role) VALUES ($1, $2, $3)', [user.id, organization.id, user.role]);
       }
       await client.query('COMMIT');
     } catch (err: unknown) {
       await client.query('ROLLBACK').catch(() => {});
-      const e = err as { code?: string };
-      if (e.code === '23505') {
+      if ((err as { code?: string }).code === '23505') {
         throw new AppError(409, 'Registration failed. If you already have an account, try signing in.', ErrorCodes.CONFLICT);
       }
       throw err;
@@ -201,280 +122,137 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
     }
 
     if (createdNewOrg) {
-      const org = organization as { id: string; name: string; slug?: string };
-      const orgEvent = {
-        id: randomUUID(),
-        type: EventType.ORGANIZATION_CREATED,
-        timestamp: new Date(),
-        organizationId: org.id,
-        userId: user.id,
-        correlationId: req.correlationId,
-        data: { organizationId: org.id, name: org.name, ...(org.slug != null ? { slug: org.slug } : {}) },
-      };
-      await rabbitmq.publishEvent(orgEvent as Event).catch((err) => {
-        log.warn({ message: 'Failed to publish ORGANIZATION_CREATED', organizationId: organization.id, error: err instanceof Error ? err.message : String(err) });
-      });
+      rabbitmq.publishEvent({
+        id: randomUUID(), type: EventType.ORGANIZATION_CREATED, timestamp: new Date(),
+        organizationId: organization.id, userId: user.id,
+        data: { organizationId: organization.id, name: organization.name },
+      } as Event).catch(() => {});
     }
 
-    const event: UserCreatedEvent = {
+    rabbitmq.publishEvent({
       id: randomUUID(), type: EventType.USER_CREATED, timestamp: new Date(),
-      organizationId: organization.id, userId: user.id, correlationId: req.correlationId,
+      organizationId: organization.id, userId: user.id,
       data: { userId: user.id, email: user.email, organizationId: organization.id },
-    };
-    await rabbitmq.publishEvent(event).catch((err) => {
-      log.warn({ message: 'Failed to publish USER_CREATED', error: err instanceof Error ? err.message : String(err) });
-    });
+    } as Event).catch(() => {});
 
     const accessToken = signAccessToken({ userId: user.id, organizationId: organization.id, role: user.role });
     const refreshToken = signRefreshToken(user.id);
-    const tokenHash = hashRefreshToken(refreshToken);
-    const familyId = randomUUID();
     await pool.query(
       'INSERT INTO refresh_tokens (user_id, token, family_id, expires_at) VALUES ($1, $2, $3, $4)',
-      [user.id, tokenHash, familyId, new Date(Date.now() + REFRESH_EXPIRY_MS)],
+      [user.id, hashRefreshToken(refreshToken), randomUUID(), new Date(Date.now() + REFRESH_EXPIRY_MS)],
     );
 
-    setAuthCookiesAndRespond(res, accessToken, refreshToken, {
-      id: user.id, email: user.email, organizationId: organization.id, role: user.role,
-    });
-  }));
+    setCookiesAndSend(reply, accessToken, refreshToken, { id: user.id, email: user.email, organizationId: organization.id, role: user.role });
+  });
 
-  router.post('/signin', validate(AuSigninSchema), asyncHandler(async (req, res) => {
-    await checkRateLimit(redis, {
-      keyPrefix: 'auth_rate:signin',
-      clientId: getClientIp(req),
-      limit: SIGNIN_RATE_LIMIT,
-      windowMs: SIGNIN_RATE_WINDOW_MS,
-      message: 'Too many sign-in attempts. Try again later.',
-    });
-    const { email, password } = req.body;
+  app.post('/api/auth/signin', async (request, reply) => {
+    const body = SigninSchema.parse(request.body);
+    const ip = getClientIp(request);
+    await checkRateLimit(redis, 'auth:signin', ip, RL_SIGNIN_IP_LIMIT, RL_SIGNIN_WINDOW, 'Too many sign-in attempts');
+    await checkRateLimit(redis, 'auth:signin:email', body.email, RL_SIGNIN_EMAIL_LIMIT, RL_SIGNIN_WINDOW, 'Too many attempts for this account');
 
-    await checkRateLimit(redis, {
-      keyPrefix: 'auth_rate:signin:email',
-      clientId: email.toLowerCase(),
-      limit: SIGNIN_EMAIL_RATE_LIMIT,
-      windowMs: SIGNIN_EMAIL_RATE_WINDOW_MS,
-      message: 'Too many sign-in attempts for this account. Try again later.',
-    });
-
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (result.rows.length === 0) throw new AppError(401, 'Invalid credentials', ErrorCodes.UNAUTHORIZED);
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [body.email]);
+    if (!result.rows.length) throw new AppError(401, 'Invalid credentials', ErrorCodes.UNAUTHORIZED);
 
     const user = result.rows[0];
-    const valid = await bcrypt.compare(password, user.password_hash);
+    const valid = await bcrypt.compare(body.password, user.password_hash);
     if (!valid) throw new AppError(401, 'Invalid credentials', ErrorCodes.UNAUTHORIZED);
 
     if (user.mfa_enabled) {
-      const tempToken = signTempToken(user.id);
-      res.json({ requiresTwoFactor: true, tempToken });
-      return;
+      return reply.send({ requiresTwoFactor: true, tempToken: signTempToken(user.id) });
     }
 
-    const accessToken = signAccessToken({ userId: user.id, organizationId: user.organization_id, role: user.role });
+    const role = await getRoleForWorkspace(pool, user.id, user.organization_id, user.role);
+    const accessToken = signAccessToken({ userId: user.id, organizationId: user.organization_id, role });
     const refreshToken = signRefreshToken(user.id);
-    const tokenHash = hashRefreshToken(refreshToken);
     const familyId = randomUUID();
 
-    try {
-      await pool.query(
-        'INSERT INTO refresh_tokens (user_id, token, family_id, expires_at) VALUES ($1, $2, $3, $4)',
-        [user.id, tokenHash, familyId, new Date(Date.now() + REFRESH_EXPIRY_MS)],
-      );
-    } catch (e: unknown) {
-      const err = e as { code?: string };
-      if (err.code === '23505') {
-        await pool.query(
-          'UPDATE refresh_tokens SET expires_at = $1, family_id = $2, used = false WHERE token = $3',
-          [new Date(Date.now() + REFRESH_EXPIRY_MS), familyId, tokenHash],
-        );
-      } else throw e;
-    }
+    await pool.query(
+      'INSERT INTO refresh_tokens (user_id, token, family_id, expires_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+      [user.id, hashRefreshToken(refreshToken), familyId, new Date(Date.now() + REFRESH_EXPIRY_MS)],
+    );
 
-    log.info({ message: 'User signed in', entity_type: 'user', entity_id: user.id });
+    setCookiesAndSend(reply, accessToken, refreshToken, { id: user.id, email: user.email, organizationId: user.organization_id, role });
+  });
 
-    setAuthCookiesAndRespond(res, accessToken, refreshToken, {
-      id: user.id, email: user.email, organizationId: user.organization_id, role: user.role,
-    });
-  }));
-
-  router.get('/me', asyncHandler(async (req, res) => {
-    const token = req.cookies?.[AUTH_COOKIE_ACCESS] || req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
+  app.get('/api/auth/me', async (request, reply) => {
+    const cookies = (request as unknown as Record<string, unknown>).cookies as Record<string, string> | undefined;
+    const token = cookies?.[AUTH_COOKIE_ACCESS] || (request.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim());
     if (!token) throw new AppError(401, 'Not authenticated', ErrorCodes.UNAUTHORIZED);
 
     const decoded = verifyAccessToken(token);
     const result = await pool.query('SELECT id, email FROM users WHERE id = $1', [decoded.userId]);
-    if (result.rows.length === 0) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
+    if (!result.rows.length) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
 
-    const user = result.rows[0];
-    // Return organizationId and role from JWT (current workspace), not from DB — so switch-workspace is reflected.
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.json({
-      id: user.id,
-      email: user.email,
+    reply.header('Cache-Control', 'no-store');
+    return {
+      id: result.rows[0].id,
+      email: result.rows[0].email,
       organization_id: decoded.organizationId,
       organizationId: decoded.organizationId,
       role: decoded.role ?? '',
-    });
-  }));
+    };
+  });
 
-  router.post('/logout', asyncHandler(async (req, res) => {
-    const refreshToken = req.cookies?.[AUTH_COOKIE_REFRESH];
+  app.post('/api/auth/logout', async (request, reply) => {
+    const cookies = (request as unknown as Record<string, unknown>).cookies as Record<string, string> | undefined;
+    const refreshToken = cookies?.[AUTH_COOKIE_REFRESH];
     if (refreshToken) {
       const tokenHash = hashRefreshToken(refreshToken);
-      const tokenRow = await pool.query(
-        'SELECT family_id FROM refresh_tokens WHERE token = $1 OR token = $2',
-        [tokenHash, refreshToken],
-      );
-      if (tokenRow.rows.length > 0) {
-        await pool.query('DELETE FROM refresh_tokens WHERE family_id = $1', [tokenRow.rows[0].family_id]);
-      }
+      const row = await pool.query('SELECT family_id FROM refresh_tokens WHERE token = $1 OR token = $2', [tokenHash, refreshToken]);
+      if (row.rows.length) await pool.query('DELETE FROM refresh_tokens WHERE family_id = $1', [row.rows[0].family_id]);
     }
-    res.cookie(AUTH_COOKIE_ACCESS, '', { ...AUTH_COOKIE_OPTS, maxAge: 0 });
-    res.cookie(AUTH_COOKIE_REFRESH, '', { ...AUTH_COOKIE_OPTS, maxAge: 0 });
-    res.status(204).send();
-  }));
+    reply
+      .setCookie(AUTH_COOKIE_ACCESS, '', { ...AUTH_COOKIE_OPTS, maxAge: 0 })
+      .setCookie(AUTH_COOKIE_REFRESH, '', { ...AUTH_COOKIE_OPTS, maxAge: 0 })
+      .code(204)
+      .send();
+  });
 
-  router.post('/verify', validate(AuVerifyBodySchema), asyncHandler(async (req, res) => {
-    const token =
-      req.body?.token ||
-      req.cookies?.[AUTH_COOKIE_ACCESS] ||
-      req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
-    if (!token) throw new AppError(400, 'Token required', ErrorCodes.BAD_REQUEST);
+  app.post('/api/auth/refresh', async (request, reply) => {
+    const ip = getClientIp(request);
+    await checkRateLimit(redis, 'auth:refresh', ip, RL_REFRESH_LIMIT, RL_REFRESH_WINDOW, 'Too many refresh attempts');
 
-    const decoded = verifyAccessToken(token);
-    const result = await pool.query('SELECT id, email, organization_id, role FROM users WHERE id = $1', [decoded.userId]);
-    if (result.rows.length === 0) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
-
-    const user = result.rows[0];
-    const organizationId = decoded.organizationId ?? user.organization_id;
-    const role = decoded.role ?? user.role;
-
-    res.json({ id: user.id, email: user.email, organization_id: organizationId, organizationId, role });
-  }));
-
-  /** Short-lived token for WebSocket handshake (e.g. 5 min). Call with credentials; returns { token } for socket.io auth. */
-  router.get('/ws-token', asyncHandler(async (req, res) => {
-    const accessToken = req.cookies?.[AUTH_COOKIE_ACCESS] || req.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
-    let payload: { userId: string; organizationId: string; role: string } | null = null;
-
-    if (accessToken) {
-      try {
-        const decoded = verifyAccessToken(accessToken);
-        const row = await pool.query('SELECT organization_id, role FROM users WHERE id = $1', [decoded.userId]);
-        if (row.rows.length > 0) {
-          const u = row.rows[0];
-          payload = {
-            userId: decoded.userId,
-            organizationId: decoded.organizationId ?? u.organization_id,
-            role: decoded.role ?? u.role ?? '',
-          };
-        }
-      } catch {
-        // access expired or invalid, try refresh
-      }
-    }
-
-    if (!payload) {
-      const refreshToken = req.cookies?.[AUTH_COOKIE_REFRESH];
-      if (!refreshToken) throw new AppError(401, 'Not authenticated', ErrorCodes.UNAUTHORIZED);
-      await checkRateLimit(redis, {
-        keyPrefix: 'auth_rate:ws_token',
-        clientId: getClientIp(req),
-        limit: REFRESH_RATE_LIMIT,
-        windowMs: REFRESH_RATE_WINDOW,
-        message: 'Too many ws-token attempts',
-      });
-      let decoded: { userId: string };
-      try {
-        decoded = verifyRefreshToken(refreshToken);
-      } catch {
-        throw new AppError(401, 'Invalid or expired refresh token', ErrorCodes.UNAUTHORIZED);
-      }
-      const tokenHash = hashRefreshToken(refreshToken);
-      const tokenCheck = await pool.query(
-        'SELECT * FROM refresh_tokens WHERE (token = $1 OR token = $2) AND used = false',
-        [tokenHash, refreshToken],
-      );
-      if (tokenCheck.rows.length === 0) throw new AppError(401, 'Invalid refresh token', ErrorCodes.UNAUTHORIZED);
-      const userResult = await pool.query('SELECT id, organization_id, role FROM users WHERE id = $1', [decoded.userId]);
-      if (userResult.rows.length === 0) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
-      const u = userResult.rows[0];
-      payload = { userId: u.id, organizationId: u.organization_id, role: u.role ?? '' };
-    }
-
-    const token = signWsToken(payload);
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.json({ token });
-  }));
-
-  router.post('/refresh', asyncHandler(async (req, res) => {
-    const clientId = getClientIp(req);
-    await checkRateLimit(redis, {
-      keyPrefix: 'auth_rate:refresh',
-      clientId,
-      limit: REFRESH_RATE_LIMIT,
-      windowMs: REFRESH_RATE_WINDOW,
-      message: 'Too many refresh attempts',
-    });
-
-    const refreshToken = req.cookies?.[AUTH_COOKIE_REFRESH];
+    const cookies = (request as unknown as Record<string, unknown>).cookies as Record<string, string> | undefined;
+    const refreshToken = cookies?.[AUTH_COOKIE_REFRESH];
     if (!refreshToken) throw new AppError(400, 'Refresh token required', ErrorCodes.BAD_REQUEST);
 
     let decoded: { userId: string };
-    try {
-      decoded = verifyRefreshToken(refreshToken);
-    } catch {
-      throw new AppError(401, 'Invalid or expired refresh token', ErrorCodes.UNAUTHORIZED);
-    }
+    try { decoded = verifyRefreshToken(refreshToken); } catch { throw new AppError(401, 'Invalid refresh token', ErrorCodes.UNAUTHORIZED); }
 
     const tokenHash = hashRefreshToken(refreshToken);
     let tokenRow = await pool.query(
       'SELECT id, user_id, family_id, used, expires_at FROM refresh_tokens WHERE token = $1',
       [tokenHash],
     );
-    // Backward-compat: check unhashed token for rows created before hashing was introduced
-    if (tokenRow.rows.length === 0) {
-      tokenRow = await pool.query(
-        'SELECT id, user_id, family_id, used, expires_at FROM refresh_tokens WHERE token = $1',
-        [refreshToken],
-      );
+    if (!tokenRow.rows.length) {
+      tokenRow = await pool.query('SELECT id, user_id, family_id, used, expires_at FROM refresh_tokens WHERE token = $1', [refreshToken]);
     }
-    if (tokenRow.rows.length === 0) throw new AppError(401, 'Invalid refresh token', ErrorCodes.UNAUTHORIZED);
+    if (!tokenRow.rows.length) throw new AppError(401, 'Invalid refresh token', ErrorCodes.UNAUTHORIZED);
 
-    const storedToken = tokenRow.rows[0];
-
-    // Reuse detection: a used token being presented again indicates possible token theft
-    if (storedToken.used) {
-      log.warn({
-        message: 'Refresh token reuse detected — possible token theft',
-        entity_type: 'user',
-        entity_id: decoded.userId,
-        family_id: storedToken.family_id,
-      });
-      await pool.query('DELETE FROM refresh_tokens WHERE family_id = $1', [storedToken.family_id]);
+    const stored = tokenRow.rows[0];
+    if (stored.used) {
+      log.warn({ message: 'Refresh token reuse detected', entity_type: 'user', entity_id: decoded.userId });
+      await pool.query('DELETE FROM refresh_tokens WHERE family_id = $1', [stored.family_id]);
       throw new AppError(401, 'Invalid refresh token', ErrorCodes.UNAUTHORIZED);
     }
-
-    if (new Date(storedToken.expires_at) <= new Date()) {
-      throw new AppError(401, 'Refresh token expired', ErrorCodes.UNAUTHORIZED);
-    }
+    if (new Date(stored.expires_at) <= new Date()) throw new AppError(401, 'Refresh token expired', ErrorCodes.UNAUTHORIZED);
 
     const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [decoded.userId]);
-    if (userResult.rows.length === 0) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
+    if (!userResult.rows.length) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
 
     const user = userResult.rows[0];
-    const newRefreshToken = signRefreshToken(user.id);
-    const newTokenHash = hashRefreshToken(newRefreshToken);
-    const accessToken = signAccessToken({ userId: user.id, organizationId: user.organization_id, role: user.role });
+    const role = await getRoleForWorkspace(pool, user.id, user.organization_id, user.role);
+    const accessToken = signAccessToken({ userId: user.id, organizationId: user.organization_id, role });
+    const newRefresh = signRefreshToken(user.id);
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('UPDATE refresh_tokens SET used = true WHERE id = $1', [storedToken.id]);
+      await client.query('UPDATE refresh_tokens SET used = true WHERE id = $1', [stored.id]);
       await client.query(
         'INSERT INTO refresh_tokens (user_id, token, family_id, expires_at) VALUES ($1, $2, $3, $4)',
-        [user.id, newTokenHash, storedToken.family_id, new Date(Date.now() + REFRESH_EXPIRY_MS)],
+        [user.id, hashRefreshToken(newRefresh), stored.family_id, new Date(Date.now() + REFRESH_EXPIRY_MS)],
       );
       await client.query('COMMIT');
     } catch (err) {
@@ -484,12 +262,57 @@ export function authRouter({ pool, rabbitmq, log, redis }: Deps): Router {
       client.release();
     }
 
-    res.cookie(AUTH_COOKIE_ACCESS, accessToken, { ...AUTH_COOKIE_OPTS, maxAge: ACCESS_MAX_AGE_SEC * 1000 });
-    res.cookie(AUTH_COOKIE_REFRESH, newRefreshToken, { ...AUTH_COOKIE_OPTS, maxAge: REFRESH_MAX_AGE_SEC * 1000 });
-    res.json({
-      user: { id: user.id, email: user.email, organizationId: user.organization_id, role: user.role },
-    });
-  }));
+    reply
+      .setCookie(AUTH_COOKIE_ACCESS, accessToken, { ...AUTH_COOKIE_OPTS, maxAge: ACCESS_MAX_AGE_SEC })
+      .setCookie(AUTH_COOKIE_REFRESH, newRefresh, { ...AUTH_COOKIE_OPTS, maxAge: REFRESH_MAX_AGE_SEC })
+      .send({ user: { id: user.id, email: user.email, organizationId: user.organization_id, role } });
+  });
 
-  return router;
+  app.post('/api/auth/verify', async (request, reply) => {
+    const body = request.body as { token?: string };
+    const cookies = (request as unknown as Record<string, unknown>).cookies as Record<string, string> | undefined;
+    const token = body?.token || cookies?.[AUTH_COOKIE_ACCESS] || request.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
+    if (!token) throw new AppError(400, 'Token required', ErrorCodes.BAD_REQUEST);
+
+    const decoded = verifyAccessToken(token);
+    const result = await pool.query('SELECT id, email, organization_id, role FROM users WHERE id = $1', [decoded.userId]);
+    if (!result.rows.length) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
+
+    const user = result.rows[0];
+    return { id: user.id, email: user.email, organization_id: decoded.organizationId ?? user.organization_id, organizationId: decoded.organizationId ?? user.organization_id, role: decoded.role ?? user.role };
+  });
+
+  app.get('/api/auth/ws-token', async (request, reply) => {
+    const cookies = (request as unknown as Record<string, unknown>).cookies as Record<string, string> | undefined;
+    const accessToken = cookies?.[AUTH_COOKIE_ACCESS] || request.headers.authorization?.replace(/^Bearer\s+/i, '')?.trim();
+    let payload: { userId: string; organizationId: string; role: string } | null = null;
+
+    if (accessToken) {
+      try {
+        const decoded = verifyAccessToken(accessToken);
+        const row = await pool.query('SELECT organization_id, role FROM users WHERE id = $1', [decoded.userId]);
+        if (row.rows.length) {
+          payload = { userId: decoded.userId, organizationId: decoded.organizationId ?? row.rows[0].organization_id, role: decoded.role ?? row.rows[0].role };
+        }
+      } catch { /* fall through to refresh */ }
+    }
+
+    if (!payload) {
+      const refreshToken = cookies?.[AUTH_COOKIE_REFRESH];
+      if (!refreshToken) throw new AppError(401, 'Not authenticated', ErrorCodes.UNAUTHORIZED);
+      let decoded: { userId: string };
+      try { decoded = verifyRefreshToken(refreshToken); } catch { throw new AppError(401, 'Invalid refresh token', ErrorCodes.UNAUTHORIZED); }
+      const tokenHash = hashRefreshToken(refreshToken);
+      const tokenCheck = await pool.query('SELECT * FROM refresh_tokens WHERE (token = $1 OR token = $2) AND used = false', [tokenHash, refreshToken]);
+      if (!tokenCheck.rows.length) throw new AppError(401, 'Invalid refresh token', ErrorCodes.UNAUTHORIZED);
+      const userResult = await pool.query('SELECT id, organization_id, role FROM users WHERE id = $1', [decoded.userId]);
+      if (!userResult.rows.length) throw new AppError(401, 'User not found', ErrorCodes.UNAUTHORIZED);
+      const u = userResult.rows[0];
+      const role = await getRoleForWorkspace(pool, u.id, u.organization_id, u.role ?? '');
+      payload = { userId: u.id, organizationId: u.organization_id, role };
+    }
+
+    reply.header('Cache-Control', 'no-store');
+    return { token: signWsToken(payload) };
+  });
 }

@@ -16,7 +16,7 @@ export type MockPool = Pool & {
 };
 
 export function createMockPool<T extends QueryResultRow = QueryResultRow>(
-  defaultResult: MockQueryResult<T> = { rows: [], rowCount: 0 }
+  defaultResult: MockQueryResult<T> = { rows: [], rowCount: 0 },
 ): MockPool {
   const queries: Array<{ text: string; values?: unknown[] }> = [];
   let currentResult: MockQueryResult<QueryResultRow> = defaultResult;

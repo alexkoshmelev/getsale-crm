@@ -1,45 +1,55 @@
-import express, { Express, Router } from 'express';
-import cookieParser from 'cookie-parser';
+import Fastify, { FastifyInstance } from 'fastify';
+import cookie from '@fastify/cookie';
 import type { Logger } from '@getsale/logger';
-import {
-  correlationId,
-  extractUser,
-  requestLogger,
-  errorHandler,
-} from '@getsale/service-core';
-import { createLogger } from '@getsale/logger';
+import { createErrorHandler, extractUserHook } from '@getsale/service-framework';
+
+const silentTestLogger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+} as unknown as Logger;
 
 export interface TestAppOptions {
-  /** Mock logger. If not provided, creates a silent logger. */
-  log?: Logger;
-  /** Mount routes under this prefix. */
-  prefix?: string;
-  /** Parse Cookie header into req.cookies (e.g. for auth tests). */
   cookieParser?: boolean;
+  skipUserExtract?: boolean;
 }
 
+export type InjectFn = FastifyInstance['inject'];
+
 /**
- * Creates a minimal Express app with the same middleware as createServiceApp
- * but without actual DB/RabbitMQ connections.
- * Use with mock pool and mock rabbitmq for integration tests.
+ * Creates a lightweight Fastify app for testing with the same hooks
+ * as createService (user extraction, cookie parsing) but no real
+ * DB/RabbitMQ/metrics connections.
+ *
+ * Usage:
+ *   const { app, inject } = await createTestApp(async (app) => {
+ *     registerMyRoutes(app, deps);
+ *   });
+ *   const res = await inject({ method: 'GET', url: '/api/foo' });
  */
-export function createTestApp(
-  router: Router,
-  options: TestAppOptions = {}
-): Express {
-  const app = express();
-  const log = options.log ?? createLogger('test');
+export async function createTestApp(
+  setup: (app: FastifyInstance) => void | Promise<void>,
+  options: TestAppOptions = {},
+): Promise<{ app: FastifyInstance; inject: InjectFn }> {
+  const app = Fastify({ logger: false });
+  app.setErrorHandler(createErrorHandler(silentTestLogger));
 
-  app.use(express.json({ limit: '5mb' }));
-  if (options.cookieParser) app.use(cookieParser());
-  app.use(correlationId());
-  app.use(extractUser());
-  app.use(requestLogger(log));
+  if (options.cookieParser !== false) {
+    await app.register(cookie);
+  }
 
-  const prefix = options.prefix ?? '';
-  app.use(prefix, router);
+  app.decorateRequest('correlationId', '');
+  app.decorateRequest('user', null);
 
-  app.use(errorHandler(log));
+  if (!options.skipUserExtract) {
+    app.addHook('onRequest', (request, _reply, done) => {
+      extractUserHook(request);
+      done();
+    });
+  }
 
-  return app;
+  await setup(app);
+  await app.ready();
+
+  return { app, inject: app.inject.bind(app) };
 }

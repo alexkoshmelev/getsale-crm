@@ -100,7 +100,7 @@ export async function seed(knex: Knex): Promise<void> {
     { name: 'Closed Lost', order: 6, color: '#6B7280' },
   ];
 
-  // --- Org1: pipeline, stages, team, team_members, company, contact, deal ---
+  // --- Org1: pipeline, stages, company, contact, deal ---
   let pipeline1 = await knex('pipelines').where({ organization_id: org1.id, name: 'Default Pipeline' }).first();
   if (!pipeline1) {
     [pipeline1] = await knex('pipelines')
@@ -125,26 +125,6 @@ export async function seed(knex: Knex): Promise<void> {
       });
     }
   }
-
-  let team1 = await knex('teams').where({ organization_id: org1.id, name: 'Default Team' }).first();
-  if (!team1) {
-    [team1] = await knex('teams')
-      .insert({
-        organization_id: org1.id,
-        name: 'Default Team',
-        created_by: adminUser.id,
-      })
-      .returning('*');
-    console.log(`✅ Org1 team: ${team1.name}`);
-  }
-  for (const m of [
-    { team_id: team1.id, user_id: adminUser.id, role: 'owner', invited_by: adminUser.id },
-    { team_id: team1.id, user_id: testUser.id, role: 'supervisor', invited_by: adminUser.id },
-  ]) {
-    await knex('team_members').insert(m).onConflict(['team_id', 'user_id']).merge(['role']);
-  }
-  await knex('team_members').where({ team_id: team1.id, user_id: adminUser.id }).update({ role: 'owner' });
-  await knex('team_members').where({ team_id: team1.id, user_id: testUser.id }).update({ role: 'supervisor' });
 
   let company1 = await knex('companies').where({ organization_id: org1.id, name: 'Acme Corp' }).first();
   if (!company1) {
@@ -202,7 +182,7 @@ export async function seed(knex: Knex): Promise<void> {
     console.log('✅ Org1 deal (created by test user, visible to admin)');
   }
 
-  // --- Org2: pipeline, stages, team, team_members, company, contact, deal ---
+  // --- Org2: pipeline, stages, company, contact, deal ---
   let pipeline2 = await knex('pipelines').where({ organization_id: org2.id, name: 'Default Pipeline' }).first();
   if (!pipeline2) {
     [pipeline2] = await knex('pipelines')
@@ -227,26 +207,6 @@ export async function seed(knex: Knex): Promise<void> {
       });
     }
   }
-
-  let team2 = await knex('teams').where({ organization_id: org2.id, name: 'Default Team' }).first();
-  if (!team2) {
-    [team2] = await knex('teams')
-      .insert({
-        organization_id: org2.id,
-        name: 'Default Team',
-        created_by: testUser.id,
-      })
-      .returning('*');
-    console.log(`✅ Org2 team: ${team2.name}`);
-  }
-  for (const m of [
-    { team_id: team2.id, user_id: testUser.id, role: 'owner', invited_by: testUser.id },
-    { team_id: team2.id, user_id: adminUser.id, role: 'supervisor', invited_by: testUser.id },
-  ]) {
-    await knex('team_members').insert(m).onConflict(['team_id', 'user_id']).merge(['role']);
-  }
-  await knex('team_members').where({ team_id: team2.id, user_id: testUser.id }).update({ role: 'owner' });
-  await knex('team_members').where({ team_id: team2.id, user_id: adminUser.id }).update({ role: 'supervisor' });
 
   let company2 = await knex('companies').where({ organization_id: org2.id, name: 'Beta Inc' }).first();
   if (!company2) {

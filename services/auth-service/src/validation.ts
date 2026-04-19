@@ -1,35 +1,36 @@
 import { z } from 'zod';
 
-/** Shared limits for org name/slug (signup + PATCH organization). */
 export const AU_ORG_NAME_MAX_LEN = 200;
 export const AU_ORG_SLUG_MAX_LEN = 100;
 
-export const AuSignupSchema = z.object({
-  email: z.string().email('Invalid email format').max(254).trim().toLowerCase(),
-  password: z
-    .string()
-    .min(8, 'Password must be at least 8 characters')
-    .max(128, 'Password must be at most 128 characters')
-    .refine((p) => /[a-z]/.test(p), 'Password must contain a lowercase letter')
-    .refine((p) => /[A-Z]/.test(p), 'Password must contain an uppercase letter')
-    .refine((p) => /[0-9]/.test(p), 'Password must contain a digit'),
+export const SignupSchema = z.object({
+  email: z.string().email().max(254).trim().toLowerCase(),
+  password: z.string().min(8).max(128)
+    .refine((p) => /[a-z]/.test(p), 'Must contain a lowercase letter')
+    .refine((p) => /[A-Z]/.test(p), 'Must contain an uppercase letter')
+    .refine((p) => /[0-9]/.test(p), 'Must contain a digit'),
   organizationName: z.string().max(AU_ORG_NAME_MAX_LEN).trim().optional(),
   inviteToken: z.string().min(1).optional(),
 });
 
-export const AuSigninSchema = z.object({
-  email: z.string().email('Invalid email format').max(254).trim().toLowerCase(),
-  password: z.string().min(1, 'Password is required'),
+export const SigninSchema = z.object({
+  email: z.string().email().max(254).trim().toLowerCase(),
+  password: z.string().min(1),
 });
 
-export const AuVerifyBodySchema = z.object({
+export const VerifyBodySchema = z.object({
   token: z.string().min(1).optional(),
 });
 
-/** Used by `validateEmailAndPassword` in routes/auth.ts */
-export const auEmailSchema = z.string().email('Invalid email format').max(254).trim().toLowerCase();
+export const SwitchWorkspaceSchema = z.object({
+  organizationId: z.string().uuid(),
+});
 
-export const AuOrgUpdateSchema = z
+export const CreateWorkspaceSchema = z.object({
+  name: z.string().min(1, 'Name is required').max(AU_ORG_NAME_MAX_LEN).trim(),
+});
+
+export const OrgUpdateSchema = z
   .object({
     name: z.string().max(AU_ORG_NAME_MAX_LEN).trim().optional(),
     slug: z.string().max(AU_ORG_SLUG_MAX_LEN).trim().optional(),
@@ -38,28 +39,28 @@ export const AuOrgUpdateSchema = z
     message: 'At least one of name or slug is required and non-empty',
   });
 
-export const AuTransferOwnershipSchema = z.object({
+export const TransferOwnershipSchema = z.object({
   newOwnerUserId: z.string().uuid(),
 });
 
-export const AuSwitchWorkspaceSchema = z.object({
+export const WorkspaceIdParamSchema = z.object({
   organizationId: z.string().uuid(),
 });
 
-export const AuInviteTokenParamSchema = z.object({
-  token: z.string().min(1, 'Token is required').max(512).regex(/^[a-zA-Z0-9_-]+$/, 'Invalid token format'),
+export const InviteTokenParamSchema = z.object({
+  token: z.string().min(1).max(512).regex(/^[a-zA-Z0-9_-]+$/),
 });
 
-export const AuTwoFactorVerifySetupSchema = z.object({
+export const TwoFactorVerifySetupSchema = z.object({
   token: z.string().min(6).max(10),
   secret: z.string().min(1),
 });
 
-export const AuTwoFactorDisableSchema = z.object({
+export const TwoFactorDisableSchema = z.object({
   token: z.string().min(6).max(10),
 });
 
-export const AuTwoFactorValidateSchema = z
+export const TwoFactorValidateSchema = z
   .object({
     tempToken: z.string().min(1),
     token: z.string().min(6).max(10).optional(),

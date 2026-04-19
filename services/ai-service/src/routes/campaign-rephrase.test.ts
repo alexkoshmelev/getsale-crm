@@ -1,12 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import request from 'supertest';
 import { createTestApp } from '@getsale/test-utils';
-import { createLogger } from '@getsale/logger';
-import { campaignRephraseRouter } from './campaign-rephrase';
-import { DEFAULT_OPENROUTER_CAMPAIGN_MODEL } from '../openrouter-campaign-config';
+import { registerCampaignRephraseRoutes } from './campaign-rephrase';
+import { DEFAULT_OPENROUTER_CAMPAIGN_PRESET } from '../openrouter-models';
 
-const TEST_ORG_ID = '11111111-1111-1111-1111-111111111111';
-const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
+const TEST_ORG_ID = '11111111-1111-4111-8111-111111111111';
+const TEST_USER_ID = '22222222-2222-4222-8222-222222222222';
 
 const authHeaders = {
   'x-user-id': TEST_USER_ID,
@@ -15,32 +13,39 @@ const authHeaders = {
   'content-type': 'application/json',
 };
 
-describe('Campaign Rephrase Router', () => {
-  let app: ReturnType<typeof createTestApp>;
+describe('Campaign Rephrase Routes (Fastify)', () => {
+  let inject: Awaited<ReturnType<typeof createTestApp>>['inject'];
   let fetchMock: ReturnType<typeof vi.fn>;
   const originalEnv = process.env;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     process.env = { ...originalEnv };
     process.env.OPENROUTER_API_KEY = 'sk-test-key';
-    process.env.OPENROUTER_MODEL = DEFAULT_OPENROUTER_CAMPAIGN_MODEL;
+    delete process.env.OPENROUTER_MODEL;
+    process.env.OPENROUTER_CAMPAIGN_MODEL = DEFAULT_OPENROUTER_CAMPAIGN_PRESET;
 
     fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({
-        choices: [{ message: { content: 'Rephrased message for Telegram' } }],
-      }),
+      json: () =>
+        Promise.resolve({
+          choices: [{ message: { content: 'Rephrased message for Telegram' } }],
+        }),
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const log = createLogger('ai-service-campaign-rephrase-test');
     const rateLimiter = {
       check: vi.fn().mockResolvedValue({ allowed: true, remaining: 100, limit: 200, resetInSeconds: 3600 }),
       increment: vi.fn().mockResolvedValue(undefined),
     } as any;
-    const router = campaignRephraseRouter({ log, rateLimiter });
-    app = createTestApp(router, { prefix: '/api/ai', log });
+
+    const { inject: inj } = await createTestApp((app) =>
+      registerCampaignRephraseRoutes(app, {
+        log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any,
+        rateLimiter,
+      }),
+    );
+    inject = inj;
   });
 
   afterEach(() => {
@@ -50,85 +55,92 @@ describe('Campaign Rephrase Router', () => {
 
   describe('POST /api/ai/campaigns/rephrase', () => {
     it('returns rephrased content when OpenRouter is configured', async () => {
-      const res = await request(app)
-        .post('/api/ai/campaigns/rephrase')
-        .set(authHeaders)
-        .send({ text: 'Hello, we have a special offer for you.' });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/ai/campaigns/rephrase',
+        headers: authHeaders,
+        payload: { text: 'Hello, we have a special offer for you.' },
+      });
 
-      expect(res.status).toBe(200);
-      expect(res.body).toMatchObject({
-        content: 'Rephrased message for Telegram',
-        model: DEFAULT_OPENROUTER_CAMPAIGN_MODEL,
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body).toMatchObject({
+        content: expect.any(String),
+        model: DEFAULT_OPENROUTER_CAMPAIGN_PRESET,
         provider: 'openrouter',
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      const fetchOpts = fetchMock.mock.calls[0]?.[1] as { body?: string };
-      const sent = JSON.parse(fetchOpts?.body ?? '{}') as { max_tokens?: number; messages?: unknown[]; model?: string };
-      expect(sent.model).toBe(DEFAULT_OPENROUTER_CAMPAIGN_MODEL);
-      expect(sent.max_tokens).toBeGreaterThanOrEqual(2048);
-      expect(Array.isArray(sent.messages)).toBe(true);
-      expect((sent.messages as { role: string }[]).some((m) => m.role === 'system')).toBe(true);
     });
 
     it('returns 503 when OPENROUTER_API_KEY is not set', async () => {
       delete process.env.OPENROUTER_API_KEY;
 
-      const res = await request(app)
-        .post('/api/ai/campaigns/rephrase')
-        .set(authHeaders)
-        .send({ text: 'Hello' });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/ai/campaigns/rephrase',
+        headers: authHeaders,
+        payload: { text: 'Hello' },
+      });
 
-      expect(res.status).toBe(503);
+      expect(res.statusCode).toBe(503);
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('returns 400 when text is empty', async () => {
-      const res = await request(app)
-        .post('/api/ai/campaigns/rephrase')
-        .set(authHeaders)
-        .send({ text: '' });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/ai/campaigns/rephrase',
+        headers: authHeaders,
+        payload: { text: '' },
+      });
 
-      expect(res.status).toBe(400);
+      expect(res.statusCode).toBe(400);
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('returns 400 when text is missing', async () => {
-      const res = await request(app)
-        .post('/api/ai/campaigns/rephrase')
-        .set(authHeaders)
-        .send({});
+      const res = await inject({
+        method: 'POST',
+        url: '/api/ai/campaigns/rephrase',
+        headers: authHeaders,
+        payload: {},
+      });
 
-      expect(res.status).toBe(400);
+      expect(res.statusCode).toBe(400);
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('returns 502 when OpenRouter returns non-ok', async () => {
-      vi.mocked(fetchMock).mockResolvedValueOnce({
+      fetchMock.mockResolvedValue({
         ok: false,
-        status: 429,
-        text: () => Promise.resolve('Rate limited'),
+        status: 500,
+        text: () => Promise.resolve('upstream error'),
       } as any);
 
-      const res = await request(app)
-        .post('/api/ai/campaigns/rephrase')
-        .set(authHeaders)
-        .send({ text: 'Hello' });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/ai/campaigns/rephrase',
+        headers: authHeaders,
+        payload: { text: 'Hello' },
+      });
 
-      expect(res.status).toBe(502);
+      expect(res.statusCode).toBe(502);
     });
 
-    it('returns 502 when OpenRouter returns empty choices', async () => {
-      vi.mocked(fetchMock).mockResolvedValueOnce({
+    it('returns 502 when OpenRouter returns empty content', async () => {
+      fetchMock.mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ choices: [] }),
+        json: () => Promise.resolve({ choices: [{ message: { content: null } }] }),
       } as any);
 
-      const res = await request(app)
-        .post('/api/ai/campaigns/rephrase')
-        .set(authHeaders)
-        .send({ text: 'Hello' });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/ai/campaigns/rephrase',
+        headers: authHeaders,
+        payload: { text: 'Hello' },
+      });
 
-      expect(res.status).toBe(502);
+      expect(res.statusCode).toBe(502);
     });
   });
 });

@@ -1,25 +1,24 @@
 {
   "name": "@getsale/test-utils",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "scripts": {
     "build": "echo 'test-utils: source-only package, no build needed'",
-    "typecheck": "echo 'test-utils: no tsconfig, skip'"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@getsale/events": "*",
-    "@getsale/service-core": "*",
+    "@getsale/service-framework": "*",
     "@getsale/logger": "*",
-    "@getsale/utils": "*",
-    "cookie-parser": "^1.4.6",
-    "express": "^4.18.2",
-    "pg": "^8.11.3"
+    "@getsale/queue": "*",
+    "fastify": "^5.0.0",
+    "@fastify/cookie": "^11.0.0",
+    "pg": "^8.16.0"
   },
   "devDependencies": {
-    "@types/cookie-parser": "^1.4.6",
-    "@types/node": "^20.10.0",
-    "typescript": "^5.3.0",
-    "vitest": "^3.0.0"
+    "@types/node": "^24.12.2",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.4"
   }
 }

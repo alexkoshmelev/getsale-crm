@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  namespace: getsale
+  labels:
+    app.kubernetes.io/name: user-service
+    app.kubernetes.io/part-of: getsale
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: user-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: user-service
+        app.kubernetes.io/part-of: getsale
+    spec:
+      containers:
+        - name: user-service
+          image: getsale/user-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4009
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: getsale-common-config
+            - secretRef:
+                name: getsale-secrets
+          env:
+            - name: PORT
+              value: "4009"
+            - name: STRIPE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: getsale-secrets
+                  key: STRIPE_SECRET_KEY
+            - name: STRIPE_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: getsale-secrets
+                  key: STRIPE_WEBHOOK_SECRET
+            - name: STRIPE_PRICE_CREDITS_SMALL
+              valueFrom:
+                secretKeyRef:
+                  name: getsale-secrets
+                  key: STRIPE_PRICE_CREDITS_SMALL
+            - name: STRIPE_PRICE_CREDITS_MEDIUM
+              valueFrom:
+                secretKeyRef:
+                  name: getsale-secrets
+                  key: STRIPE_PRICE_CREDITS_MEDIUM
+            - name: STRIPE_PRICE_CREDITS_LARGE
+              valueFrom:
+                secretKeyRef:
+                  name: getsale-secrets
+                  key: STRIPE_PRICE_CREDITS_LARGE
+            - name: NOWPAYMENTS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: getsale-secrets
+                  key: NOWPAYMENTS_API_KEY
+            - name: NOWPAYMENTS_IPN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: getsale-secrets
+                  key: NOWPAYMENTS_IPN_SECRET
+            - name: NOWPAYMENTS_PAY_CURRENCY
+              valueFrom:
+                configMapKeyRef:
+                  name: getsale-common-config
+                  key: NOWPAYMENTS_PAY_CURRENCY
+            - name: CREDITS_MOCK_TOPUP
+              valueFrom:
+                configMapKeyRef:
+                  name: getsale-common-config
+                  key: CREDITS_MOCK_TOPUP
+            - name: FRONTEND_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: getsale-common-config
+                  key: FRONTEND_URL
+            - name: PUBLIC_API_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: getsale-common-config
+                  key: PUBLIC_API_BASE_URL
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4009
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4009
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service
+  namespace: getsale
+  labels:
+    app.kubernetes.io/name: user-service
+    app.kubernetes.io/part-of: getsale
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: user-service
+  ports:
+    - port: 4009
+      targetPort: 4009
+      protocol: TCP

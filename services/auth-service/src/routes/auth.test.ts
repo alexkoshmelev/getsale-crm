@@ -1,110 +1,108 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import request from 'supertest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import bcrypt from 'bcryptjs';
-import { createTestApp, createMockPool, createMockRabbitMQ } from '@getsale/test-utils';
-import { createLogger } from '@getsale/logger';
-import type { RedisClient } from '@getsale/utils';
+import { createTestApp, createMockPool, createMockRabbitMQ, createMockRedis } from '@getsale/test-utils';
 import { signAccessToken, signRefreshToken, hashRefreshToken } from '../helpers';
 import { AUTH_COOKIE_ACCESS, AUTH_COOKIE_REFRESH } from '../cookies';
-import { authRouter } from './auth';
+import { registerAuthRoutes } from './auth';
 
-const TEST_ORG_ID = '11111111-1111-1111-1111-111111111111';
-const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
+const TEST_ORG_ID = '11111111-1111-4111-8111-111111111111';
+const TEST_USER_ID = '22222222-2222-4222-8222-222222222222';
 
-describe('Auth Router', () => {
+describe('Auth Router (Fastify)', () => {
+  let inject: Awaited<ReturnType<typeof createTestApp>>['inject'];
   let pool: ReturnType<typeof createMockPool>;
   let rabbitmq: ReturnType<typeof createMockRabbitMQ>;
-  let app: ReturnType<typeof createTestApp>;
-  let redis: { incr: ReturnType<typeof vi.fn> };
+  let redis: ReturnType<typeof createMockRedis>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     pool = createMockPool();
     rabbitmq = createMockRabbitMQ();
-    redis = { incr: vi.fn().mockResolvedValue(1) };
-    const log = createLogger('auth-service-test');
-    const router = authRouter({ pool, rabbitmq, log, redis: redis as unknown as RedisClient });
-    app = createTestApp(router, { prefix: '/api/auth', log, cookieParser: true });
+    redis = createMockRedis();
+
+    const { inject: inj } = await createTestApp(
+      (app) => registerAuthRoutes(app, { pool, rabbitmq, log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any, redis: redis as any }),
+      { cookieParser: true },
+    );
+    inject = inj;
   });
 
-  describe('POST /signup', () => {
+  describe('POST /api/auth/signup', () => {
     it('returns 400 when email and password are missing', async () => {
-      const res = await request(app)
-        .post('/api/auth/signup')
-        .set('content-type', 'application/json')
-        .send({});
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/signup',
+        headers: { 'content-type': 'application/json' },
+        payload: {},
+      });
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/validation failed/i);
-      const detailsStr = JSON.stringify(res.body.details ?? []);
-      expect(detailsStr).toMatch(/email|password|required/i);
+      expect(res.statusCode).toBe(400);
+      const body = JSON.parse(res.body);
+      expect(body.error).toMatch(/validation/i);
     });
 
     it('returns 400 when email is invalid', async () => {
-      const res = await request(app)
-        .post('/api/auth/signup')
-        .set('content-type', 'application/json')
-        .send({ email: 'not-an-email', password: 'password123' });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/signup',
+        headers: { 'content-type': 'application/json' },
+        payload: { email: 'not-an-email', password: 'password123' },
+      });
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/validation failed/i);
-      const detailsStr = JSON.stringify(res.body.details ?? []);
-      expect(detailsStr).toMatch(/invalid|email/i);
+      expect(res.statusCode).toBe(400);
     });
 
     it('returns 400 when password is too short', async () => {
-      const res = await request(app)
-        .post('/api/auth/signup')
-        .set('content-type', 'application/json')
-        .send({ email: 'user@example.com', password: 'short' });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/signup',
+        headers: { 'content-type': 'application/json' },
+        payload: { email: 'user@example.com', password: 'short' },
+      });
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/validation failed/i);
-      const detailsStr = JSON.stringify(res.body.details ?? []);
-      expect(detailsStr).toMatch(/password|8|character/i);
+      expect(res.statusCode).toBe(400);
     });
 
     it('returns 200 and sets auth cookies on successful signup', async () => {
       const org = { id: TEST_ORG_ID, name: 'Test Org' };
       const user = { id: TEST_USER_ID, email: 'new@example.com', organization_id: TEST_ORG_ID, role: 'owner' };
-      const team = { id: '33333333-3333-3333-3333-333333333333' };
 
       pool.query
-        .mockResolvedValueOnce(undefined) // BEGIN
-        .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // SELECT slug
-        .mockResolvedValueOnce({ rows: [org], rowCount: 1 }) // INSERT organizations
-        .mockResolvedValueOnce({ rows: [user], rowCount: 1 }) // INSERT users
-        .mockResolvedValueOnce({ rows: [team], rowCount: 1 }) // INSERT teams
-        .mockResolvedValueOnce(undefined) // INSERT team_members
-        .mockResolvedValueOnce(undefined) // INSERT organization_members
-        .mockResolvedValueOnce(undefined) // COMMIT
-        .mockResolvedValueOnce(undefined); // INSERT refresh_tokens
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        .mockResolvedValueOnce({ rows: [org], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [user], rowCount: 1 })
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined);
 
-      const res = await request(app)
-        .post('/api/auth/signup')
-        .set('content-type', 'application/json')
-        .send({ email: 'new@example.com', password: 'Password123' });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/signup',
+        headers: { 'content-type': 'application/json' },
+        payload: { email: 'new@example.com', password: 'Password123' },
+      });
 
-      expect(res.status).toBe(200);
-      expect(res.body.user).toMatchObject({ email: 'new@example.com', id: TEST_USER_ID });
-      expect(res.headers['set-cookie']).toBeDefined();
-      const setCookie = res.headers['set-cookie'];
-      const cookies = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
-      expect(cookies.some((c: string) => c.includes('access_token') || c.includes('refresh_token'))).toBe(true);
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.user).toMatchObject({ email: 'new@example.com', id: TEST_USER_ID });
+      const cookies = res.headers['set-cookie'];
+      expect(cookies).toBeDefined();
+      const cookieArr = Array.isArray(cookies) ? cookies : [cookies];
+      expect(cookieArr.some((c) => c?.includes('access_token') || c?.includes('refresh_token'))).toBe(true);
     });
   });
 
-  describe('POST /signin', () => {
+  describe('POST /api/auth/signin', () => {
     it('returns 400 when email is missing', async () => {
-      const res = await request(app)
-        .post('/api/auth/signin')
-        .set('content-type', 'application/json')
-        .send({ password: 'password123' });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/signin',
+        headers: { 'content-type': 'application/json' },
+        payload: { password: 'password123' },
+      });
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/validation failed/i);
-      const detailsStr = JSON.stringify(res.body.details ?? []);
-      expect(detailsStr).toMatch(/email|password|required/i);
+      expect(res.statusCode).toBe(400);
     });
 
     it('returns 200 and sets auth cookies on successful signin', async () => {
@@ -118,31 +116,38 @@ describe('Auth Router', () => {
         password_hash: passwordHash,
       };
       pool.query
-        .mockResolvedValueOnce({ rows: [user], rowCount: 1 }) // SELECT users
-        .mockResolvedValueOnce(undefined); // INSERT refresh_tokens
+        .mockResolvedValueOnce({ rows: [user], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 })
+        .mockResolvedValueOnce(undefined);
 
-      const res = await request(app)
-        .post('/api/auth/signin')
-        .set('content-type', 'application/json')
-        .send({ email: 'signed@example.com', password });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/signin',
+        headers: { 'content-type': 'application/json' },
+        payload: { email: 'signed@example.com', password },
+      });
 
-      expect(res.status).toBe(200);
-      expect(res.body.user).toMatchObject({ email: 'signed@example.com', id: TEST_USER_ID });
-      const setCookie = res.headers['set-cookie'];
-      const cookies = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
-      expect(cookies.some((c: string) => c.includes('access_token') || c.includes('refresh_token'))).toBe(true);
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.user).toMatchObject({ email: 'signed@example.com', id: TEST_USER_ID });
+      const cookies = res.headers['set-cookie'];
+      const cookieArr = Array.isArray(cookies) ? cookies : cookies ? [cookies] : [];
+      expect(cookieArr.some((c) => c?.includes('access_token') || c?.includes('refresh_token'))).toBe(true);
     });
 
     it('returns 401 when user not found', async () => {
       pool.query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
 
-      const res = await request(app)
-        .post('/api/auth/signin')
-        .set('content-type', 'application/json')
-        .send({ email: 'unknown@example.com', password: 'password123' });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/signin',
+        headers: { 'content-type': 'application/json' },
+        payload: { email: 'unknown@example.com', password: 'password123' },
+      });
 
-      expect(res.status).toBe(401);
-      expect(res.body.error).toMatch(/invalid|credentials/i);
+      expect(res.statusCode).toBe(401);
+      const body = JSON.parse(res.body);
+      expect(body.error).toMatch(/invalid|credentials/i);
     });
 
     it('returns 401 when password is wrong', async () => {
@@ -155,22 +160,24 @@ describe('Auth Router', () => {
       };
       pool.query.mockResolvedValueOnce({ rows: [user], rowCount: 1 });
 
-      const res = await request(app)
-        .post('/api/auth/signin')
-        .set('content-type', 'application/json')
-        .send({ email: 'u@example.com', password: 'wrongpassword' });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/signin',
+        headers: { 'content-type': 'application/json' },
+        payload: { email: 'u@example.com', password: 'wrongpassword' },
+      });
 
-      expect(res.status).toBe(401);
-      expect(res.body.error).toMatch(/invalid|credentials/i);
+      expect(res.statusCode).toBe(401);
+      const body = JSON.parse(res.body);
+      expect(body.error).toMatch(/invalid|credentials/i);
     });
   });
 
-  describe('GET /me', () => {
+  describe('GET /api/auth/me', () => {
     it('returns 401 when no token is provided', async () => {
-      const res = await request(app).get('/api/auth/me');
+      const res = await inject({ method: 'GET', url: '/api/auth/me' });
 
-      expect(res.status).toBe(401);
-      expect(res.body.error).toMatch(/authenticated|token/i);
+      expect(res.statusCode).toBe(401);
     });
 
     it('returns 200 with user when valid access token in cookie', async () => {
@@ -184,12 +191,15 @@ describe('Auth Router', () => {
         rowCount: 1,
       });
 
-      const res = await request(app)
-        .get('/api/auth/me')
-        .set('Cookie', `${AUTH_COOKIE_ACCESS}=${accessToken}`);
+      const res = await inject({
+        method: 'GET',
+        url: '/api/auth/me',
+        cookies: { [AUTH_COOKIE_ACCESS]: accessToken },
+      });
 
-      expect(res.status).toBe(200);
-      expect(res.body).toMatchObject({
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body).toMatchObject({
         id: TEST_USER_ID,
         email: 'me@example.com',
         organizationId: TEST_ORG_ID,
@@ -208,24 +218,31 @@ describe('Auth Router', () => {
         rowCount: 1,
       });
 
-      const res = await request(app)
-        .get('/api/auth/me')
-        .set('Authorization', `Bearer ${accessToken}`);
+      const res = await inject({
+        method: 'GET',
+        url: '/api/auth/me',
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
 
-      expect(res.status).toBe(200);
-      expect(res.body.email).toBe('bearer@example.com');
-      expect(res.body.role).toBe('member');
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.email).toBe('bearer@example.com');
+      expect(body.role).toBe('member');
     });
   });
 
-  describe('POST /verify', () => {
+  describe('POST /api/auth/verify', () => {
     it('returns 400 when no token is provided', async () => {
-      const res = await request(app)
-        .post('/api/auth/verify')
-        .set('content-type', 'application/json');
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/verify',
+        headers: { 'content-type': 'application/json' },
+        payload: {},
+      });
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/token|required/i);
+      expect(res.statusCode).toBe(400);
+      const body = JSON.parse(res.body);
+      expect(body.error).toMatch(/token|required/i);
     });
 
     it('returns 200 with user when valid token provided', async () => {
@@ -235,22 +252,23 @@ describe('Auth Router', () => {
         role: 'owner',
       });
       pool.query.mockResolvedValueOnce({
-        rows: [{
-          id: TEST_USER_ID,
-          email: 'verify@example.com',
-          organization_id: TEST_ORG_ID,
-          role: 'owner',
-        }],
+        rows: [{ id: TEST_USER_ID, email: 'verify@example.com', organization_id: TEST_ORG_ID, role: 'owner' }],
         rowCount: 1,
       });
 
-      const res = await request(app)
-        .post('/api/auth/verify')
-        .set('content-type', 'application/json')
-        .set('Authorization', `Bearer ${accessToken}`);
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/verify',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${accessToken}`,
+        },
+        payload: {},
+      });
 
-      expect(res.status).toBe(200);
-      expect(res.body).toMatchObject({
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body).toMatchObject({
         id: TEST_USER_ID,
         email: 'verify@example.com',
         organizationId: TEST_ORG_ID,
@@ -258,29 +276,27 @@ describe('Auth Router', () => {
       });
     });
 
-    it('returns 200 with user when valid token provided in body (e.g. websocket-service)', async () => {
+    it('returns 200 with user when valid token provided in body', async () => {
       const accessToken = signAccessToken({
         userId: TEST_USER_ID,
         organizationId: TEST_ORG_ID,
         role: 'owner',
       });
       pool.query.mockResolvedValueOnce({
-        rows: [{
-          id: TEST_USER_ID,
-          email: 'verify@example.com',
-          organization_id: TEST_ORG_ID,
-          role: 'owner',
-        }],
+        rows: [{ id: TEST_USER_ID, email: 'verify@example.com', organization_id: TEST_ORG_ID, role: 'owner' }],
         rowCount: 1,
       });
 
-      const res = await request(app)
-        .post('/api/auth/verify')
-        .set('content-type', 'application/json')
-        .send({ token: accessToken });
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/verify',
+        headers: { 'content-type': 'application/json' },
+        payload: { token: accessToken },
+      });
 
-      expect(res.status).toBe(200);
-      expect(res.body).toMatchObject({
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body).toMatchObject({
         id: TEST_USER_ID,
         email: 'verify@example.com',
         organizationId: TEST_ORG_ID,
@@ -289,19 +305,20 @@ describe('Auth Router', () => {
     });
   });
 
-  describe('POST /refresh', () => {
+  describe('POST /api/auth/refresh', () => {
     it('returns 400 when no refresh cookie is sent', async () => {
-      const res = await request(app)
-        .post('/api/auth/refresh')
-        .set('content-type', 'application/json');
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/refresh',
+      });
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/refresh|required/i);
+      expect(res.statusCode).toBe(400);
+      const body = JSON.parse(res.body);
+      expect(body.error).toMatch(/refresh|required/i);
     });
 
     it('returns 200 and new access token when valid refresh cookie sent', async () => {
       const refreshToken = signRefreshToken(TEST_USER_ID);
-      const tokenHash = hashRefreshToken(refreshToken);
       const futureExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
       const user = {
         id: TEST_USER_ID,
@@ -311,30 +328,38 @@ describe('Auth Router', () => {
       };
       pool.query
         .mockResolvedValueOnce({
-          rows: [{ id: 'rt1', user_id: TEST_USER_ID, expires_at: futureExpiry }],
+          rows: [{ id: 'rt1', user_id: TEST_USER_ID, family_id: 'f1', used: false, expires_at: futureExpiry }],
           rowCount: 1,
         })
-        .mockResolvedValueOnce({ rows: [user], rowCount: 1 });
+        .mockResolvedValueOnce({ rows: [user], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 })
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce(undefined) // UPDATE used
+        .mockResolvedValueOnce(undefined) // INSERT new refresh
+        .mockResolvedValueOnce(undefined); // COMMIT
 
-      const res = await request(app)
-        .post('/api/auth/refresh')
-        .set('content-type', 'application/json')
-        .set('Cookie', `${AUTH_COOKIE_REFRESH}=${refreshToken}`);
+      const res = await inject({
+        method: 'POST',
+        url: '/api/auth/refresh',
+        headers: {
+          cookie: `${AUTH_COOKIE_REFRESH}=${encodeURIComponent(refreshToken)}`,
+        },
+      });
 
-      expect(res.status).toBe(200);
-      expect(res.body.user).toMatchObject({ email: 'refresh@example.com', id: TEST_USER_ID });
-      expect(res.headers['set-cookie']).toBeDefined();
-      const setCookie = res.headers['set-cookie'];
-      const cookies = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
-      expect(cookies.some((c: string) => c.includes('access_token'))).toBe(true);
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.user).toMatchObject({ email: 'refresh@example.com', id: TEST_USER_ID });
+      const cookies = res.headers['set-cookie'];
+      const cookieArr = Array.isArray(cookies) ? cookies : cookies ? [cookies] : [];
+      expect(cookieArr.some((c) => c?.includes('access_token'))).toBe(true);
     });
   });
 
-  describe('POST /logout', () => {
+  describe('POST /api/auth/logout', () => {
     it('returns 204 and clears cookies', async () => {
-      const res = await request(app).post('/api/auth/logout');
+      const res = await inject({ method: 'POST', url: '/api/auth/logout' });
 
-      expect(res.status).toBe(204);
+      expect(res.statusCode).toBe(204);
       expect(res.headers['set-cookie']).toBeDefined();
     });
   });

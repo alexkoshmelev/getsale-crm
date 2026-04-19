@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-worker
+  namespace: getsale
+  labels:
+    app.kubernetes.io/name: analytics-worker
+    app.kubernetes.io/part-of: getsale
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: analytics-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: analytics-worker
+        app.kubernetes.io/part-of: getsale
+    spec:
+      containers:
+        - name: analytics-worker
+          image: getsale/analytics-worker:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: getsale-common-config
+            - secretRef:
+                name: getsale-secrets
+          ports:
+            - containerPort: 4017
+              protocol: TCP
+              name: health
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4017
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4017
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

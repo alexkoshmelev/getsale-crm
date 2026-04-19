@@ -8,7 +8,7 @@ disable-model-invocation: false
 
 ## Configuration-Based Documentation
 
-**IMPORTANT:** Documentation paths are configured in `.cursor/config.json`. Never hardcode `ai_docs/` or any specific paths.
+**IMPORTANT:** Documentation paths are configured in `.cursor/config.json`. Never hardcode paths.
 
 ### Reading Configuration
 
@@ -18,41 +18,71 @@ Always read documentation paths from config:
 config = readJSON(".cursor/config.json")
 paths = config.documentation.paths
 
-// paths.root = "ai_docs" (or user's custom path)
-// paths.plans = "ai_docs/develop/plans"
-// paths.reports = "ai_docs/develop/reports"
+// paths.root = "docs"
+// paths.architecture = "docs/architecture"
+// paths.api = "docs/api"
+// paths.features = "docs/domain"
 // etc.
 ```
 
-## Default Documentation Structure
+## Documentation Structure
 
-This is the default structure when using `ai_docs/` as root (users can customize all paths):
+All documentation lives in `docs/` with subdirectories by category:
 
 ```
-{configured-root}/               # From config: paths.root
-├── design/                      # From config: paths.design
-├── develop/
-│   ├── api/                     # From config: paths.api
-│   ├── architecture/            # From config: paths.architecture
-│   ├── components/              # From config: paths.components
-│   ├── features/                # From config: paths.features
-│   ├── plans/                   # From config: paths.plans
-│   ├── reports/                 # From config: paths.reports
-│   └── issues/                  # From config: paths.issues
-└── changelog/                   # From config: paths.changelog
+docs/
+├── INDEX.md                    # Navigation hub (start here)
+├── ROADMAP.md                  # Priorities and backlog
+│
+├── architecture/               # System design and boundaries
+│   ├── ARCHITECTURE.md        # Main architecture document
+│   ├── TABLE_OWNERSHIP.md    # Data ownership between services
+│   ├── SHARED_BUILD_ORDER.md # Monorepo build order
+│   └── STAGES.md             # Development stages
+│
+├── api/                        # API contracts
+│   ├── CRM_API.md
+│   ├── INTERNAL_API.md
+│   ├── SERVICE_HTTP_CLIENT_INVENTORY.md
+│   └── EVENT_HANDLER_POLICY.md
+│
+├── domain/                     # Business domain flows
+│   ├── MESSAGING_ARCHITECTURE.md
+│   ├── TELEGRAM_MESSAGING_FLOW.md
+│   ├── TELEGRAM_API_ANALYSIS.md
+│   ├── CAMPAIGNS.md
+│   ├── CAMPAIGN_FLOW_AND_LOGS.md
+│   ├── CAMPAIGN_AI.md
+│   ├── TELEGRAM_PARSE_FLOW.md
+│   └── OUTREACH_BEST_PRACTICES.md
+│
+├── product/                    # Product strategy
+│   ├── MASTER_PLAN.md
+│   └── COMPETITOR_ANALYSIS.md
+│
+├── operations/                 # Infrastructure and setup
+│   ├── DEPLOYMENT.md
+│   ├── GETTING_STARTED.md
+│   ├── TESTING.md
+│   └── MIGRATIONS.md
+│
+├── runbooks/                   # Operational runbooks
+│   ├── ORPHAN_MESSAGES.md
+│   └── BD_ACCOUNTS_TIMEOUT.md
+│
+└── adr/                        # Architecture Decision Records
+    └── README.md
 ```
 
 ## Directory Purpose
 
-**plans/** - High-level: What to build (created by planner)
-**reports/** - Summary: What was built (created by documenter)
-**issues/** - Tech debt: What to fix later (created by any agent)
-**features/** - Feature descriptions and implementation details
-**api/** - API endpoints documentation
-**components/** - Component documentation
-**architecture/** - Architecture decisions and patterns
-**design/** - UI/UX designs, style guides
-**changelog/** - Version history
+**architecture/** - System design, service boundaries, data ownership
+**api/** - API endpoints, inter-service contracts, HTTP client inventory
+**domain/** - Business flows: messaging, campaigns, Telegram, parsing
+**product/** - Product strategy, competitor analysis, master plan
+**operations/** - Deployment, getting started, testing, DB migrations
+**runbooks/** - Operational procedures for specific incidents
+**adr/** - Architecture Decision Records
 
 ## When to Update Documentation
 
@@ -68,23 +98,18 @@ This is the default structure when using `ai_docs/` as root (users can customize
 
 ## How to Read Documentation
 
-Documentation may be excluded from context by default (check .cursorignore).
+Start with `docs/INDEX.md` for the full navigation. To include specific docs:
 
-To include specific docs (replace `{root}` with your configured path):
 ```
-@{root}/develop/features/authentication.md
-@{root}/develop/api/endpoints.md
+@docs/architecture/ARCHITECTURE.md
+@docs/api/CRM_API.md
+@docs/ROADMAP.md
 ```
 
 To see all documentation:
 ```
-@{root}
+@docs
 ```
-
-## Commands Available
-
-- `/documenter` - Update documentation for recent changes
-- `@{root}` - Include documentation in context (use your configured root path)
 
 ## Documentation Guidelines
 
@@ -93,22 +118,18 @@ To see all documentation:
 3. **Link to code** - Reference actual files
 4. **Keep it current** - Archive old/completed items
 5. **Use markdown** - Standard formatting
-6. **Cross-reference** - Link related docs
+6. **Cross-reference** - Link related docs using relative paths
 
 ## File Naming
 
-- Features: `feature-name.md` (kebab-case)
-- Components: `ComponentName.md` (PascalCase)
-- Issues: `issue-123.md` or descriptive name
-- Tasks: `task-description.md`
+- All-caps with underscores: `ARCHITECTURE.md`, `CRM_API.md`
+- Consistent with existing conventions in the directory
 
-## Useful Prompts
+## Architecture Decision Records (ADR)
 
-- "Document the authentication feature I just implemented"
-- "Update API documentation with new endpoints"
-- "Show me all pending tasks in documentation"
-- "Archive completed issues in documentation"
-- "Create ADR for switching to server components"
+- **Canonical location:** `docs/adr/`
+- New ADRs: numbered file `NNNN-kebab-case-title.md`
+- Supplementary architecture notes in `docs/architecture/`
 
 ## Configuration Example
 
@@ -118,30 +139,22 @@ Example `.cursor/config.json`:
 {
   "documentation": {
     "paths": {
-      "root": "ai_docs",
-      "plans": "ai_docs/develop/plans",
-      "reports": "ai_docs/develop/reports",
-      "issues": "ai_docs/develop/issues",
-      "architecture": "ai_docs/develop/architecture",
-      "features": "ai_docs/develop/features",
-      "api": "ai_docs/develop/api",
-      "components": "ai_docs/develop/components",
-      "design": "ai_docs/design",
-      "changelog": "ai_docs/changelog"
+      "root": "docs",
+      "architecture": "docs/architecture",
+      "api": "docs/api",
+      "features": "docs/domain",
+      "plans": "docs/product",
+      "operations": "docs/operations",
+      "runbooks": "docs/runbooks"
     },
     "enabled": {
-      "plans": true,
-      "reports": true,
-      "issues": true,
       "architecture": true,
-      "features": true,
       "api": true,
-      "components": true,
-      "design": true,
-      "changelog": true
+      "features": true,
+      "plans": true,
+      "operations": true,
+      "runbooks": true
     }
   }
 }
 ```
-
-Users can customize all paths to match their project structure (e.g., `docs/`, `documentation/`, etc.)

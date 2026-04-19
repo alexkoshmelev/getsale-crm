@@ -1,50 +1,59 @@
-import { Router } from 'express';
-import { Pool } from 'pg';
+import { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import Stripe from 'stripe';
+import { AppError, ErrorCodes, requireUser, validate, type DatabasePools } from '@getsale/service-framework';
+import { RabbitMQClient } from '@getsale/queue';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes, requireUser, validate } from '@getsale/service-core';
-import { UsSubscriptionUpgradeSchema, type UsSubscriptionUpgradeInput } from '../validation';
+import { invoiceClientSecret, subscriptionBillingPeriod } from '../stripe-utils';
+
+type StripeClient = InstanceType<typeof Stripe>;
 
 interface Deps {
-  pool: Pool;
+  db: DatabasePools;
+  rabbitmq: RabbitMQClient;
   log: Logger;
-  stripe: Stripe;
+  stripe: StripeClient;
 }
 
-export function subscriptionRouter({ pool, log, stripe }: Deps): Router {
-  const router = Router();
+const SubscriptionUpgradeSchema = z.object({
+  plan: z.string().min(1, 'plan is required').max(64).trim(),
+  paymentMethodId: z.string().max(256).optional(),
+});
 
-  router.use(requireUser());
+type SubscriptionUpgradeInput = z.infer<typeof SubscriptionUpgradeSchema>;
 
-  router.get('/subscription', asyncHandler(async (req, res) => {
-    const { id, organizationId } = req.user;
+export function registerSubscriptionRoutes(app: FastifyInstance, { db, log, stripe }: Deps): void {
+  app.get('/api/users/subscription', { preHandler: [requireUser] }, async (request) => {
+    const { id, organizationId } = request.user!;
 
-    const result = await pool.query(
+    const result = await db.read.query(
       'SELECT * FROM subscriptions WHERE user_id = $1 AND organization_id = $2 ORDER BY created_at DESC LIMIT 1',
-      [id, organizationId]
+      [id, organizationId],
     );
 
     if (result.rows.length === 0) {
-      return res.json({ plan: 'free', status: 'active' });
+      return { plan: 'free', status: 'active' };
     }
 
-    res.json(result.rows[0]);
-  }));
+    return result.rows[0];
+  });
 
-  router.post('/subscription/upgrade', validate(UsSubscriptionUpgradeSchema), asyncHandler(async (req, res) => {
-    const { id, organizationId } = req.user;
-    const { plan } = req.body as UsSubscriptionUpgradeInput;
+  app.post('/api/users/subscription/upgrade', {
+    preHandler: [requireUser, validate(SubscriptionUpgradeSchema)],
+  }, async (request) => {
+    const { id, organizationId } = request.user!;
+    const { plan } = request.body as SubscriptionUpgradeInput;
 
     let customerId: string;
-    const subResult = await pool.query(
+    const subResult = await db.read.query(
       'SELECT stripe_customer_id FROM subscriptions WHERE user_id = $1 AND organization_id = $2 ORDER BY created_at DESC LIMIT 1',
-      [id, organizationId]
+      [id, organizationId],
     );
 
     if (subResult.rows.length > 0 && subResult.rows[0].stripe_customer_id) {
       customerId = subResult.rows[0].stripe_customer_id;
     } else {
-      const userRow = await pool.query('SELECT email FROM users WHERE id = $1', [id]);
+      const userRow = await db.read.query('SELECT email FROM users WHERE id = $1', [id]);
       if (userRow.rows.length === 0) {
         throw new AppError(404, 'User not found', ErrorCodes.NOT_FOUND);
       }
@@ -65,10 +74,15 @@ export function subscriptionRouter({ pool, log, stripe }: Deps): Router {
       items: [{ price: priceId }],
       payment_behavior: 'default_incomplete',
       payment_settings: { save_default_payment_method: 'on_subscription' },
-      expand: ['latest_invoice.payment_intent'],
+      expand: ['latest_invoice.confirmation_secret'],
     });
 
-    await pool.query(
+    const period = subscriptionBillingPeriod(subscription);
+    if (!period) {
+      throw new AppError(502, 'Stripe subscription missing billing period', ErrorCodes.INTERNAL_ERROR);
+    }
+
+    await db.write.query(
       `INSERT INTO subscriptions (user_id, organization_id, stripe_customer_id, stripe_subscription_id, plan, status, current_period_start, current_period_end)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
@@ -78,28 +92,21 @@ export function subscriptionRouter({ pool, log, stripe }: Deps): Router {
         subscription.id,
         plan,
         subscription.status,
-        new Date(subscription.current_period_start * 1000),
-        new Date(subscription.current_period_end * 1000),
-      ]
+        period.start,
+        period.end,
+      ],
     );
 
-    const latestInvoice = subscription.latest_invoice as Stripe.Invoice | null;
-    const paymentIntent = latestInvoice?.payment_intent as Stripe.PaymentIntent | undefined;
-    const clientSecret = paymentIntent?.client_secret ?? undefined;
+    const clientSecret = invoiceClientSecret(subscription.latest_invoice);
 
     log.info({
       message: 'Subscription upgraded',
       user_id: id,
       plan,
       subscription_id: subscription.id,
-      correlation_id: req.correlationId,
+      correlation_id: request.correlationId,
     });
 
-    res.json({
-      subscriptionId: subscription.id,
-      clientSecret,
-    });
-  }));
-
-  return router;
+    return { subscriptionId: subscription.id, clientSecret };
+  });
 }

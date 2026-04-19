@@ -100,7 +100,7 @@ groups:
           summary: "BD-accounts MessageDb used SQL bypass for messages"
           description: "Telegram persistence hit local SQL instead of messaging internal API. Check MESSAGING_SERVICE_URL, messaging-service health, and logs for 'message_db_sql_bypass'. See ai_docs/develop/TABLE_OWNERSHIP_A1.md (A3)."
 
-      # B3: campaign-service worker defers sends when CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT is set and the same bd_account_id sent recently (see services/campaign-service/src/campaign-loop.ts).
+      # B3: campaign-worker defers sends when CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT is set and the same bd_account_id sent recently (see services/campaign-worker).
       # Counter stays at 0 if env is 0 (default). Elevated rate may mean aggressive gap tuning or very dense queues per account.
       - alert: CampaignMinGapDeferElevated
         expr: increase(campaign_min_gap_defer_total[30m]) > 50
@@ -109,7 +109,7 @@ groups:
           severity: info
         annotations:
           summary: "Campaign worker: many min-gap deferrals"
-          description: "campaign_min_gap_defer_total rose by more than 50 in 30m. Review CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT and campaign load per BD account. See docs/DEPLOYMENT.md (campaign-service worker)."
+          description: "campaign_min_gap_defer_total rose by more than 50 in 30m. Review CAMPAIGN_MIN_GAP_MS_SAME_BD_ACCOUNT and campaign load per BD account (services/campaign-worker)."
 
       - alert: AIRateLimitHits
         expr: rate(http_requests_total{status="429", job="ai-service"}[15m]) > 1

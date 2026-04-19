@@ -19,6 +19,13 @@ import {
   Clock,
   Calendar,
   Percent,
+  UserPlus,
+  Pencil,
+  Trash2,
+  Copy,
+  RotateCcw,
+  Download,
+  Upload,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { reportError, reportWarning } from '@/lib/error-reporter';
@@ -29,13 +36,26 @@ import {
   startCampaign,
   pauseCampaign,
   updateCampaign,
+  addCampaignParticipants,
+  removeCampaignParticipant,
+  removeAllCampaignParticipants,
+  deleteCampaign,
+  duplicateCampaign,
+  resetCampaignProgress,
+  checkCampaignAudienceConflicts,
   enrichContactsFromTelegram,
+  fetchCampaignParticipantsExport,
   type CampaignWithDetails,
   type CampaignStats,
   type CampaignAnalytics,
 } from '@/lib/api/campaigns';
+import { ImportParticipantsModal } from '@/components/campaigns/ImportParticipantsModal';
+import { postSpamBotCheck } from '@/lib/api/bd-accounts';
+import { useAuthStore } from '@/lib/stores/auth-store';
+import { canManageCampaignLifecycle } from '@/lib/permissions';
 import { SequenceBuilderCanvas } from '@/components/campaigns/SequenceBuilderCanvas';
 import { CampaignAudienceSchedule } from '@/components/campaigns/CampaignAudienceSchedule';
+import { CampaignSendingAccountsOverview } from '@/components/campaigns/CampaignSendingAccountsOverview';
 import { CampaignParticipantsTable } from '@/components/campaigns/CampaignParticipantsTable';
 import { Modal } from '@/components/ui/Modal';
 import { clsx } from 'clsx';
@@ -55,7 +75,7 @@ import { safeGetItem, safeSetItem } from '@/lib/safe-storage';
 
 const PRELAUNCH_SEEN_KEY = 'getsale-campaign-prelaunch-seen';
 
-type Tab = 'overview' | 'participants' | 'sequence' | 'audience';
+type Tab = 'overview' | 'participants' | 'sequence' | 'audience' | 'settings';
 
 /** Форматирует длительность динамически: минуты, часы, дни, недели. */
 function formatDuration(start: string, end: string, t: (key: string, opts?: Record<string, unknown>) => string): string {
@@ -145,10 +165,15 @@ export default function CampaignDetailPage() {
   const { t } = useTranslation();
   const rawId = params?.id;
   const id = (Array.isArray(rawId) ? rawId[0] : rawId) ?? '';
-  const tabFromUrl = (searchParams?.get('tab') || 'overview') as Tab;
-  const [tab, setTab] = useState<Tab>(
-    ['overview', 'sequence', 'audience', 'participants'].includes(tabFromUrl) ? tabFromUrl : 'overview'
-  );
+  const rawTab = searchParams?.get('tab') ?? 'overview';
+  const [tab, setTab] = useState<Tab>(() => {
+    if (rawTab === 'sends') return 'participants';
+    if (rawTab === 'audience') return 'settings';
+    if (['overview', 'sequence', 'settings', 'participants'].includes(rawTab)) {
+      return rawTab as Tab;
+    }
+    return 'overview';
+  });
   const [campaign, setCampaign] = useState<CampaignWithDetails | null>(null);
   const [stats, setStats] = useState<CampaignStats | null>(null);
   const [analytics, setAnalytics] = useState<CampaignAnalytics | null>(null);
@@ -157,8 +182,20 @@ export default function CampaignDetailPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [showPreLaunchModal, setShowPreLaunchModal] = useState(false);
   const [pendingStartAfterModal, setPendingStartAfterModal] = useState(false);
+  const [showAddParticipantsModal, setShowAddParticipantsModal] = useState(false);
+  const [addParticipantIdsText, setAddParticipantIdsText] = useState('');
+  const [addParticipantsLoading, setAddParticipantsLoading] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [participantsRefresh, setParticipantsRefresh] = useState(0);
+  const user = useAuthStore((s) => s.user);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
   const campaignRef = useRef<CampaignWithDetails | null>(null);
   campaignRef.current = campaign ?? null;
+
+  const canLifecycle =
+    campaign != null && canManageCampaignLifecycle(user?.role, user?.id, campaign.created_by_user_id);
 
   const load = async () => {
     if (!id) return;
@@ -196,7 +233,15 @@ export default function CampaignDetailPage() {
 
   useEffect(() => {
     const tabParam = searchParams?.get('tab');
-    if (tabParam === 'sequence' || tabParam === 'overview' || tabParam === 'audience' || tabParam === 'participants') setTab(tabParam);
+    if (
+      tabParam === 'sequence' ||
+      tabParam === 'overview' ||
+      tabParam === 'audience' ||
+      tabParam === 'settings' ||
+      tabParam === 'participants' ||
+      tabParam === 'sends'
+    )
+      setTab(tabParam === 'audience' ? 'settings' : tabParam === 'sends' ? 'participants' : tabParam);
   }, [searchParams]);
 
   useEffect(() => {
@@ -215,9 +260,9 @@ export default function CampaignDetailPage() {
     setActionLoading(true);
     try {
       const aud = campaign.target_audience || {};
-      const contactIds = Array.isArray(aud.contactIds) ? aud.contactIds : [];
-      if (aud.enrichContactsBeforeStart && contactIds.length > 0) {
+      if (aud.enrichContactsBeforeStart && campaign.selected_contacts && campaign.selected_contacts.length > 0) {
         try {
+          const contactIds = campaign.selected_contacts.map((c) => c.id);
           await enrichContactsFromTelegram(contactIds, aud.bdAccountIds?.[0] ?? aud.bdAccountId);
         } catch (e) {
           reportWarning('Enrich contacts before start failed', { component: 'CampaignPage', error: e });
@@ -277,6 +322,114 @@ export default function CampaignDetailPage() {
     }
   };
 
+  const handleSaveName = async () => {
+    if (!id || !campaign) return;
+    const nm = nameDraft.trim();
+    if (!nm) return;
+    if (nm === campaign.name) {
+      setEditingName(false);
+      return;
+    }
+    setActionLoading(true);
+    try {
+      await updateCampaign(id, { name: nm });
+      setEditingName(false);
+      await load();
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'renameCampaign' });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDuplicateCampaign = async () => {
+    if (!id || !confirm(t('campaigns.duplicateCampaignConfirm'))) return;
+    setActionLoading(true);
+    try {
+      const created = await duplicateCampaign(id);
+      window.location.href = `/dashboard/campaigns/${created.id}`;
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'duplicateCampaign' });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleResetProgress = async () => {
+    if (!id || !confirm(t('campaigns.resetProgressConfirm'))) return;
+    setActionLoading(true);
+    try {
+      await resetCampaignProgress(id);
+      await load();
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'resetCampaignProgress' });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDeleteCampaign = async () => {
+    if (!id || !campaign) return;
+    if (!confirm(t('campaigns.deleteCampaignConfirm', { name: campaign.name }))) return;
+    setActionLoading(true);
+    try {
+      await deleteCampaign(id);
+      window.location.href = '/dashboard/campaigns';
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'deleteCampaign' });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleExportCSV = async () => {
+    if (!id) return;
+    setExportLoading(true);
+    try {
+      const rows = await fetchCampaignParticipantsExport(id);
+      const header = [
+        t('campaigns.exportFirstName', { defaultValue: 'Имя' }),
+        t('campaigns.exportLastName', { defaultValue: 'Фамилия' }),
+        'Username',
+        t('campaigns.exportPhone', { defaultValue: 'Телефон' }),
+        'Email',
+        t('campaigns.status', { defaultValue: 'Статус' }),
+        t('campaigns.exportSentAt', { defaultValue: 'Дата отправки' }),
+        t('campaigns.exportSender', { defaultValue: 'Аккаунт-отправитель' }),
+        t('campaigns.exportRead', { defaultValue: 'Прочитано' }),
+        t('campaigns.exportRepliedAt', { defaultValue: 'Дата ответа' }),
+        t('campaigns.exportFirstReply', { defaultValue: 'Текст первого ответа' }),
+      ].join(';');
+      const csvRows = rows.map((r) =>
+        [
+          r.first_name ?? '',
+          r.last_name ?? '',
+          r.username ?? '',
+          r.phone ?? '',
+          r.email ?? '',
+          r.display_status ?? r.status ?? '',
+          r.first_sent_at ? new Date(r.first_sent_at).toLocaleString() : '',
+          r.sender_account ?? '',
+          r.is_read ? t('common.yes', { defaultValue: 'да' }) : t('common.no', { defaultValue: 'нет' }),
+          r.replied_at ? new Date(r.replied_at).toLocaleString() : '',
+          (r.first_reply_text ?? '').replace(/[\r\n;]/g, ' '),
+        ].join(';'),
+      );
+      const csv = [header, ...csvRows].join('\r\n');
+      const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `campaign-${id.slice(0, 8)}-export.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'exportCSV' });
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
   if (loading && !campaign) {
     return (
       <div className="flex items-center justify-center min-h-[320px]">
@@ -300,7 +453,45 @@ export default function CampaignDetailPage() {
   const canStart = campaign.status === 'draft' || campaign.status === 'paused' || campaign.status === 'completed';
   const canPause = campaign.status === 'active';
   const canStop = campaign.status === 'active' || campaign.status === 'paused';
-  const isCompleted = campaign.status === 'completed';
+  const canShowResetProgress =
+    canLifecycle &&
+    (campaign.status !== 'draft' || (campaign.total_participants ?? 0) > 0);
+  const canAddParticipants =
+    campaign.status === 'draft' ||
+    campaign.status === 'paused' ||
+    campaign.status === 'active' ||
+    campaign.status === 'completed';
+
+  const submitAddParticipants = async () => {
+    if (!id) return;
+    const raw = addParticipantIdsText
+      .split(/[\s,;]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const ids = [...new Set(raw)];
+    if (ids.length === 0) return;
+    setAddParticipantsLoading(true);
+    try {
+      const { conflicts } = await checkCampaignAudienceConflicts(id, ids);
+      const risky = conflicts.filter((c) => !c.is_current_campaign || c.last_sent_at != null);
+      const uniqueRiskyContacts = new Set(risky.map((c) => c.contact_id));
+      if (uniqueRiskyContacts.size > 0) {
+        const ok = window.confirm(t('campaigns.audienceConflictsHint', { count: uniqueRiskyContacts.size }));
+        if (!ok) {
+          setAddParticipantsLoading(false);
+          return;
+        }
+      }
+      await addCampaignParticipants(id, ids);
+      setShowAddParticipantsModal(false);
+      setAddParticipantIdsText('');
+      await load();
+    } catch (e) {
+      reportError(e, { component: 'CampaignPage', action: 'addParticipants' });
+    } finally {
+      setAddParticipantsLoading(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -317,10 +508,48 @@ export default function CampaignDetailPage() {
             <div className="rounded-xl bg-primary/10 p-3">
               <Send className="w-8 h-8 text-primary" />
             </div>
-            <div>
-              <h1 className="font-heading text-2xl font-bold text-foreground tracking-tight">
-                {campaign.name}
-              </h1>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                {editingName ? (
+                  <>
+                    <input
+                      value={nameDraft}
+                      onChange={(e) => setNameDraft(e.target.value)}
+                      className="font-heading text-2xl font-bold text-foreground tracking-tight max-w-full min-w-[200px] px-2 py-1 rounded-lg border border-border bg-background"
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void handleSaveName();
+                        if (e.key === 'Escape') setEditingName(false);
+                      }}
+                    />
+                    <Button size="sm" onClick={() => void handleSaveName()} disabled={actionLoading || !nameDraft.trim()}>
+                      {t('campaigns.renameCampaignSave')}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setEditingName(false)} disabled={actionLoading}>
+                      {t('common.cancel')}
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <h1 className="font-heading text-2xl font-bold text-foreground tracking-tight truncate">
+                      {campaign.name}
+                    </h1>
+                    {canLifecycle && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNameDraft(campaign.name);
+                          setEditingName(true);
+                        }}
+                        className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted"
+                        aria-label={t('campaigns.renameCampaign')}
+                      >
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
               <span
                 className={clsx(
                   'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium',
@@ -335,14 +564,41 @@ export default function CampaignDetailPage() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {canLifecycle && (
+              <>
+                <Button variant="outline" onClick={() => void handleDuplicateCampaign()} disabled={actionLoading}>
+                  <Copy className="w-4 h-4 mr-2" />
+                  {t('campaigns.duplicateCampaign')}
+                </Button>
+                {canShowResetProgress && (
+                  <Button variant="outline" onClick={() => void handleResetProgress()} disabled={actionLoading}>
+                    <RotateCcw className="w-4 h-4 mr-2" />
+                    {t('campaigns.resetProgress')}
+                  </Button>
+                )}
+                {campaign.status !== 'active' && (
+                  <Button
+                    variant="outline"
+                    className="text-destructive border-destructive/30 hover:bg-destructive/10"
+                    onClick={() => void handleDeleteCampaign()}
+                    disabled={actionLoading}
+                  >
+                    <Trash2 className="w-4 h-4 mr-2" />
+                    {t('campaigns.deleteCampaign')}
+                  </Button>
+                )}
+              </>
+            )}
+            {canAddParticipants && (
+              <Button variant="outline" onClick={() => setShowAddParticipantsModal(true)} disabled={actionLoading}>
+                <UserPlus className="w-4 h-4 mr-2" />
+                {t('campaigns.addParticipants', { defaultValue: 'Add participants' })}
+              </Button>
+            )}
             {canStart && (
               <Button onClick={handleStart} disabled={actionLoading}>
                 {actionLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 mr-2" />}
-                {isCompleted
-                  ? t('campaigns.startAgain')
-                  : campaign.status === 'paused'
-                    ? t('campaigns.resumeCampaign')
-                    : t('campaigns.startCampaign')}
+                {campaign.status === 'draft' ? t('campaigns.startCampaign') : t('campaigns.resumeCampaign')}
               </Button>
             )}
             {canPause && (
@@ -376,15 +632,15 @@ export default function CampaignDetailPage() {
         </button>
         <button
           type="button"
-          onClick={() => setTab('audience')}
+          onClick={() => setTab('settings')}
           className={clsx(
             'px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors',
-            tab === 'audience'
+            tab === 'settings'
               ? 'bg-card text-foreground border border-border border-b-0 -mb-px'
               : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
           )}
         >
-          {t('campaigns.audience')}
+          {t('campaigns.settings', { defaultValue: 'Settings' })}
         </button>
         <button
           type="button"
@@ -424,6 +680,42 @@ export default function CampaignDetailPage() {
             </button>
           </div>
 
+          {campaign?.bd_accounts &&
+            campaign.bd_accounts.some((a) => a.spamRestrictedAt) && (
+              <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-900 dark:text-red-100">
+                <p className="font-medium">{t('campaigns.spamBotBanner')}</p>
+                <div className="mt-2 flex flex-wrap gap-2 items-center">
+                  {campaign.bd_accounts
+                    .filter((a) => a.spamRestrictedAt)
+                    .map((a) => (
+                      <Button
+                        key={a.id}
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => void postSpamBotCheck(a.id).then(() => load())}
+                      >
+                        {t('campaigns.spamBotRecheckNamed', { name: a.displayName })}
+                      </Button>
+                    ))}
+                  <Link
+                    href={`/dashboard/bd-accounts/${campaign.bd_accounts.find((a) => a.spamRestrictedAt)?.id ?? ''}`}
+                    className="text-sm font-medium text-primary hover:underline"
+                  >
+                    {t('campaigns.spamBotGoToAccount')}
+                  </Link>
+                </div>
+              </div>
+            )}
+
+          {campaign?.bd_accounts && campaign.bd_accounts.length > 0 && (
+            <CampaignSendingAccountsOverview
+              accounts={campaign.bd_accounts}
+              campaignId={id}
+              onChanged={() => void load()}
+            />
+          )}
+
           {stats && (
             <>
               {isActive && (
@@ -436,9 +728,9 @@ export default function CampaignDetailPage() {
                 </div>
               )}
 
-              {(campaign?.status === 'active' && (stats.byStatus?.failed ?? 0) > 0) && (
+              {(campaign?.status === 'active' && (stats.byPhase?.failed ?? stats.byStatus?.failed ?? 0) > 0) && (
                 <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
-                  {t('campaigns.deliveryErrorsBanner', { count: stats.byStatus.failed })}
+                  {t('campaigns.deliveryErrorsBanner', { count: stats.byPhase?.failed ?? stats.byStatus?.failed ?? 0 })}
                   {stats.error_summary?.sample && (
                     <p className="mt-2 font-medium text-amber-900 dark:text-amber-100">{stats.error_summary.sample}</p>
                   )}
@@ -592,7 +884,7 @@ export default function CampaignDetailPage() {
                       </p>
                       <p className="text-sm text-muted-foreground mt-1">
                         {t('campaigns.conversionSubtitle', {
-                          replied: stats.byStatus?.replied ?? 0,
+                          replied: stats.byPhase?.replied ?? stats.byStatus?.replied ?? 0,
                           total: stats.total,
                         })}
                       </p>
@@ -613,19 +905,20 @@ export default function CampaignDetailPage() {
                   </div>
                   <div className="bg-card p-4">
                     <p className="text-xs text-muted-foreground mb-0.5">{t('campaigns.replied')}</p>
-                    <p className="text-xl font-semibold text-foreground">{stats.byStatus?.replied ?? 0}</p>
+                    <p className="text-xl font-semibold text-foreground">{stats.byPhase?.replied ?? stats.byStatus?.replied ?? 0}</p>
                   </div>
                 </div>
               </div>
 
-              {/* Доп. статусы: ожидает, остановлено — одна строка */}
               <div className="flex flex-wrap gap-3 text-sm">
                 <span className="text-muted-foreground">
-                  {t('campaigns.statusPending')}: <strong className="text-foreground">{stats.byStatus?.pending ?? 0}</strong>
+                  {t('campaigns.waiting')}: <strong className="text-foreground">{stats.byPhase?.waiting ?? stats.byStatus?.pending ?? 0}</strong>
                 </span>
-                <span className="text-muted-foreground">
-                  {t('campaigns.stopped')}: <strong className="text-foreground">{stats.byStatus?.stopped ?? 0}</strong>
-                </span>
+                {(stats.byPhase?.failed ?? stats.byStatus?.failed ?? 0) > 0 && (
+                  <span className="text-muted-foreground">
+                    {t('campaigns.statusFailed')}: <strong className="text-foreground">{stats.byPhase?.failed ?? stats.byStatus?.failed ?? 0}</strong>
+                  </span>
+                )}
               </div>
             </>
           )}
@@ -682,26 +975,32 @@ export default function CampaignDetailPage() {
       )}
 
       {tab === 'participants' && (
+        <div className="space-y-4">
+        <div className="flex flex-wrap gap-2 items-center">
+          {canAddParticipants && (
+            <Button variant="outline" onClick={() => setShowImportModal(true)} disabled={actionLoading}>
+              <Upload className="w-4 h-4 mr-2" />
+              {t('campaigns.importParticipants', { defaultValue: 'Import' })}
+            </Button>
+          )}
+          <Button variant="outline" onClick={handleExportCSV} disabled={exportLoading}>
+            {exportLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Download className="w-4 h-4 mr-2" />}
+            {t('campaigns.exportCSV', { defaultValue: 'Export CSV' })}
+          </Button>
+        </div>
         <CampaignParticipantsTable
           campaignId={id}
           campaign={campaign}
           isActive={isActive}
+          refreshSignal={participantsRefresh}
           onRefresh={load}
           onRemoveContact={
             id && (campaign?.status === 'draft' || campaign?.status === 'paused')
               ? async (contactId) => {
-                  const c = campaignRef.current;
-                  if (!c?.target_audience) return;
                   try {
-                    const current = Array.isArray(c.target_audience.contactIds) ? c.target_audience.contactIds : [];
-                    const next = current.filter((cid) => cid !== contactId);
-                    await updateCampaign(id, {
-                      targetAudience: {
-                        ...c.target_audience,
-                        contactIds: next.length > 0 ? next : [],
-                      },
-                    });
+                    await removeCampaignParticipant(id, contactId);
                     await load();
+                    setParticipantsRefresh((n) => n + 1);
                   } catch (e) {
                     reportError(e, { component: 'CampaignPage', action: 'removeParticipant' });
                   }
@@ -709,18 +1008,12 @@ export default function CampaignDetailPage() {
               : undefined
           }
           onRemoveAll={
-            id && (campaign?.status === 'draft' || campaign?.status === 'paused') && (campaign.target_audience?.contactIds?.length ?? 0) > 0
+            id && (campaign?.status === 'draft' || campaign?.status === 'paused')
               ? async () => {
-                  const c = campaignRef.current;
-                  if (!c?.target_audience) return;
                   try {
-                    await updateCampaign(id, {
-                      targetAudience: {
-                        ...c.target_audience,
-                        contactIds: [],
-                      },
-                    });
+                    await removeAllCampaignParticipants(id);
                     await load();
+                    setParticipantsRefresh((n) => n + 1);
                   } catch (e) {
                     reportError(e, { component: 'CampaignPage', action: 'removeAllParticipants' });
                   }
@@ -728,9 +1021,10 @@ export default function CampaignDetailPage() {
               : undefined
           }
         />
+        </div>
       )}
 
-      {tab === 'audience' && (
+      {tab === 'settings' && (
         <CampaignAudienceSchedule campaignId={id} campaign={campaign} onUpdate={load} />
       )}
 
@@ -743,6 +1037,44 @@ export default function CampaignDetailPage() {
           onUpdate={load}
         />
       )}
+
+      <Modal
+        isOpen={showAddParticipantsModal}
+        onClose={() => !addParticipantsLoading && setShowAddParticipantsModal(false)}
+        title={t('campaigns.addParticipantsTitle', { defaultValue: 'Add participants' })}
+      >
+        <div className="px-6 py-4 space-y-3">
+          <p className="text-sm text-muted-foreground">
+            {t('campaigns.addParticipantsHint', {
+              defaultValue: 'Contact IDs (UUID), one per line or comma-separated. Duplicates are skipped. Completed campaigns become active when new participants are added.',
+            })}
+          </p>
+          <textarea
+            value={addParticipantIdsText}
+            onChange={(e) => setAddParticipantIdsText(e.target.value)}
+            rows={6}
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono"
+            placeholder="550e8400-e29b-41d4-a716-446655440000"
+            disabled={addParticipantsLoading}
+          />
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setShowAddParticipantsModal(false)} disabled={addParticipantsLoading}>
+              {t('common.cancel')}
+            </Button>
+            <Button onClick={submitAddParticipants} disabled={addParticipantsLoading || !addParticipantIdsText.trim()}>
+              {addParticipantsLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              {t('campaigns.addParticipants', { defaultValue: 'Add participants' })}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <ImportParticipantsModal
+        campaignId={id}
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onImported={() => { void load(); setParticipantsRefresh((n) => n + 1); }}
+      />
 
       <Modal
         isOpen={showPreLaunchModal}

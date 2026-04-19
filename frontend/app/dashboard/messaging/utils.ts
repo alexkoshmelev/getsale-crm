@@ -71,10 +71,98 @@ export function mergeAndSortChatsByChannelId(chats: Chat[]): Chat[] {
   });
 }
 
+function inferPeerTypeForDedupe(peerType: string | null | undefined, channelId: string): string {
+  const cid = channelId.trim();
+  if (!cid) return peerType ?? 'user';
+  const isNegativeNumeric = /^-?\d+$/.test(cid) && parseInt(cid, 10) < 0;
+  if (peerType === 'chat' && !isNegativeNumeric) return 'user';
+  return peerType ?? 'user';
+}
+
+function shouldMergeTelegramDmChat(chat: Chat): boolean {
+  const pt = inferPeerTypeForDedupe(chat.peer_type, chat.channel_id);
+  if (pt !== 'user') return false;
+  const cid = String(chat.channel_id || '').trim();
+  if (!cid) return false;
+  if (/^-?\d+$/.test(cid) && parseInt(cid, 10) < 0) return false;
+  return true;
+}
+
+function dedupeTelegramIdentityKey(chat: Chat): string | null {
+  const tg = chat.telegram_id?.trim() ?? '';
+  if (tg !== '') return `tg:${tg}`;
+  const contactId = chat.contact_id?.trim() ?? '';
+  if (contactId !== '') return `c:${contactId}`;
+  return null;
+}
+
+/**
+ * Collapse duplicate sidebar rows for the same Telegram DM (aliases of channel_id) when
+ * telegram_id or contact_id matches. Groups (negative channel_id) are unchanged.
+ */
+export function mergeChatsByTelegramIdentity(chats: Chat[]): Chat[] {
+  const passthrough: Chat[] = [];
+  const groups = new Map<string, Chat[]>();
+  for (const chat of chats) {
+    if (!shouldMergeTelegramDmChat(chat)) {
+      passthrough.push(chat);
+      continue;
+    }
+    const key = dedupeTelegramIdentityKey(chat);
+    if (!key) {
+      passthrough.push(chat);
+      continue;
+    }
+    const list = groups.get(key) ?? [];
+    list.push(chat);
+    groups.set(key, list);
+  }
+  const merged: Chat[] = [];
+  for (const [, group] of groups) {
+    if (group.length === 1) {
+      merged.push(group[0]!);
+      continue;
+    }
+    let winner = group[0]!;
+    let winnerMs = new Date(winner.last_message_at).getTime();
+    for (let i = 1; i < group.length; i++) {
+      const g = group[i]!;
+      const ms = new Date(g.last_message_at).getTime();
+      if (ms > winnerMs) {
+        winner = g;
+        winnerMs = ms;
+      } else if (ms === winnerMs) {
+        const wNum = /^\d+$/.test(String(winner.channel_id).trim());
+        const gNum = /^\d+$/.test(String(g.channel_id).trim());
+        if (gNum && !wNum) winner = g;
+      }
+    }
+    const sumUnread = group.reduce((acc, x) => acc + (x.unread_count || 0), 0);
+    const out: Chat = { ...winner, unread_count: sumUnread };
+    if (!out.username?.trim()) {
+      const withUsername = group.find((g) => g.username?.trim());
+      if (withUsername?.username) out.username = withUsername.username;
+    }
+    if (!out.contact_id?.trim()) {
+      const withContact = group.find((g) => g.contact_id?.trim());
+      if (withContact?.contact_id) out.contact_id = withContact.contact_id;
+    }
+    merged.push(out);
+  }
+  const combined = [...passthrough, ...merged];
+  return combined.sort((a, b) => {
+    const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+    const tb = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+    if (Number.isNaN(ta)) return 1;
+    if (Number.isNaN(tb)) return -1;
+    return tb - ta;
+  });
+}
+
 /** Map raw chats from API to Chat[] (map + merge + sort). */
 export function mapRawChatsToChatList(rawChats: Record<string, unknown>[]): Chat[] {
   const mapped = rawChats.map((chat) => mapRawChatToChat(chat));
-  return mergeAndSortChatsByChannelId(mapped);
+  return mergeChatsByTelegramIdentity(mergeAndSortChatsByChannelId(mapped));
 }
 
 /** Map a single new-lead row from /api/messaging/new-leads to Chat. */

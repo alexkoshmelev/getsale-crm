@@ -1,17 +1,16 @@
 import { vi } from 'vitest';
 
-/**
- * Creates a mock Redis client for testing.
- * - get, set, del use an in-memory Map for storage
- * - Useful for testing caching or rate-limiting logic
- */
-export function createMockRedis(): {
+export interface MockRedis {
   get: ReturnType<typeof vi.fn>;
   set: ReturnType<typeof vi.fn>;
   del: ReturnType<typeof vi.fn>;
+  incr: ReturnType<typeof vi.fn>;
+  checkRateLimit: ReturnType<typeof vi.fn>;
   getStorage: () => Map<string, string>;
   clearStorage: () => void;
-} {
+}
+
+export function createMockRedis(): MockRedis {
   const storage = new Map<string, string>();
 
   const get = vi.fn(async (key: string): Promise<string | null> => {
@@ -26,10 +25,16 @@ export function createMockRedis(): {
     storage.delete(key);
   });
 
+  const incr = vi.fn().mockResolvedValue(1);
+
+  const checkRateLimit = vi.fn().mockResolvedValue(true);
+
   return {
     get,
     set,
     del,
+    incr,
+    checkRateLimit,
     getStorage: () => storage,
     clearStorage: () => storage.clear(),
   };

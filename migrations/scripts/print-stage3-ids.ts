@@ -8,7 +8,7 @@ import type { Knex } from 'knex';
 
 const connection =
   process.env.DATABASE_URL ||
-  `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5432/postgres`;
+  `postgresql://postgres:${process.env.POSTGRES_PASSWORD || 'postgres_dev'}@localhost:5433/postgres`;
 
 const db = knex({
   client: 'pg',

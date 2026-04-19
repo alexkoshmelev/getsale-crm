@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { useTranslation } from 'react-i18next';
+import { canActOnBdAccountRow } from '@/lib/permissions';
 import {
   listBdAccounts,
   getBdAccountStatus,
@@ -13,7 +14,7 @@ import {
 } from '@/lib/api/bd-accounts';
 import { useAuthStore } from '@/lib/stores/auth-store';
 import { useWebSocketContext } from '@/lib/contexts/websocket-context';
-import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Power, PowerOff, ChevronRight } from 'lucide-react';
+import { Plus, CheckCircle2, XCircle, Loader2, MessageSquare, Settings, Trash2, Power, PowerOff, ChevronRight, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { AccountAvatar } from './components/AccountAvatar';
@@ -30,8 +31,7 @@ export default function BDAccountsPage() {
   const { user: currentUser } = useAuthStore();
   const { subscribe, unsubscribe, on, off, isConnected } = useWebSocketContext();
   const [accounts, setAccounts] = useState<BDAccount[]>([]);
-  const canManageAccount = (account: BDAccount) =>
-    (currentUser?.role?.toLowerCase() !== 'bidi') || account.is_owner === true;
+  const canManageAccount = (account: BDAccount) => canActOnBdAccountRow(currentUser?.role, account);
   const [loading, setLoading] = useState(true);
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
   const [dialogs, setDialogs] = useState<Dialog[]>([]);
@@ -145,17 +145,25 @@ export default function BDAccountsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">BD Аккаунты</h1>
           <p className="text-gray-500 dark:text-gray-400 mt-1">
             Управление Telegram аккаунтами для отправки сообщений
           </p>
         </div>
-        <Button onClick={() => connect.setShowConnectModal(true)}>
-          <Plus className="w-4 h-4 mr-2" />
-          Подключить аккаунт
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            href="/dashboard/bd-accounts/health"
+            className="text-sm font-medium text-primary hover:underline"
+          >
+            {t('bdAccountHealth.pageTitle')}
+          </Link>
+          <Button onClick={() => connect.setShowConnectModal(true)}>
+            <Plus className="w-4 h-4 mr-2" />
+            Подключить аккаунт
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -180,13 +188,25 @@ export default function BDAccountsPage() {
                 </div>
                 <ChevronRight className="w-5 h-5 text-gray-400 shrink-0" />
               </Link>
-              {resolveConnectionState(account) === 'connected' ? (
-                <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0" />
-              ) : (resolveConnectionState(account) === 'reauth_required') ? (
-                <XCircle className="w-5 h-5 text-red-500 shrink-0" />
-              ) : (
-                <XCircle className="w-5 h-5 text-gray-400 shrink-0" />
-              )}
+              {(() => {
+                const floodUntil = account.flood_wait_until ? new Date(account.flood_wait_until).getTime() : 0;
+                const inFlood = floodUntil > Date.now();
+                const conn = resolveConnectionState(account);
+                if (inFlood) {
+                  return (
+                    <span title="FLOOD_WAIT" className="shrink-0 inline-flex">
+                      <AlertTriangle className="w-5 h-5 text-amber-500" aria-hidden />
+                    </span>
+                  );
+                }
+                if (conn === 'connected') {
+                  return <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0" />;
+                }
+                if (conn === 'reauth_required') {
+                  return <XCircle className="w-5 h-5 text-red-500 shrink-0" />;
+                }
+                return <XCircle className="w-5 h-5 text-gray-400 shrink-0" />;
+              })()}
             </div>
 
             <div className="space-y-2 mb-4">

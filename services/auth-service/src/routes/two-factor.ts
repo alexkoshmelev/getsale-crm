@@ -1,27 +1,31 @@
-import { Router } from 'express';
+import { FastifyInstance, FastifyReply } from 'fastify';
+import '@fastify/cookie';
 import * as speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
 import bcrypt from 'bcryptjs';
 import { randomBytes, randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
-import type { RedisClient } from '@getsale/utils';
+import { AppError, ErrorCodes } from '@getsale/service-framework';
+import { RedisClient } from '@getsale/cache';
+import { TwoFactorVerifySetupSchema, TwoFactorDisableSchema, TwoFactorValidateSchema } from '../validation';
 import {
-  AuTwoFactorVerifySetupSchema,
-  AuTwoFactorDisableSchema,
-  AuTwoFactorValidateSchema,
-} from '../validation';
-import {
-  extractBearerToken,
+  extractBearerTokenFromRequest,
   signAccessToken,
   signRefreshToken,
   hashRefreshToken,
   verifyTempToken,
-  getClientIp,
+  getClientIpFromRequest,
+  getRoleForWorkspace,
 } from '../helpers';
-import { AUTH_COOKIE_ACCESS, REFRESH_EXPIRY_MS } from '../cookies';
-import { checkRateLimit, setAuthCookiesAndRespond } from './auth';
+import {
+  AUTH_COOKIE_ACCESS,
+  AUTH_COOKIE_REFRESH,
+  AUTH_COOKIE_OPTS,
+  ACCESS_MAX_AGE_SEC,
+  REFRESH_MAX_AGE_SEC,
+  REFRESH_EXPIRY_MS,
+} from '../cookies';
 
 const VALIDATE_RATE_LIMIT = 5;
 const VALIDATE_RATE_WINDOW_MS = 15 * 60 * 1000;
@@ -32,11 +36,6 @@ interface Deps {
   pool: Pool;
   log: Logger;
   redis: RedisClient;
-}
-
-function authenticateRequest(req: import('express').Request): { userId: string; organizationId: string; role: string } {
-  const payload = extractBearerToken(req, req.cookies?.[AUTH_COOKIE_ACCESS]);
-  return { userId: payload.userId, organizationId: payload.organizationId, role: payload.role || '' };
 }
 
 function generateRecoveryCodes(): string[] {
@@ -53,11 +52,28 @@ function generateRecoveryCodes(): string[] {
   return codes;
 }
 
-export function twoFactorRouter({ pool, log, redis }: Deps): Router {
-  const router = Router();
+function authenticateRequest(request: Parameters<typeof extractBearerTokenFromRequest>[0]): { userId: string; organizationId: string; role: string } {
+  const payload = extractBearerTokenFromRequest(request, AUTH_COOKIE_ACCESS);
+  return { userId: payload.userId, organizationId: payload.organizationId, role: payload.role || '' };
+}
 
-  router.post('/setup', asyncHandler(async (req, res) => {
-    const { userId } = authenticateRequest(req);
+function setCookiesAndSend(
+  reply: FastifyReply,
+  accessToken: string,
+  refreshToken: string,
+  user: { id: string; email: string; organizationId: string; role: string },
+) {
+  reply
+    .setCookie(AUTH_COOKIE_ACCESS, accessToken, { ...AUTH_COOKIE_OPTS, maxAge: ACCESS_MAX_AGE_SEC })
+    .setCookie(AUTH_COOKIE_REFRESH, refreshToken, { ...AUTH_COOKIE_OPTS, maxAge: REFRESH_MAX_AGE_SEC })
+    .send({ user: { id: user.id, email: user.email, organizationId: user.organizationId, role: user.role } });
+}
+
+export function registerTwoFactorRoutes(app: FastifyInstance, deps: Deps): void {
+  const { pool, log, redis } = deps;
+
+  app.post('/api/auth/2fa/setup', async (request) => {
+    const { userId } = authenticateRequest(request);
 
     const secret = speakeasy.generateSecret({ name: 'GetSale CRM', issuer: 'GetSale' });
     if (!secret.otpauth_url) {
@@ -67,12 +83,12 @@ export function twoFactorRouter({ pool, log, redis }: Deps): Router {
     const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
 
     log.info({ message: '2FA setup initiated', entity_type: 'user', entity_id: userId });
-    res.json({ secret: secret.base32, qrCodeUrl });
-  }));
+    return { secret: secret.base32, qrCodeUrl };
+  });
 
-  router.post('/verify-setup', validate(AuTwoFactorVerifySetupSchema), asyncHandler(async (req, res) => {
-    const { userId } = authenticateRequest(req);
-    const { token, secret } = req.body;
+  app.post('/api/auth/2fa/verify-setup', async (request) => {
+    const { userId } = authenticateRequest(request);
+    const { token, secret } = TwoFactorVerifySetupSchema.parse(request.body);
 
     const verified = speakeasy.totp.verify({
       secret,
@@ -115,12 +131,12 @@ export function twoFactorRouter({ pool, log, redis }: Deps): Router {
     }
 
     log.info({ message: '2FA enabled', entity_type: 'user', entity_id: userId });
-    res.json({ enabled: true, recoveryCodes });
-  }));
+    return { enabled: true, recoveryCodes };
+  });
 
-  router.post('/disable', validate(AuTwoFactorDisableSchema), asyncHandler(async (req, res) => {
-    const { userId } = authenticateRequest(req);
-    const { token } = req.body;
+  app.post('/api/auth/2fa/disable', async (request) => {
+    const { userId } = authenticateRequest(request);
+    const { token } = TwoFactorDisableSchema.parse(request.body);
 
     const userRow = await pool.query(
       'SELECT mfa_secret, mfa_enabled FROM users WHERE id = $1',
@@ -163,19 +179,21 @@ export function twoFactorRouter({ pool, log, redis }: Deps): Router {
     }
 
     log.info({ message: '2FA disabled', entity_type: 'user', entity_id: userId });
-    res.json({ disabled: true });
-  }));
+    return { disabled: true };
+  });
 
-  router.post('/validate', validate(AuTwoFactorValidateSchema), asyncHandler(async (req, res) => {
-    await checkRateLimit(redis, {
-      keyPrefix: 'auth_rate:2fa_validate',
-      clientId: getClientIp(req) || 'unknown',
-      limit: VALIDATE_RATE_LIMIT,
-      windowMs: VALIDATE_RATE_WINDOW_MS,
-      message: 'Too many 2FA validation attempts. Try again later.',
-    });
+  app.post('/api/auth/2fa/validate', async (request, reply) => {
+    const clientIp = getClientIpFromRequest(request) || 'unknown';
+    const allowed = await redis.checkRateLimit(
+      `auth_rate:2fa_validate:${clientIp}`,
+      VALIDATE_RATE_LIMIT,
+      VALIDATE_RATE_WINDOW_MS,
+    );
+    if (!allowed) {
+      throw new AppError(429, 'Too many 2FA validation attempts. Try again later.', ErrorCodes.RATE_LIMITED);
+    }
 
-    const { tempToken, token, recoveryCode } = req.body;
+    const { tempToken, token, recoveryCode } = TwoFactorValidateSchema.parse(request.body);
 
     let decoded: { userId: string };
     try {
@@ -225,10 +243,11 @@ export function twoFactorRouter({ pool, log, redis }: Deps): Router {
       throw new AppError(401, 'Invalid verification code', ErrorCodes.UNAUTHORIZED);
     }
 
+    const role = await getRoleForWorkspace(pool, user.id, user.organization_id, user.role);
     const accessToken = signAccessToken({
       userId: user.id,
       organizationId: user.organization_id,
-      role: user.role,
+      role,
     });
     const refreshToken = signRefreshToken(user.id);
     const tokenHash = hashRefreshToken(refreshToken);
@@ -251,13 +270,11 @@ export function twoFactorRouter({ pool, log, redis }: Deps): Router {
 
     log.info({ message: '2FA validation successful', entity_type: 'user', entity_id: user.id });
 
-    setAuthCookiesAndRespond(res, accessToken, refreshToken, {
+    setCookiesAndSend(reply, accessToken, refreshToken, {
       id: user.id,
       email: user.email,
       organizationId: user.organization_id,
-      role: user.role,
+      role,
     });
-  }));
-
-  return router;
+  });
 }

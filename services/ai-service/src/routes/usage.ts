@@ -1,6 +1,6 @@
-import { Router } from 'express';
+import { FastifyInstance } from 'fastify';
 import { Logger } from '@getsale/logger';
-import { asyncHandler } from '@getsale/service-core';
+import { requireUser } from '@getsale/service-framework';
 import { AIRateLimiter } from '../rate-limiter';
 
 interface Deps {
@@ -8,14 +8,13 @@ interface Deps {
   rateLimiter: AIRateLimiter;
 }
 
-export function usageRouter({ rateLimiter }: Deps): Router {
-  const router = Router();
-
-  router.get('/usage', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
-    const usage = await rateLimiter.getUsage(organizationId);
-    res.json(usage);
-  }));
-
-  return router;
+export function registerUsageRoutes(app: FastifyInstance, { rateLimiter }: Deps): void {
+  app.get(
+    '/api/ai/usage',
+    { preHandler: [requireUser] },
+    async (request) => {
+      const { organizationId } = request.user!;
+      return rateLimiter.getUsage(organizationId);
+    },
+  );
 }

@@ -1,4 +1,6 @@
+import { isAxiosError } from 'axios';
 import { apiClient } from '@/lib/api/client';
+import { avatarChatKey, avatarChatMissCache } from '@/lib/cache/blob-url-cache';
 import { getApiBaseUrl } from '@/lib/api/public-api-base';
 import type { BDAccount, BdSyncFolder } from '@/lib/types/bd-account';
 import type { BdDialogsByFoldersResponse, SyncChatRow } from '@/lib/types/bd-connect';
@@ -19,6 +21,37 @@ export async function listBdAccounts(): Promise<BDAccount[]> {
 
 export async function getBdAccount(accountId: string): Promise<BDAccount> {
   const { data } = await apiClient.get<BDAccount>(`/api/bd-accounts/${accountId}`);
+  return data;
+}
+
+export type BdHealthRiskRow = {
+  id: string;
+  telegram_id?: string | null;
+  display_name?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  username?: string | null;
+  flood_wait_until?: string | null;
+  spam_restricted_at?: string | null;
+  peer_flood_count_1h?: number | null;
+  connection_state?: string | null;
+  sync_error?: string | null;
+  last_status_message?: string | null;
+  last_status?: string | null;
+};
+
+export type BdAccountHealthSummary = {
+  generatedAt: string;
+  floodActiveCount: number;
+  spamRestrictedCount: number;
+  limitsConfiguredCount: number;
+  warmingRunningGroups: number;
+  campaigns: { active: number; paused: number; draft: number; completed: number };
+  riskAccounts: BdHealthRiskRow[];
+};
+
+export async function getBdAccountHealthSummary(): Promise<BdAccountHealthSummary> {
+  const { data } = await apiClient.get<BdAccountHealthSummary>('/api/bd-accounts/health-summary');
   return data;
 }
 
@@ -58,6 +91,26 @@ export async function deleteBdAccount(accountId: string): Promise<void> {
 
 export async function patchBdAccount(accountId: string, body: Record<string, unknown>): Promise<BDAccount> {
   const { data } = await apiClient.patch<BDAccount>(`/api/bd-accounts/${accountId}`, body);
+  return data;
+}
+
+export async function postSpamBotCheck(accountId: string): Promise<{
+  restricted: boolean;
+  classification: string;
+  summary: string;
+  rawSnippet: string;
+}> {
+  const { data } = await apiClient.post(`/api/bd-accounts/${accountId}/spambot-check`);
+  return data as {
+    restricted: boolean;
+    classification: string;
+    summary: string;
+    rawSnippet: string;
+  };
+}
+
+export async function postSpamClear(accountId: string): Promise<BDAccount> {
+  const { data } = await apiClient.post<BDAccount>(`/api/bd-accounts/${accountId}/spam-clear`);
   return data;
 }
 
@@ -112,13 +165,25 @@ export async function fetchBdAccountAvatarBlob(accountId: string): Promise<Blob 
 
 /** GET …/chats/:channelId/avatar — used by messaging / CRM / pipeline chat avatars (with blob URL cache in components). */
 export async function fetchBdAccountChatAvatarBlob(accountId: string, channelId: string): Promise<Blob | null> {
+  const missKey = avatarChatKey(accountId.trim(), channelId.trim());
+  if (avatarChatMissCache.isMissing(missKey)) {
+    return null;
+  }
   try {
     const { data } = await apiClient.get<Blob>(
       `/api/bd-accounts/${accountId}/chats/${channelId}/avatar`,
       { responseType: 'blob' }
     );
-    return data instanceof Blob && data.size > 0 ? data : null;
-  } catch {
+    if (data instanceof Blob && data.size > 0) {
+      avatarChatMissCache.clear(missKey);
+      return data;
+    }
+    avatarChatMissCache.markMissing(missKey);
+    return null;
+  } catch (e: unknown) {
+    if (isAxiosError(e) && e.response?.status === 404) {
+      avatarChatMissCache.markMissing(missKey);
+    }
     return null;
   }
 }

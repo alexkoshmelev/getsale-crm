@@ -1,6 +1,6 @@
 {
   "name": "@getsale/user-service",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -9,22 +9,18 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "zod": "^3.25.76",
-    "express": "^4.18.2",
-    "pg": "^8.11.3",
-    "stripe": "^14.7.0",
+    "@getsale/service-framework": "*",
+    "@getsale/events": "*",
     "@getsale/logger": "*",
-    "@getsale/service-core": "*",
-    "@getsale/utils": "*",
+    "@getsale/queue": "*",
+    "@getsale/cache": "*",
     "@getsale/types": "*",
-    "@getsale/events": "*"
+    "stripe": "^22.0.1",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
-    "@types/pg": "^8.10.9",
-    "@types/node": "^20.10.0",
-    "tsx": "^4.7.0",
-    "typescript": "^5.3.0"
+    "@types/node": "^24.12.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.0"
   }
 }
-

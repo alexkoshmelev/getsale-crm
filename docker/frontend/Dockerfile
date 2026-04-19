@@ -1,7 +1,7 @@
 # Production Dockerfile for frontend (Next.js).
 # Uses standalone output for minimal image (no full node_modules in final stage).
 # Build: docker build -f docker/frontend/Dockerfile ./frontend -t getsale-crm-frontend .
-FROM node:22-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /app
 COPY package*.json ./
@@ -9,9 +9,9 @@ RUN npm install
 COPY . .
 
 # Build-time env (NEXT_PUBLIC_* must be set at build for client bundle)
-# API_URL: internal hostname for next.config rewrites (/api/* → gateway). Same Docker network as api-gateway.
+# API_URL: internal hostname for next.config rewrites (/api/* → gateway). Must match docker-compose service name `gateway`.
 # Without this, rewrites fall back to NEXT_PUBLIC_API_URL and the browser may call api-crm cross-origin → CORS/OPTIONS issues.
-ARG API_URL=http://api-gateway:8000
+ARG API_URL=http://gateway:8000
 ENV API_URL=${API_URL}
 ARG NEXT_PUBLIC_API_URL=https://api-crm.getsale.ai
 ARG NEXT_PUBLIC_WS_URL=wss://ws-crm.getsale.ai
@@ -20,7 +20,7 @@ ENV NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
 RUN npm run build
 
 # Final stage: only standalone server + static + public (no full node_modules)
-FROM node:22-alpine
+FROM node:24-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000

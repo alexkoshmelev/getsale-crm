@@ -49,6 +49,29 @@ export interface BDAccount {
   disconnect_reason?: string | null;
   last_error_code?: string | null;
   last_error_at?: string | null;
+  /** Active Telegram FLOOD_WAIT window (ISO). */
+  flood_wait_until?: string | null;
+  flood_wait_seconds?: number | null;
+  /** Last flood reason (op + error), for support / UI. */
+  flood_reason?: string | null;
+  /** When flood was last recorded. */
+  flood_last_at?: string | null;
+  /** Telegram SpamBot / escalation marked account as restricted. */
+  spam_restricted_at?: string | null;
+  spam_restriction_source?: string | null;
+  peer_flood_count_1h?: number | null;
+  last_spambot_check_at?: string | null;
+  last_spambot_result?: string | null;
+  send_blocked_until?: string | null;
+  /** When false, optional runtime activation (future gateway feature). */
+  gramjs_runtime_enabled?: boolean;
+  timezone?: string | null;
+  working_hours_start?: string | null;
+  working_hours_end?: string | null;
+  working_days?: number[] | null;
+  auto_responder_enabled?: boolean;
+  auto_responder_system_prompt?: string | null;
+  auto_responder_history_count?: number;
   /** Unread across synced chats (messaging aggregate). */
   unread_count?: number;
   /** Demo: DB-only, send disabled. */

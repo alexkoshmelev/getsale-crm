@@ -1,0 +1,29 @@
+{
+  "name": "@getsale/service-framework",
+  "version": "2.0.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@getsale/events": "*",
+    "@getsale/logger": "*",
+    "@getsale/queue": "*",
+    "@getsale/types": "*",
+    "fastify": "^5.3.3",
+    "@fastify/cors": "^11.0.0",
+    "@fastify/helmet": "^13.0.1",
+    "@fastify/cookie": "^11.0.0",
+    "pg": "^8.16.0",
+    "ioredis": "^5.4.2",
+    "prom-client": "^15.1.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0",
+    "@types/node": "^24.12.2",
+    "typescript": "^5.9.0"
+  }
+}

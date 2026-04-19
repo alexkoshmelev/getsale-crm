@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { clsx } from 'clsx';
-import { Plus, MessageSquare, Clock, Pencil, Trash2, GripVertical, Eye } from 'lucide-react';
+import { Plus, MessageSquare, Clock, Pencil, Trash2, GripVertical, Eye, EyeOff } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import {
   createCampaignTemplate,
@@ -358,6 +358,18 @@ export function SequenceBuilderCanvas({
     }
   };
 
+  const handleToggleStepHidden = async (step: CampaignSequenceStep, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await updateCampaignSequenceStep(campaignId, step.id, {
+        isHidden: !Boolean(step.is_hidden),
+      });
+      onUpdate();
+    } catch (err) {
+      console.error('Failed to toggle step visibility', err);
+    }
+  };
+
   const insertVariable = (v: string) => {
     setFormContent((prev) => prev + v);
   };
@@ -388,7 +400,9 @@ export function SequenceBuilderCanvas({
             </div>
           ) : (
             <>
-              {sortedSteps.map((step, index) => (
+              {sortedSteps.map((step, index) => {
+                const stepHidden = Boolean(step.is_hidden);
+                return (
                 <div
                   key={step.id}
                   className="flex flex-col items-center w-full max-w-2xl mx-auto"
@@ -406,11 +420,12 @@ export function SequenceBuilderCanvas({
                     className={clsx(
                       'w-full rounded-xl border border-border bg-card overflow-hidden transition-shadow hover:shadow-soft',
                       isDraft && 'cursor-pointer',
-                      draggedStepId === step.id && 'opacity-60'
+                      draggedStepId === step.id && 'opacity-60',
+                      stepHidden && 'opacity-60 border-dashed'
                     )}
                     onClick={() => isDraft && openEdit(step)}
                   >
-                    <div className="p-4 flex items-start justify-between gap-4">
+                    <div className={clsx('p-4 flex items-start justify-between gap-4', stepHidden && 'line-through decoration-muted-foreground/80')}>
                       <div className="flex gap-3 min-w-0 flex-1">
                         {isDraft && (
                           <div
@@ -432,32 +447,48 @@ export function SequenceBuilderCanvas({
                             <span className="text-xs px-2 py-0.5 rounded-md bg-muted text-muted-foreground capitalize">
                               {step.channel || 'telegram'}
                             </span>
+                            {stepHidden && (
+                              <span className="text-xs px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-700 dark:text-amber-400">
+                                {t('campaigns.stepHiddenBadge', { defaultValue: 'Скрыто' })}
+                              </span>
+                            )}
                           </div>
                           <p className="text-sm text-muted-foreground line-clamp-2">
                             {(step.content || '').replace(/\{\{[^}]+\}\}/g, '…') || '—'}
                           </p>
                         </div>
                       </div>
-                      {isDraft && (
-                        <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            type="button"
-                            onClick={() => openEdit(step)}
-                            className="p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground"
-                            title={t('campaigns.editStep')}
-                          >
-                            <Pencil className="w-4 h-4" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteStep(step)}
-                            className="p-2 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
-                            title={t('campaigns.deleteStep')}
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      )}
+                      <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          onClick={(ev) => handleToggleStepHidden(step, ev)}
+                          className="p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground"
+                          title={stepHidden ? t('campaigns.showStep', { defaultValue: 'Показать в последовательности' }) : t('campaigns.hideStep', { defaultValue: 'Скрыть (не отправлять)' })}
+                          aria-pressed={stepHidden}
+                        >
+                          {stepHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                        {isDraft && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => openEdit(step)}
+                              className="p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground"
+                              title={t('campaigns.editStep')}
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteStep(step)}
+                              className="p-2 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
+                              title={t('campaigns.deleteStep')}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
                     {index < sortedSteps.length - 1 && (
                       <div className="px-4 pb-2">
@@ -481,7 +512,8 @@ export function SequenceBuilderCanvas({
                     <div className="w-px h-6 bg-border shrink-0" aria-hidden />
                   )}
                 </div>
-              ))}
+              );
+              })}
               {isDraft && (
                 <>
                   <div className="w-px h-6 bg-border shrink-0" aria-hidden />

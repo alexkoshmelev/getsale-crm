@@ -146,20 +146,6 @@ export async function seed(knex: Knex): Promise<void> {
     }
     console.log('✅ Organization members & profiles');
 
-    const [team] = await knex('teams')
-      .insert({ organization_id: org.id, name: 'Demo Team', created_by: users[0].id })
-      .returning('*');
-    for (let i = 0; i < users.length; i++) {
-      await knex('team_members').insert({
-        team_id: team.id,
-        user_id: users[i].id,
-        role: i === 0 ? 'owner' : 'member',
-        invited_by: users[0].id,
-        status: 'active',
-      }).onConflict(['team_id', 'user_id']).merge(['role']);
-    }
-    console.log('✅ Team & members');
-
     const [pipelineRow] = await knex('pipelines')
       .insert({ organization_id: org.id, name: 'Sales Pipeline', description: 'Демо-воронка продаж', is_default: true })
       .returning('*');

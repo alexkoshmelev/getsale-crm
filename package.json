@@ -5,38 +5,37 @@
   "private": true,
   "workspaces": [
     "services/*",
-    "shared/*"
+    "shared/*",
+    "shared/telegram"
   ],
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev": "docker-compose up -d",
-    "dev:logs": "docker-compose logs -f",
-    "dev:down": "docker-compose down",
-    "dev:clean": "docker-compose down -v",
-    "build": "npm run build --workspaces",
+    "dev": "docker compose -f docker-compose.yml up -d",
+    "dev:logs": "docker compose -f docker-compose.yml logs -f",
+    "dev:down": "docker compose -f docker-compose.yml down",
+    "dev:clean": "docker compose -f docker-compose.yml down -v",
+    "build": "npm run build:stack",
+    "build:stack": "npm run build -w shared/types -w shared/logger -w shared/events && npm run build -w shared/cache -w shared/queue -w shared/service-framework -w shared/telegram && npm run build -w services/gateway -w services/auth-service -w services/core-api -w services/messaging-api -w services/telegram-session-manager -w services/campaign-orchestrator -w services/campaign-worker -w services/automation-engine -w services/notification-hub -w services/analytics-worker -w services/user-service -w services/ai-service",
     "lint": "npm run lint --workspaces",
     "typecheck": "npm run typecheck --workspaces",
     "migrate": "cd migrations && npm run migrate",
     "migrate:rollback": "cd migrations && npm run migrate:rollback",
     "migrate:status": "cd migrations && npm run migrate:status",
     "migrate:make": "cd migrations && npm run migrate:make",
-    "seed": "cd migrations && npm run seed",
-    "stage2-closure": "node scripts/stage2-closure-check.mjs",
-    "stage3-ids": "node scripts/print-stage3-ids.mjs",
-    "stage3-e2e": "node scripts/stage3-e2e-test.mjs"
+    "seed": "cd migrations && npm run seed"
   },
   "engines": {
-    "node": ">=22.0.0",
+    "node": ">=24.0.0",
     "npm": ">=10.0.0"
   },
   "devDependencies": {
-    "@types/node": "^20.10.0",
-    "@types/supertest": "^6.0.3",
-    "@vitest/coverage-v8": "^3.2.4",
-    "pg": "^8.11.3",
+    "@types/node": "^24.12.2",
+    "@types/supertest": "^7.2.0",
+    "@vitest/coverage-v8": "^4.1.4",
+    "pg": "^8.16.0",
     "supertest": "^7.2.2",
-    "typescript": "^5.3.0",
-    "vitest": "^3.2.4"
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.4"
   }
 }

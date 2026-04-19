@@ -1,13 +1,15 @@
-import { Router } from 'express';
+import { FastifyInstance } from 'fastify';
 import OpenAI from 'openai';
-import { RedisClient, RabbitMQClient } from '@getsale/utils';
+import { RedisClient } from '@getsale/cache';
+import { RabbitMQClient } from '@getsale/queue';
 import { EventType, AIDraftGeneratedEvent } from '@getsale/events';
 import { AIDraftStatus } from '@getsale/types';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, AppError, ErrorCodes, validate } from '@getsale/service-core';
+import { requireUser, validate, AppError, ErrorCodes } from '@getsale/service-framework';
 import { DRAFT_SYSTEM, PROMPT_VERSION } from '../prompts';
 import { AIRateLimiter } from '../rate-limiter';
 import { AiDraftGenerateSchema } from '../validation';
+import type { AIModels } from '../openai-client';
 
 interface Deps {
   openai: OpenAI | null;
@@ -15,106 +17,121 @@ interface Deps {
   rabbitmq: RabbitMQClient;
   log: Logger;
   rateLimiter: AIRateLimiter;
-  models: { draft: string; analyze: string; summarize: string };
+  models: AIModels;
 }
 
-export function draftsRouter({ openai, redis, rabbitmq, log, rateLimiter, models }: Deps): Router {
-  const router = Router();
+export function registerDraftRoutes(app: FastifyInstance, deps: Deps): void {
+  const { openai, redis, rabbitmq, log, rateLimiter, models } = deps;
 
-  router.post('/generate', validate(AiDraftGenerateSchema), asyncHandler(async (req, res) => {
-    if (!openai) throw new AppError(503, 'AI service not configured', ErrorCodes.SERVICE_UNAVAILABLE);
+  app.post(
+    '/api/ai/drafts/generate',
+    { preHandler: [requireUser, validate(AiDraftGenerateSchema)] },
+    async (request) => {
+      if (!openai) throw new AppError(503, 'AI service not configured', ErrorCodes.SERVICE_UNAVAILABLE);
 
-    const { id: userId, organizationId } = req.user;
-    const { contactId, context } = req.body;
+      const { organizationId } = request.user!;
+      const { contactId, context } = request.body as { contactId?: string; context?: string };
 
-    const rateCheck = await rateLimiter.check(organizationId);
-    if (!rateCheck.allowed) {
-      throw new AppError(429, `AI rate limit exceeded. Reset in ${rateCheck.resetInSeconds}s`, ErrorCodes.RATE_LIMITED);
-    }
+      const rateCheck = await rateLimiter.check(organizationId);
+      if (!rateCheck.allowed) {
+        throw new AppError(429, `AI rate limit exceeded. Reset in ${rateCheck.resetInSeconds}s`, ErrorCodes.RATE_LIMITED);
+      }
 
-    const contactKey = contactId ? `contact:${contactId}` : null;
-    const cached = contactKey ? await redis.get<{ name: string; company: string }>(contactKey) : null;
-    const contact = cached ?? { name: 'Contact', company: 'Company' };
+      const contactKey = contactId ? `contact:${contactId}` : null;
+      const cached = contactKey ? await redis.get<{ name: string; company: string }>(contactKey) : null;
+      const contact = cached ?? { name: 'Contact', company: 'Company' };
 
-    const completion = await openai.chat.completions.create({
-      model: models.draft,
-      messages: [
-        { role: 'system', content: DRAFT_SYSTEM },
-        { role: 'user', content: `Generate a response to this message: "${context || ''}" for contact ${contact.name}` },
-      ],
-      temperature: 0.7,
-      max_tokens: 200,
-    });
+      const completion = await openai.chat.completions.create({
+        model: models.draft,
+        messages: [
+          { role: 'system', content: DRAFT_SYSTEM },
+          { role: 'user', content: `Generate a response to this message: "${context || ''}" for contact ${contact.name}` },
+        ],
+        temperature: 0.7,
+        max_tokens: 200,
+      });
 
-    await rateLimiter.increment(organizationId);
+      await rateLimiter.increment(organizationId);
 
-    const draftContent = completion.choices[0].message.content || '';
-    const draft = {
-      id: crypto.randomUUID(),
-      organizationId,
-      contactId,
-      content: draftContent,
-      status: AIDraftStatus.GENERATED,
-      generatedBy: 'ai-agent',
-      promptVersion: PROMPT_VERSION,
-      model: models.draft,
-      createdAt: new Date(),
-    };
+      const draftContent = completion.choices[0].message.content || '';
+      const draft = {
+        id: crypto.randomUUID(),
+        organizationId,
+        contactId,
+        content: draftContent,
+        status: AIDraftStatus.GENERATED,
+        generatedBy: 'ai-agent',
+        promptVersion: PROMPT_VERSION,
+        model: models.draft,
+        createdAt: new Date(),
+      };
 
-    await redis.set(`draft:${draft.id}`, draft, 3600);
+      await redis.set(`draft:${draft.id}`, draft, 3600);
 
-    const event: AIDraftGeneratedEvent = {
-      id: crypto.randomUUID(),
-      type: EventType.AI_DRAFT_GENERATED,
-      timestamp: new Date(),
-      organizationId,
-      correlationId: req.correlationId,
-      data: { draftId: draft.id, contactId, content: draftContent },
-    };
-    await rabbitmq.publishEvent(event);
+      const event: AIDraftGeneratedEvent = {
+        id: crypto.randomUUID(),
+        type: EventType.AI_DRAFT_GENERATED,
+        timestamp: new Date(),
+        organizationId,
+        correlationId: request.correlationId,
+        data: { draftId: draft.id, contactId, content: draftContent },
+      };
+      await rabbitmq.publishEvent(event);
 
-    log.info({
-      message: 'Draft generated',
-      entity_type: 'ai_draft', entity_id: draft.id,
-      model: models.draft, organization_id: organizationId,
-    });
+      log.info({
+        message: 'Draft generated',
+        entity_type: 'ai_draft',
+        entity_id: draft.id,
+        model: models.draft,
+        organization_id: organizationId,
+      });
 
-    res.json(draft);
-  }));
+      return draft;
+    },
+  );
 
-  router.get('/:id', asyncHandler(async (req, res) => {
-    const { organizationId } = req.user;
-    const draft = await redis.get<Record<string, unknown>>(`draft:${req.params.id}`);
-    if (!draft) throw new AppError(404, 'Draft not found', ErrorCodes.NOT_FOUND);
-    if (draft.organizationId !== organizationId) {
-      throw new AppError(404, 'Draft not found', ErrorCodes.NOT_FOUND);
-    }
-    res.json(draft);
-  }));
+  app.get(
+    '/api/ai/drafts/:id',
+    { preHandler: [requireUser] },
+    async (request) => {
+      const { organizationId } = request.user!;
+      const { id } = request.params as { id: string };
 
-  router.post('/:id/approve', asyncHandler(async (req, res) => {
-    const { id: userId, organizationId } = req.user;
-    const draft = await redis.get<Record<string, unknown>>(`draft:${req.params.id}`);
-    if (!draft) throw new AppError(404, 'Draft not found', ErrorCodes.NOT_FOUND);
-    if (draft.organizationId !== organizationId) {
-      throw new AppError(404, 'Draft not found', ErrorCodes.NOT_FOUND);
-    }
+      const draft = await redis.get<Record<string, unknown>>(`draft:${id}`);
+      if (!draft || draft.organizationId !== organizationId) {
+        throw new AppError(404, 'Draft not found', ErrorCodes.NOT_FOUND);
+      }
 
-    const updatedDraft = { ...draft, status: AIDraftStatus.APPROVED, approvedBy: userId };
-    await redis.set(`draft:${req.params.id}`, updatedDraft, 3600);
+      return draft;
+    },
+  );
 
-    await rabbitmq.publishEvent({
-      id: crypto.randomUUID(),
-      type: EventType.AI_DRAFT_APPROVED,
-      timestamp: new Date(),
-      organizationId,
-      userId,
-      correlationId: req.correlationId,
-      data: { draftId: req.params.id },
-    } as any);
+  app.post(
+    '/api/ai/drafts/:id/approve',
+    { preHandler: [requireUser] },
+    async (request) => {
+      const { id: userId, organizationId } = request.user!;
+      const { id } = request.params as { id: string };
 
-    res.json(updatedDraft);
-  }));
+      const draft = await redis.get<Record<string, unknown>>(`draft:${id}`);
+      if (!draft || draft.organizationId !== organizationId) {
+        throw new AppError(404, 'Draft not found', ErrorCodes.NOT_FOUND);
+      }
 
-  return router;
+      const updatedDraft = { ...draft, status: AIDraftStatus.APPROVED, approvedBy: userId };
+      await redis.set(`draft:${id}`, updatedDraft, 3600);
+
+      await rabbitmq.publishEvent({
+        id: crypto.randomUUID(),
+        type: EventType.AI_DRAFT_APPROVED,
+        timestamp: new Date(),
+        organizationId,
+        userId,
+        correlationId: request.correlationId,
+        data: { draftId: id },
+      } as any);
+
+      return updatedDraft;
+    },
+  );
 }

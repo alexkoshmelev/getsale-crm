@@ -2,68 +2,113 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ai-service
-  namespace: getsale-crm
+  namespace: getsale
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: getsale
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
-      app: ai-service
+      app.kubernetes.io/name: ai-service
   template:
     metadata:
       labels:
-        app: ai-service
+        app.kubernetes.io/name: ai-service
+        app.kubernetes.io/part-of: getsale
     spec:
       containers:
-      - name: ai-service
-        image: getsale/ai-service:latest
-        ports:
-        - containerPort: 3005
-        env:
-        - name: NODE_ENV
-          value: "production"
-        - name: PORT
-          value: "3005"
-        - name: REDIS_URL
-          value: "redis://redis:6379"
-        - name: RABBITMQ_URL
-          valueFrom:
-            secretKeyRef:
-              name: rabbitmq-secret
-              key: url
-        - name: OPENAI_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: openai-secret
-              key: api-key
-        resources:
-          requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "2Gi"
-            cpu: "2000m"
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 3005
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 3005
-          initialDelaySeconds: 10
-          periodSeconds: 5
+        - name: ai-service
+          image: getsale/ai-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4010
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: getsale-common-config
+            - secretRef:
+                name: getsale-secrets
+          env:
+            - name: PORT
+              value: "4010"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: getsale-secrets
+                  key: OPENAI_API_KEY
+            - name: OPENROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: getsale-secrets
+                  key: OPENROUTER_API_KEY
+            - name: OPENROUTER_CAMPAIGN_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: getsale-common-config
+                  key: OPENROUTER_CAMPAIGN_MODEL
+            - name: OPENROUTER_AUTO_RESPOND_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: getsale-common-config
+                  key: OPENROUTER_AUTO_RESPOND_MODEL
+            - name: OPENROUTER_CHAT_SUMMARIZE_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: getsale-common-config
+                  key: OPENROUTER_CHAT_SUMMARIZE_MODEL
+            - name: OPENROUTER_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: getsale-common-config
+                  key: OPENROUTER_MODEL
+            - name: OPENROUTER_MAX_TOKENS
+              valueFrom:
+                configMapKeyRef:
+                  name: getsale-common-config
+                  key: OPENROUTER_MAX_TOKENS
+            - name: OPENROUTER_TIMEOUT_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: getsale-common-config
+                  key: OPENROUTER_TIMEOUT_MS
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4010
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4010
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: ai-service
-  namespace: getsale-crm
+  namespace: getsale
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: getsale
 spec:
+  type: ClusterIP
   selector:
-    app: ai-service
+    app.kubernetes.io/name: ai-service
   ports:
-  - port: 3005
-    targetPort: 3005
-
+    - port: 4010
+      targetPort: 4010
+      protocol: TCP

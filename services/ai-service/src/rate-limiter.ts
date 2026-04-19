@@ -1,4 +1,4 @@
-import { RedisClient } from '@getsale/utils';
+import { RedisClient } from '@getsale/cache';
 
 export interface RateLimitResult {
   allowed: boolean;
@@ -12,17 +12,16 @@ export class AIRateLimiter {
   private maxPerHour: number;
   private prefix: string;
 
-  constructor(redis: RedisClient, maxPerOrgPerHour: number = 200) {
+  constructor(redis: RedisClient, maxPerOrgPerHour = 200) {
     this.redis = redis;
     this.maxPerHour = maxPerOrgPerHour;
     this.prefix = 'ai:rate';
   }
 
   async check(organizationId: string): Promise<RateLimitResult> {
-    const key = `${this.prefix}:${organizationId}`;
     const now = Math.floor(Date.now() / 1000);
     const windowStart = now - (now % 3600);
-    const windowKey = `${key}:${windowStart}`;
+    const windowKey = `${this.prefix}:${organizationId}:${windowStart}`;
 
     const current = await this.redis.get<number>(windowKey);
     const count = current ?? 0;

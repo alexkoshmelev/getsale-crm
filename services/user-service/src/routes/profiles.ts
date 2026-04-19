@@ -1,43 +1,45 @@
-import { Router } from 'express';
-import { Pool } from 'pg';
+import { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { requireUser, validate, type DatabasePools } from '@getsale/service-framework';
 import { Logger } from '@getsale/logger';
-import { asyncHandler, requireUser, validate } from '@getsale/service-core';
-import { UsProfileUpdateSchema } from '../validation';
 
 interface Deps {
-  pool: Pool;
+  db: DatabasePools;
   log: Logger;
 }
 
-export function profileRouter({ pool, log }: Deps): Router {
-  const router = Router();
+const ProfileUpdateSchema = z.object({
+  firstName: z.string().max(200).trim().optional().nullable(),
+  lastName: z.string().max(200).trim().optional().nullable(),
+  avatarUrl: z.string().max(2000).trim().optional().nullable(),
+  timezone: z.string().max(128).optional().nullable(),
+  preferences: z.record(z.string(), z.unknown()).optional(),
+});
 
-  router.use(requireUser());
+export function registerProfileRoutes(app: FastifyInstance, { db, log }: Deps): void {
+  app.get('/api/users/profile', { preHandler: [requireUser] }, async (request) => {
+    const { id, organizationId } = request.user!;
 
-  router.get('/profile', asyncHandler(async (req, res) => {
-    const { id, organizationId } = req.user;
-
-    let result = await pool.query('SELECT * FROM user_profiles WHERE user_id = $1', [id]);
+    let result = await db.read.query('SELECT * FROM user_profiles WHERE user_id = $1', [id]);
 
     if (result.rows.length === 0) {
-      log.info({ message: 'Creating default profile', user_id: id, correlation_id: req.correlationId });
-      const insertResult = await pool.query(
+      log.info({ message: 'Creating default profile', user_id: id, correlation_id: request.correlationId });
+      result = await db.write.query(
         `INSERT INTO user_profiles (user_id, organization_id, first_name, last_name, preferences)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING *`,
-        [id, organizationId, null, null, JSON.stringify({})]
+        [id, organizationId, null, null, JSON.stringify({})],
       );
-      result = insertResult;
     }
 
-    res.json(result.rows[0]);
-  }));
+    return result.rows[0];
+  });
 
-  router.put('/profile', validate(UsProfileUpdateSchema), asyncHandler(async (req, res) => {
-    const { id, organizationId } = req.user;
-    const { firstName, lastName, avatarUrl, timezone, preferences } = req.body;
+  app.put('/api/users/profile', { preHandler: [requireUser, validate(ProfileUpdateSchema)] }, async (request) => {
+    const { id, organizationId } = request.user!;
+    const { firstName, lastName, avatarUrl, timezone, preferences } = request.body as z.infer<typeof ProfileUpdateSchema>;
 
-    const result = await pool.query(
+    const result = await db.write.query(
       `INSERT INTO user_profiles (user_id, organization_id, first_name, last_name, avatar_url, timezone, preferences)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (user_id)
@@ -49,11 +51,9 @@ export function profileRouter({ pool, log }: Deps): Router {
          preferences = EXCLUDED.preferences,
          updated_at = NOW()
        RETURNING *`,
-      [id, organizationId, firstName, lastName, avatarUrl, timezone, JSON.stringify(preferences || {})]
+      [id, organizationId, firstName, lastName, avatarUrl, timezone, JSON.stringify(preferences || {})],
     );
 
-    res.json(result.rows[0]);
-  }));
-
-  return router;
+    return result.rows[0];
+  });
 }

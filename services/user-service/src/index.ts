@@ -1,28 +1,29 @@
 import Stripe from 'stripe';
-import { createServiceApp } from '@getsale/service-core';
-import { profileRouter } from './routes/profiles';
-import { subscriptionRouter } from './routes/subscription';
-import { stripeWebhookRouter } from './routes/stripe-webhook';
-import { teamRouter } from './routes/team';
+import { createService } from '@getsale/service-framework';
+import { registerProfileRoutes } from './routes/profiles';
+import { registerSubscriptionRoutes } from './routes/subscription';
+import { registerStripeWebhookRoutes } from './routes/stripe-webhook';
 
 async function main() {
-  const ctx = await createServiceApp({ name: 'user-service', port: 3006 });
-
-  const { pool, rabbitmq, log } = ctx;
-  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
-    apiVersion: '2023-10-16',
+  const ctx = await createService({
+    name: 'user-service',
+    port: parseInt(process.env.PORT || '4009', 10),
   });
 
-  const deps = { pool, rabbitmq, log };
-  ctx.mount('/api/users', profileRouter(deps));
-  ctx.mount('/api/users', subscriptionRouter({ ...deps, stripe }));
-  ctx.mount('/api/users/stripe-webhook', stripeWebhookRouter({ ...deps, stripe }));
-  ctx.mount('/api/users', teamRouter(deps));
+  const { app, db, rabbitmq, log } = ctx;
 
-  ctx.start();
+  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
+    apiVersion: Stripe.API_VERSION,
+  });
+
+  registerProfileRoutes(app, { db, log });
+  registerSubscriptionRoutes(app, { db, rabbitmq, log, stripe });
+  registerStripeWebhookRoutes(app, { db, rabbitmq, log, stripe });
+
+  await ctx.start();
 }
 
 main().catch((err) => {
-  console.error('Fatal: User service failed to start:', err);
+  console.error('user-service failed to start', err);
   process.exit(1);
 });

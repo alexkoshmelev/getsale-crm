@@ -1,6 +1,6 @@
 import { vi } from 'vitest';
 import type { Event } from '@getsale/events';
-import type { RabbitMQClient } from '@getsale/utils';
+import type { RabbitMQClient } from '@getsale/queue';
 
 export interface PublishedEvent {
   event: Event;
@@ -21,6 +21,7 @@ export function createMockRabbitMQ(): MockRabbitMQ {
     publishEvent: vi.fn(async (event: Event, exchange: string = 'events'): Promise<void> => {
       publishedEvents.push({ event, exchange });
     }),
+    publishCommand: vi.fn(async (): Promise<void> => {}),
     publishToDlq: vi.fn(async (): Promise<void> => {}),
     subscribeToEvents: vi.fn(async (): Promise<void> => {}),
     isConnected: vi.fn(() => true),

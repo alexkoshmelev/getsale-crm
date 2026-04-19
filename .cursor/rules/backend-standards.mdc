@@ -6,6 +6,8 @@ alwaysApply: false
 
 # Backend Service Standards
 
+> **Backend services** live under `services/` using Fastify and `@getsale/service-framework`. The legacy Express monolith was removed; this tree is the only backend layout.
+
 ## Service Structure
 
 Every service MUST follow this file structure:
@@ -20,12 +22,12 @@ services/<name>/src/
 
 ## Required Patterns
 
-### 1. Use `createServiceApp()` from `@getsale/service-core`
+### 1. Use `createService()` from `@getsale/service-framework`
 ```typescript
-import { createServiceApp } from '@getsale/service-core';
-const { app, pool, rabbitmq, log } = await createServiceApp({
-  name: 'crm-service',
-  port: 3002,
+import { createService } from '@getsale/service-framework';
+const { app, pool, rabbitmq, log } = await createService({
+  name: 'core-api',
+  port: 4002,
 });
 ```
 
@@ -39,29 +41,29 @@ log.info({ message: 'Deal created', entity_type: 'deal', entity_id: dealId });
 
 ### 3. All endpoints MUST validate input with Zod
 ```typescript
-import { validate } from '@getsale/service-core';
-router.post('/', validate(CreateSchema), async (req, res) => { ... });
+import { validate } from '@getsale/service-framework';
+app.post('/', { preHandler: validate(CreateSchema) }, async (request, reply) => { ... });
 ```
 
-**Exceptions (C4):** **api-gateway** — thin proxy/rate-limit only; no business `validation.ts` required. Prefer Zod on services that own data (**team**, **analytics**, **activity** — centralized `validation.ts` with a short prefix e.g. `Tm*`, `An*`, `Ac*`).
+**Exceptions (C4):** **gateway** — thin proxy/rate-limit only; no business `validation.ts` required. Prefer Zod on services that own data (**core-api**, **messaging-api**, **user-service** — centralized `validation.ts`).
 
 ### 4. Use `AppError` for business errors
 ```typescript
-import { AppError, ErrorCodes } from '@getsale/service-core';
+import { AppError, ErrorCodes } from '@getsale/service-framework';
 throw new AppError(404, 'Deal not found', ErrorCodes.NOT_FOUND);
 ```
 
-### 5. Always use `req.user` from middleware (not manual header extraction)
+### 5. Always use `request.user` from middleware (not manual header extraction)
 ```typescript
 // BAD
-const userId = req.headers['x-user-id'] as string;
-// GOOD — set by getUser middleware
-const { id, organizationId, role } = req.user;
+const userId = request.headers['x-user-id'] as string;
+// GOOD — set by auth middleware
+const { id, organizationId, role } = request.user;
 ```
 
-### 6. Use `req.correlationId` for correlation
+### 6. Use `request.correlationId` for correlation
 ```typescript
-log.info({ message: 'Processing', correlation_id: req.correlationId });
+log.info({ message: 'Processing', correlation_id: request.correlationId });
 ```
 
 ### 7. Transactions pattern
@@ -80,19 +82,24 @@ try {
 }
 ```
 
-### 8. Route files export a Router factory
+### 8. Route files register on FastifyInstance
 ```typescript
 // routes/companies.ts
-import { Router } from 'express';
+import { FastifyInstance } from 'fastify';
 import { Pool } from 'pg';
-import { RabbitMQClient } from '@getsale/utils';
+import { RabbitMQClient } from '@getsale/queue';
 import { Logger } from '@getsale/logger';
 
-export function companiesRouter(deps: { pool: Pool; rabbitmq: RabbitMQClient; log: Logger }) {
-  const router = Router();
+export function companiesRoutes(app: FastifyInstance, deps: { pool: Pool; rabbitmq: RabbitMQClient; log: Logger }) {
   const { pool, rabbitmq, log } = deps;
-  // ... routes
-  return router;
+
+  app.get('/', async (request, reply) => {
+    // ...
+  });
+
+  app.post('/', async (request, reply) => {
+    // ...
+  });
 }
 ```
 
@@ -106,17 +113,17 @@ const deals = await pool.query('SELECT * FROM deals WHERE status = $1', [status]
 // GOOD — always filter by organization
 const deals = await pool.query(
   'SELECT * FROM deals WHERE organization_id = $1 AND status = $2',
-  [req.user.organizationId, status]
+  [request.user.organizationId, status]
 );
 ```
 
 ### Never trust client-provided organization_id
 ```typescript
 // BAD — client can forge organization
-const orgId = req.body.organizationId;
+const orgId = request.body.organizationId;
 
 // GOOD — always from authenticated session
-const orgId = req.user.organizationId;
+const orgId = request.user.organizationId;
 ```
 
 ## Rate Limiting
@@ -124,7 +131,7 @@ const orgId = req.user.organizationId;
 - All public endpoints MUST have rate limiting
 - Auth endpoints: strict limits (5 req/min per IP)
 - API endpoints: per-user limits (100 req/min default)
-- Use `express-rate-limit` or service-level middleware
+- Use `@fastify/rate-limit` or gateway-level middleware
 
 ## CORS
 
@@ -136,8 +143,8 @@ const orgId = req.user.organizationId;
 
 Every service MUST expose:
 ```typescript
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
-app.get('/ready', async (req, res) => {
+app.get('/health', async (request, reply) => reply.send({ status: 'ok' }));
+app.get('/ready', async (request, reply) => {
   // check DB, Redis, RabbitMQ connectivity
 });
 ```
@@ -148,7 +155,7 @@ Every service MUST handle SIGTERM:
 ```typescript
 process.on('SIGTERM', async () => {
   log.info({ message: 'Shutting down gracefully' });
-  await server.close();
+  await app.close();
   await pool.end();
   process.exit(0);
 });

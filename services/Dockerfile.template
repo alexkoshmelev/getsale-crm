@@ -1,0 +1,50 @@
+# Multi-stage Dockerfile for backend services (services)
+# Usage: docker build --build-arg SERVICE=gateway -f services/Dockerfile.template .
+
+ARG SERVICE=gateway
+
+FROM node:24-alpine AS builder
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY shared/ ./shared/
+
+ARG SERVICE
+COPY services/${SERVICE}/ ./services/${SERVICE}/
+
+# Patch workspaces: only shared and the service being built
+RUN node -e "\
+  const fs=require('fs');\
+  const p=JSON.parse(fs.readFileSync('package.json','utf8'));\
+  p.workspaces=['shared/*','shared/telegram','services/'+process.argv[1]];\
+  fs.writeFileSync('package.json',JSON.stringify(p,null,2));" "${SERVICE}"
+
+RUN npm install --ignore-scripts
+
+# Build shared libraries in dependency order, then the service
+RUN npm run build -w shared/types && \
+    npm run build -w shared/logger && \
+    npm run build -w shared/events && \
+    npm run build -w shared/cache && \
+    npm run build -w shared/queue && \
+    npm run build -w shared/service-framework && \
+    npm run build -w shared/telegram && \
+    npm run build -w services/${SERVICE}
+
+FROM node:24-alpine AS runner
+WORKDIR /app
+
+RUN addgroup -g 1001 -S nodejs && adduser -S getsale -u 1001
+
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/shared/ ./shared/
+ARG SERVICE
+COPY --from=builder /app/services/${SERVICE}/ ./services/${SERVICE}/
+COPY --from=builder /app/package.json ./package.json
+
+USER getsale
+
+ENV NODE_ENV=production
+ENV SERVICE=${SERVICE}
+
+CMD ["sh", "-c", "exec node services/$SERVICE/dist/index.js"]
