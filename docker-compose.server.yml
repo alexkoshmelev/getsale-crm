@@ -203,8 +203,7 @@ services:
       - "traefik.http.routers.getsale-crm-api.tls.certresolver=myresolver"
       - "traefik.http.routers.getsale-crm-api.middlewares=security-headers"
       - "traefik.http.services.getsale-crm-api.loadbalancer.server.port=8000"
-      # Long responses: some endpoints can take 3–5+ min
-      - "traefik.http.services.getsale-crm-api.transport.respondingTimeouts.readTimeout=5m"
+      # Per-service transport.* labels are invalid on Traefik v3; use entrypoint timeouts on websecure (see Traefik compose).
 
   # ─── Auth Service ───────────────────────────────────────────
   auth-service:
